@@ -22,10 +22,7 @@ cbuffer Frame : register(b0, space1)
 cbuffer Draw : register(b1, space1)
 {
     uint VertexOffset;
-    // IndexOffset is CPU-side geometry metadata; hardware indexed draws select
-    // the index range, so the vertex shader only needs VertexOffset.
-    uint IndexOffset;
-    uint2 _Padding;
+    uint3 _Padding;
 };
 
 VSOutput main(uint vertexIndex : SV_VertexID)

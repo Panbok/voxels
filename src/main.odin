@@ -16,6 +16,28 @@ import "core:mem"
 import "core:os"
 import "core:strings"
 
+//////////////////////////////////////
+// Memory
+//////////////////////////////////////
+
+persistent_slab: [64 * mem.Megabyte]u8
+transient_slab: [16 * mem.Megabyte]u8
+persistent_arena: mem.Arena
+transient_arena: mem.Arena
+persistent_allocator: mem.Allocator
+transient_allocator: mem.Allocator
+
+//////////////////////////////////////
+// Window & GPU
+//////////////////////////////////////
+
+window: ^sdl.Window
+device: ^sdl.GPUDevice
+
+//////////////////////////////////////
+// Types
+/////////////////////////////////////
+
 ShaderType :: enum {
 	Vertex,
 	Fragment,
@@ -33,10 +55,9 @@ Camera :: struct {
 	far_plane:  f32,
 }
 
-Geometry_Handle :: struct {
-	index:      u32,
-	generation: u32,
-}
+///////////////////////////////////////////
+// Geometry
+///////////////////////////////////////////
 
 GeometryID :: distinct u32
 
@@ -54,8 +75,7 @@ Geometry :: struct {
 
 GeometryDrawParams :: struct {
 	vertex_offset: u32, // GeometryVertex elements; added in shader after indexed SV_VertexID
-	index_offset:  u32, // u32 elements; used when selecting an indexed draw range
-	_padding:      [2]u32,
+	_padding:      [3]u32, // extra padding for alignment
 }
 
 GeometryPool :: struct {
@@ -73,6 +93,321 @@ GeometryPool :: struct {
 	index_upload_capacity:  u32, // bytes
 }
 
+INVALID_GEOMETRY_ID :: GeometryID(0)
+GEOMETRY_MAX_GEOMETRIES :: 1024
+GEOMETRY_MAX_VERTICES :: 1_000_000
+GEOMETRY_MAX_INDICES :: 3_000_000
+GEOMETRY_MAX_UPLOAD_VERTICES :: 65_536
+GEOMETRY_MAX_UPLOAD_INDICES :: 196_608
+
+geometry_init :: proc(
+	pool: ^GeometryPool,
+	max_geometries, max_vertices, max_indices, max_upload_vertices, max_upload_indices: u32,
+) {
+	log.assertf(
+		max_geometries > 0 && max_geometries <= GEOMETRY_MAX_GEOMETRIES,
+		"max_geometries must be in range 1..%d (got %d)",
+		GEOMETRY_MAX_GEOMETRIES,
+		max_geometries,
+	)
+	log.assertf(
+		max_vertices > 0 && max_vertices <= GEOMETRY_MAX_VERTICES,
+		"max_vertices must be in range 1..%d (got %d)",
+		GEOMETRY_MAX_VERTICES,
+		max_vertices,
+	)
+	log.assertf(
+		max_indices > 0 && max_indices <= GEOMETRY_MAX_INDICES,
+		"max_indices must be in range 1..%d (got %d)",
+		GEOMETRY_MAX_INDICES,
+		max_indices,
+	)
+	log.assertf(
+		max_upload_vertices > 0 && max_upload_vertices <= GEOMETRY_MAX_UPLOAD_VERTICES,
+		"max_upload_vertices must be in range 1..%d (got %d)",
+		GEOMETRY_MAX_UPLOAD_VERTICES,
+		max_upload_vertices,
+	)
+	log.assertf(
+		max_upload_indices > 0 && max_upload_indices <= GEOMETRY_MAX_UPLOAD_INDICES,
+		"max_upload_indices must be in range 1..%d (got %d)",
+		GEOMETRY_MAX_UPLOAD_INDICES,
+		max_upload_indices,
+	)
+	log.assertf(
+		max_upload_vertices <= max_vertices,
+		"max_upload_vertices must fit inside max_vertices",
+	)
+	log.assertf(
+		max_upload_indices <= max_indices,
+		"max_upload_indices must fit inside max_indices",
+	)
+
+	vertex_buffer_size_wide := u64(max_vertices) * u64(size_of(GeometryVertex))
+	index_buffer_size_wide := u64(max_indices) * u64(size_of(u32))
+	vertex_upload_size_wide := u64(max_upload_vertices) * u64(size_of(GeometryVertex))
+	index_upload_size_wide := u64(max_upload_indices) * u64(size_of(u32))
+
+	log.assertf(
+		vertex_buffer_size_wide <= u64(max(u32)),
+		"vertex buffer size exceeds u32: %d",
+		vertex_buffer_size_wide,
+	)
+	log.assertf(
+		index_buffer_size_wide <= u64(max(u32)),
+		"index buffer size exceeds u32: %d",
+		index_buffer_size_wide,
+	)
+	log.assertf(
+		vertex_upload_size_wide <= u64(max(u32)),
+		"vertex upload buffer size exceeds u32: %d",
+		vertex_upload_size_wide,
+	)
+	log.assertf(
+		index_upload_size_wide <= u64(max(u32)),
+		"index upload buffer size exceeds u32: %d",
+		index_upload_size_wide,
+	)
+
+	vertex_buffer_size := u32(vertex_buffer_size_wide)
+	index_buffer_size := u32(index_buffer_size_wide)
+	vertex_upload_size := u32(vertex_upload_size_wide)
+	index_upload_size := u32(index_upload_size_wide)
+
+	pool^ = GeometryPool{}
+	pool.geometries = make([]Geometry, max_geometries)
+	pool.vertex_capacity = max_vertices
+	pool.index_capacity = max_indices
+	pool.vertex_upload_capacity = vertex_upload_size
+	pool.index_upload_capacity = index_upload_size
+
+	pool.vertex_buffer = sdl.CreateGPUBuffer(
+		device,
+		sdl.GPUBufferCreateInfo {
+			// Read by Mesh.vert as ByteAddressBuffer for programmable vertex pulling.
+			usage = {.GRAPHICS_STORAGE_READ},
+			size  = vertex_buffer_size,
+		},
+	)
+	log.assertf(pool.vertex_buffer != nil, "CreateGPUBuffer vertex failed: %s", sdl.GetError())
+
+	pool.index_buffer = sdl.CreateGPUBuffer(
+	device,
+	sdl.GPUBufferCreateInfo {
+		// Keep this as a real SDL index buffer so indexed draws and vertex reuse still work.
+		usage = {.INDEX},
+		size  = index_buffer_size,
+	},
+	)
+	log.assertf(pool.index_buffer != nil, "CreateGPUBuffer index failed: %s", sdl.GetError())
+
+
+	pool.vertex_upload_buffer = sdl.CreateGPUTransferBuffer(
+		device,
+		sdl.GPUTransferBufferCreateInfo {
+			usage = sdl.GPUTransferBufferUsage.UPLOAD,
+			size = pool.vertex_upload_capacity,
+		},
+	)
+	log.assertf(
+		pool.vertex_upload_buffer != nil,
+		"CreateGPUTransferBuffer for vertex upload failed: %s",
+		sdl.GetError(),
+	)
+
+	pool.index_upload_buffer = sdl.CreateGPUTransferBuffer(
+		device,
+		sdl.GPUTransferBufferCreateInfo {
+			usage = sdl.GPUTransferBufferUsage.UPLOAD,
+			size = pool.index_upload_capacity,
+		},
+	)
+	log.assertf(
+		pool.index_upload_buffer != nil,
+		"CreateGPUTransferBuffer for index upload failed: %s",
+		sdl.GetError(),
+	)
+
+	log.debugf(
+		"GeometryPool initialized: vertex_capacity=%d index_capacity=%d vertex_upload_capacity=%d index_upload_capacity=%d",
+		pool.vertex_capacity,
+		pool.index_capacity,
+		pool.vertex_upload_capacity,
+		pool.index_upload_capacity,
+	)
+}
+
+geometry_destroy :: proc(pool: ^GeometryPool) {
+	if pool.vertex_upload_buffer != nil {
+		sdl.ReleaseGPUTransferBuffer(device, pool.vertex_upload_buffer)
+	}
+
+	if pool.index_upload_buffer != nil {
+		sdl.ReleaseGPUTransferBuffer(device, pool.index_upload_buffer)
+	}
+
+	if pool.vertex_buffer != nil {
+		sdl.ReleaseGPUBuffer(device, pool.vertex_buffer)
+	}
+
+	if pool.index_buffer != nil {
+		sdl.ReleaseGPUBuffer(device, pool.index_buffer)
+	}
+
+	pool.geometry_count = 0
+	pool.vertex_capacity = 0
+	pool.index_capacity = 0
+	pool.vertex_upload_capacity = 0
+	pool.index_upload_capacity = 0
+}
+
+geometry_append :: proc(
+	pool: ^GeometryPool,
+	vertices: []GeometryVertex,
+	indices: []u32,
+) -> GeometryID {
+	log.assertf(len(vertices) > 0, "vertices must not be empty")
+	log.assertf(len(indices) > 0, "indices must not be empty")
+	log.assertf(u64(len(vertices)) <= u64(max(u32)), "vertex count exceeds u32: %d", len(vertices))
+	log.assertf(u64(len(indices)) <= u64(max(u32)), "index count exceeds u32: %d", len(indices))
+	log.assertf(u64(pool.geometry_count) < u64(len(pool.geometries)), "geometry pool is full")
+
+	vertex_count := u32(len(vertices))
+	index_count := u32(len(indices))
+
+	when ODIN_DEBUG {
+		for vertex_index, index_index in indices {
+			log.assertf(
+				vertex_index < vertex_count,
+				"geometry index out of range: indices[%d]=%d vertex_count=%d",
+				index_index,
+				vertex_index,
+				vertex_count,
+			)
+		}
+	}
+
+	vertex_bytes_wide := u64(vertex_count) * u64(size_of(GeometryVertex))
+	index_bytes_wide := u64(index_count) * u64(size_of(u32))
+	log.assertf(
+		vertex_bytes_wide <= u64(max(u32)),
+		"vertex append size exceeds u32: %d",
+		vertex_bytes_wide,
+	)
+	log.assertf(
+		index_bytes_wide <= u64(max(u32)),
+		"index append size exceeds u32: %d",
+		index_bytes_wide,
+	)
+
+	vertex_bytes := u32(vertex_bytes_wide)
+	index_bytes := u32(index_bytes_wide)
+
+	log.assertf(
+		u64(pool.vertex_count) + u64(vertex_count) <= u64(pool.vertex_capacity),
+		"geometry vertex capacity exceeded",
+	)
+	log.assertf(
+		u64(pool.index_count) + u64(index_count) <= u64(pool.index_capacity),
+		"geometry index capacity exceeded",
+	)
+	log.assertf(
+		vertex_bytes <= pool.vertex_upload_capacity,
+		"geometry vertex append exceeds upload buffer capacity",
+	)
+	log.assertf(
+		index_bytes <= pool.index_upload_capacity,
+		"geometry index append exceeds upload buffer capacity",
+	)
+
+	geometry := Geometry {
+		vertex_count  = vertex_count,
+		index_count   = index_count,
+		vertex_offset = pool.vertex_count,
+		index_offset  = pool.index_count,
+	}
+
+	geometry_index := pool.geometry_count
+	id := GeometryID(geometry_index + 1)
+
+	vertex_dst_offset_wide := u64(geometry.vertex_offset) * u64(size_of(GeometryVertex))
+	index_dst_offset_wide := u64(geometry.index_offset) * u64(size_of(u32))
+	log.assertf(
+		vertex_dst_offset_wide <= u64(max(u32)),
+		"vertex destination offset exceeds u32: %d",
+		vertex_dst_offset_wide,
+	)
+	log.assertf(
+		index_dst_offset_wide <= u64(max(u32)),
+		"index destination offset exceeds u32: %d",
+		index_dst_offset_wide,
+	)
+
+	vertex_dst_offset := u32(vertex_dst_offset_wide)
+	index_dst_offset := u32(index_dst_offset_wide)
+
+	mapped_data := sdl.MapGPUTransferBuffer(device, pool.vertex_upload_buffer, false)
+	log.assertf(mapped_data != nil, "MapGPUTransferBuffer vertex failed: %s", sdl.GetError())
+	mem.copy(mapped_data, raw_data(vertices), int(vertex_bytes))
+	sdl.UnmapGPUTransferBuffer(device, pool.vertex_upload_buffer)
+
+	mapped_data = sdl.MapGPUTransferBuffer(device, pool.index_upload_buffer, false)
+	log.assertf(mapped_data != nil, "MapGPUTransferBuffer index failed: %s", sdl.GetError())
+	mem.copy(mapped_data, raw_data(indices), int(index_bytes))
+	sdl.UnmapGPUTransferBuffer(device, pool.index_upload_buffer)
+
+	upload_cmd_buf := sdl.AcquireGPUCommandBuffer(device)
+	log.assertf(upload_cmd_buf != nil, "AcquireGPUCommandBuffer failed: %s", sdl.GetError())
+	copy_pass := sdl.BeginGPUCopyPass(upload_cmd_buf)
+
+	sdl.UploadToGPUBuffer(
+		copy_pass,
+		sdl.GPUTransferBufferLocation{transfer_buffer = pool.vertex_upload_buffer, offset = 0},
+		sdl.GPUBufferRegion {
+			buffer = pool.vertex_buffer,
+			offset = vertex_dst_offset,
+			size = vertex_bytes,
+		},
+		false,
+	)
+
+	sdl.UploadToGPUBuffer(
+		copy_pass,
+		sdl.GPUTransferBufferLocation{transfer_buffer = pool.index_upload_buffer, offset = 0},
+		sdl.GPUBufferRegion {
+			buffer = pool.index_buffer,
+			offset = index_dst_offset,
+			size = index_bytes,
+		},
+		false,
+	)
+
+	sdl.EndGPUCopyPass(copy_pass)
+	log.assertf(
+		sdl.SubmitGPUCommandBuffer(upload_cmd_buf),
+		"SubmitGPUCommandBuffer failed: %s",
+		sdl.GetError(),
+	)
+
+	pool.geometries[geometry_index] = geometry
+	pool.geometry_count += 1
+	pool.vertex_count += vertex_count
+	pool.index_count += index_count
+
+	return id
+}
+
+geometry_get :: proc(pool: ^GeometryPool, id: GeometryID) -> Geometry {
+	log.assertf(id != INVALID_GEOMETRY_ID, "Invalid geometry ID: %d", u32(id))
+	geometry_index := u32(id) - 1
+	log.assertf(geometry_index < pool.geometry_count, "Geometry ID out of bounds: %d", u32(id))
+	return pool.geometries[geometry_index]
+}
+
+//////////////////////////////////////
+// Constants
+/////////////////////////////////////
+
 WINDOW_DEFAULT_HEIGHT :: 720
 WINDOW_DEFAULT_WIDTH :: 1280
 RENDERER_DEFAULT_DRIVER :: "direct3d12"
@@ -82,16 +417,6 @@ FOV :: f32(70.0)
 ASPECT_RATIO :: f32(16.0 / 9.0)
 VELOCITY :: f32(1.5)
 MOUSE_SENSITIVITY :: f32(0.0025)
-
-persistent_slab: [64 * mem.Megabyte]u8
-transient_slab: [16 * mem.Megabyte]u8
-persistent_arena: mem.Arena
-transient_arena: mem.Arena
-persistent_allocator: mem.Allocator
-transient_allocator: mem.Allocator
-
-window: ^sdl.Window
-device: ^sdl.GPUDevice
 
 cube_vertices := [?]GeometryVertex {
 	{position = {-0.5, -0.5, -0.5, 0.0}, color = {1.0, 0.1, 0.1, 1.0}},
@@ -143,13 +468,17 @@ cube_indices := [?]u32 {
 	0,
 }
 
-vertex_buffer: ^sdl.GPUBuffer
-index_buffer: ^sdl.GPUBuffer
-depth_texture: ^sdl.GPUTexture
+//////////////////////////////////////
+// State
+/////////////////////////////////////
 
+geometry_pool: GeometryPool
+
+depth_texture: ^sdl.GPUTexture
 fill_pipeline: ^sdl.GPUGraphicsPipeline
 line_pipeline: ^sdl.GPUGraphicsPipeline
 
+test_cube_geometry_id: GeometryID
 mvp: matrix[4, 4]f32
 camera := Camera {
 	position   = {0.0, 0.0, -5.0},
@@ -167,6 +496,11 @@ camera := Camera {
 debug_mode := true
 enable_vsync := true
 use_wireframe_mode := false
+
+
+//////////////////////////////////////
+// Helpers
+/////////////////////////////////////
 
 sdl_log_output :: proc "c" (
 	userdata: rawptr,
@@ -190,6 +524,10 @@ sdl_log_output :: proc "c" (
 
 	log.logf(level, "[SDL:%s] %s", category, cast(string)message)
 }
+
+//////////////////////////////////////
+// Systems
+/////////////////////////////////////
 
 init :: proc() {
 	log.debug("Init application")
@@ -244,40 +582,17 @@ shutdown :: proc() {
 	log.debug("Shutdown complete")
 }
 
-upload_gpu_buffer :: proc(dst: ^sdl.GPUBuffer, source_data: rawptr, size: u32) {
-	transfer_buffer := sdl.CreateGPUTransferBuffer(
-		device,
-		sdl.GPUTransferBufferCreateInfo{usage = sdl.GPUTransferBufferUsage.UPLOAD, size = size},
-	)
-	log.assertf(transfer_buffer != nil, "CreateGPUTransferBuffer failed: %s", sdl.GetError())
-	defer sdl.ReleaseGPUTransferBuffer(device, transfer_buffer)
-
-	mapped_data := sdl.MapGPUTransferBuffer(device, transfer_buffer, false)
-	log.assertf(mapped_data != nil, "MapGPUTransferBuffer failed: %s", sdl.GetError())
-	mem.copy(mapped_data, source_data, int(size))
-	sdl.UnmapGPUTransferBuffer(device, transfer_buffer)
-
-	upload_cmd_buf := sdl.AcquireGPUCommandBuffer(device)
-	log.assertf(upload_cmd_buf != nil, "AcquireGPUCommandBuffer failed: %s", sdl.GetError())
-	copy_pass := sdl.BeginGPUCopyPass(upload_cmd_buf)
-
-	sdl.UploadToGPUBuffer(
-		copy_pass,
-		sdl.GPUTransferBufferLocation{transfer_buffer = transfer_buffer, offset = 0},
-		sdl.GPUBufferRegion{buffer = dst, offset = 0, size = size},
-		false,
-	)
-
-	sdl.EndGPUCopyPass(copy_pass)
-	log.assertf(
-		sdl.SubmitGPUCommandBuffer(upload_cmd_buf),
-		"SubmitGPUCommandBuffer failed: %s",
-		sdl.GetError(),
-	)
-}
-
 setup_resources :: proc() {
 	log.debug("Setting resources")
+
+	geometry_init(
+		&geometry_pool,
+		GEOMETRY_MAX_GEOMETRIES,
+		GEOMETRY_MAX_VERTICES,
+		GEOMETRY_MAX_INDICES,
+		GEOMETRY_MAX_UPLOAD_VERTICES,
+		GEOMETRY_MAX_UPLOAD_INDICES,
+	)
 
 	// Mesh.vert uses one vertex storage buffer for PVP geometry bytes.
 	// Indices are bound through SDL's hardware index-buffer path, not as shader storage.
@@ -361,36 +676,7 @@ setup_resources :: proc() {
 	)
 	log.assert(depth_texture != nil, "Failed to create depth texture!")
 
-	vertex_buffer = sdl.CreateGPUBuffer(
-		device,
-		sdl.GPUBufferCreateInfo {
-			// Read by Mesh.vert as ByteAddressBuffer for programmable vertex pulling.
-			usage = {.GRAPHICS_STORAGE_READ},
-			size = cast(u32)(size_of(GeometryVertex) * len(cube_vertices)),
-		},
-	)
-	log.assertf(vertex_buffer != nil, "CreateGPUBuffer vertex failed: %s", sdl.GetError())
-
-	index_buffer = sdl.CreateGPUBuffer(
-		device,
-		sdl.GPUBufferCreateInfo {
-			// Keep this as a real SDL index buffer so indexed draws and vertex reuse still work.
-			usage = {.INDEX},
-			size = cast(u32)(size_of(u32) * len(cube_indices)),
-		},
-	)
-	log.assertf(index_buffer != nil, "CreateGPUBuffer index failed: %s", sdl.GetError())
-
-	upload_gpu_buffer(
-		vertex_buffer,
-		raw_data(cube_vertices[:]),
-		cast(u32)(size_of(GeometryVertex) * len(cube_vertices)),
-	)
-	upload_gpu_buffer(
-		index_buffer,
-		raw_data(cube_indices[:]),
-		cast(u32)(size_of(u32) * len(cube_indices)),
-	)
+	test_cube_geometry_id = geometry_append(&geometry_pool, cube_vertices[:], cube_indices[:])
 
 	log.debug("Resources initialized")
 }
@@ -398,8 +684,7 @@ setup_resources :: proc() {
 destroy_resources :: proc() {
 	log.debug("Destroying resources")
 	log.assertf(sdl.WaitForGPUIdle(device), "WaitForGPUIdle failed: %s", sdl.GetError())
-	sdl.ReleaseGPUBuffer(device, vertex_buffer)
-	sdl.ReleaseGPUBuffer(device, index_buffer)
+	geometry_destroy(&geometry_pool)
 	sdl.ReleaseGPUTexture(device, depth_texture)
 	sdl.ReleaseGPUGraphicsPipeline(device, fill_pipeline)
 	sdl.ReleaseGPUGraphicsPipeline(device, line_pipeline)
@@ -407,6 +692,9 @@ destroy_resources :: proc() {
 }
 
 render :: proc() {
+	log.assertf(test_cube_geometry_id != INVALID_GEOMETRY_ID, "Test cube geometry ID is invalid")
+	geometry := geometry_get(&geometry_pool, test_cube_geometry_id)
+
 	cmdbuf := sdl.AcquireGPUCommandBuffer(device)
 	log.assertf(cmdbuf != nil, "AcquireGPUCommandBuffer failed: %s", sdl.GetError())
 
@@ -433,8 +721,7 @@ render :: proc() {
 		depthTargetInfo.stencil_store_op = sdl.GPUStoreOp.DONT_CARE
 
 		draw_params := GeometryDrawParams {
-			vertex_offset = 0,
-			index_offset  = 0,
+			vertex_offset = geometry.vertex_offset,
 		}
 		sdl.PushGPUVertexUniformData(cmdbuf, 0, &mvp, cast(u32)size_of(matrix[4, 4]f32))
 		sdl.PushGPUVertexUniformData(cmdbuf, 1, &draw_params, cast(u32)size_of(GeometryDrawParams))
@@ -447,14 +734,21 @@ render :: proc() {
 
 		// Hardware indexed PVP: SDL applies the index buffer, then Mesh.vert
 		// pulls the selected vertex from the geometry storage buffer.
-		storage_buffers := [?]^sdl.GPUBuffer{vertex_buffer}
+		storage_buffers := [?]^sdl.GPUBuffer{geometry_pool.vertex_buffer}
 		sdl.BindGPUVertexStorageBuffers(render_pass, 0, raw_data(storage_buffers[:]), 1)
 		sdl.BindGPUIndexBuffer(
 			render_pass,
-			sdl.GPUBufferBinding{buffer = index_buffer, offset = 0},
+			sdl.GPUBufferBinding{buffer = geometry_pool.index_buffer, offset = 0},
 			sdl.GPUIndexElementSize._32BIT,
 		)
-		sdl.DrawGPUIndexedPrimitives(render_pass, cast(u32)len(cube_indices), 1, 0, 0, 0)
+		sdl.DrawGPUIndexedPrimitives(
+			render_pass,
+			geometry.index_count,
+			1,
+			geometry.index_offset,
+			0,
+			0,
+		)
 		sdl.EndGPURenderPass(render_pass)
 	}
 
@@ -549,6 +843,10 @@ load_shader :: proc(
 
 	return shader, shader_type
 }
+
+//////////////////////////////////////
+// Main
+/////////////////////////////////////
 
 main :: proc() {
 	context.logger = log.create_console_logger(.Debug)
