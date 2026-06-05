@@ -51,6 +51,218 @@ Camera :: struct {
 }
 
 ///////////////////////////////////////////
+// Terrain
+///////////////////////////////////////////
+
+TerrainPackedVertex :: distinct u32
+#assert(size_of(TerrainPackedVertex) == 4)
+
+TerrainDrawParams :: struct {
+	vertex_byte_offset:  u32,
+	vertex_stride_bytes: u32,
+	_padding:            [2]u32,
+	chunk_origin:        [4]f32, // xyz used, w = block_world_size
+}
+
+TerrainGridPoint :: struct {
+	x, y, z: u32,
+}
+
+terrain_pack_vertex :: proc(
+	local_x, local_y, local_z: u32,
+	normal_id, material_id, corner_id: u32,
+) -> TerrainPackedVertex {
+	log.assertf(local_x <= 63, "terrain local_x out of range: %d", local_x)
+	log.assertf(local_y <= 63, "terrain local_y out of range: %d", local_y)
+	log.assertf(local_z <= 63, "terrain local_z out of range: %d", local_z)
+	log.assertf(normal_id < 6, "terrain normal_id out of range: %d", normal_id)
+	log.assertf(material_id <= 255, "terrain material_id out of range: %d", material_id)
+	log.assertf(corner_id < 4, "terrain corner_id out of range: %d", corner_id)
+	return TerrainPackedVertex(
+		(local_x << 0) |
+		(local_y << 6) |
+		(local_z << 12) |
+		(normal_id << 18) |
+		(material_id << 21) |
+		(corner_id << 29),
+	)
+}
+
+emit_terrain_quad :: proc(
+	verticies: []TerrainPackedVertex,
+	indicies: []u32,
+	p0, p1, p2, p3: TerrainGridPoint,
+	normal_id: u32,
+	material_id: u32,
+	vertex_count: ^u32,
+	index_count: ^u32,
+) {
+	log.assertf(int(vertex_count^) + 4 <= len(verticies), "debug terrain vertex capacity exceeded")
+	log.assertf(int(index_count^) + 6 <= len(indicies), "debug terrain index capacity exceeded")
+
+	base := vertex_count^
+	v := int(vertex_count^)
+	i := int(index_count^)
+
+	verticies[v + 0] = terrain_pack_vertex(p0.x, p0.y, p0.z, normal_id, material_id, 0)
+	verticies[v + 1] = terrain_pack_vertex(p1.x, p1.y, p1.z, normal_id, material_id, 1)
+	verticies[v + 2] = terrain_pack_vertex(p2.x, p2.y, p2.z, normal_id, material_id, 2)
+	verticies[v + 3] = terrain_pack_vertex(p3.x, p3.y, p3.z, normal_id, material_id, 3)
+
+	indicies[i + 0] = base + 0
+	indicies[i + 1] = base + 1
+	indicies[i + 2] = base + 2
+	indicies[i + 3] = base + 0
+	indicies[i + 4] = base + 2
+	indicies[i + 5] = base + 3
+
+	vertex_count^ += 4
+	index_count^ += 6
+}
+
+emit_terrain_box :: proc(
+	verticies: []TerrainPackedVertex,
+	indicies: []u32,
+	x0, y0, z0, x1, y1, z1: u32,
+	material_id: u32,
+	vertex_count: ^u32,
+	index_count: ^u32,
+) {
+	emit_terrain_quad(
+		verticies,
+		indicies,
+		TerrainGridPoint{x1, y0, z0},
+		TerrainGridPoint{x1, y1, z0},
+		TerrainGridPoint{x1, y1, z1},
+		TerrainGridPoint{x1, y0, z1},
+		0,
+		material_id,
+		vertex_count,
+		index_count,
+	)
+	emit_terrain_quad(
+		verticies,
+		indicies,
+		TerrainGridPoint{x0, y0, z0},
+		TerrainGridPoint{x0, y0, z1},
+		TerrainGridPoint{x0, y1, z1},
+		TerrainGridPoint{x0, y1, z0},
+		1,
+		material_id,
+		vertex_count,
+		index_count,
+	)
+	emit_terrain_quad(
+		verticies,
+		indicies,
+		TerrainGridPoint{x0, y1, z0},
+		TerrainGridPoint{x0, y1, z1},
+		TerrainGridPoint{x1, y1, z1},
+		TerrainGridPoint{x1, y1, z0},
+		2,
+		material_id,
+		vertex_count,
+		index_count,
+	)
+	emit_terrain_quad(
+		verticies,
+		indicies,
+		TerrainGridPoint{x0, y0, z0},
+		TerrainGridPoint{x1, y0, z0},
+		TerrainGridPoint{x1, y0, z1},
+		TerrainGridPoint{x0, y0, z1},
+		3,
+		material_id,
+		vertex_count,
+		index_count,
+	)
+	emit_terrain_quad(
+		verticies,
+		indicies,
+		TerrainGridPoint{x0, y0, z1},
+		TerrainGridPoint{x1, y0, z1},
+		TerrainGridPoint{x1, y1, z1},
+		TerrainGridPoint{x0, y1, z1},
+		4,
+		material_id,
+		vertex_count,
+		index_count,
+	)
+	emit_terrain_quad(
+		verticies,
+		indicies,
+		TerrainGridPoint{x0, y0, z0},
+		TerrainGridPoint{x0, y1, z0},
+		TerrainGridPoint{x1, y1, z0},
+		TerrainGridPoint{x1, y0, z0},
+		5,
+		material_id,
+		vertex_count,
+		index_count,
+	)
+}
+
+append_debug_terrain_patch :: proc(pool: ^GeometryPool) -> GeometryID {
+	vertices: [1024]TerrainPackedVertex
+	indices: [2048]u32
+	vertex_count: u32
+	index_count: u32
+
+	// One merged +Y quad.
+	emit_terrain_quad(
+		vertices[:],
+		indices[:],
+		TerrainGridPoint{0, 0, 0},
+		TerrainGridPoint{0, 0, 4},
+		TerrainGridPoint{4, 0, 4},
+		TerrainGridPoint{4, 0, 0},
+		2,
+		0,
+		&vertex_count,
+		&index_count,
+	)
+
+	// 8x8 tiled +Y floor, offset so it does not z-fight the merged quad.
+	for z in 0 ..< 8 {
+		for x in 0 ..< 8 {
+			material_id := u32(1 + ((x + z) & 1))
+			x0 := u32(x + 6)
+			z0 := u32(z)
+
+			emit_terrain_quad(
+				vertices[:],
+				indices[:],
+				TerrainGridPoint{x0, 0, z0},
+				TerrainGridPoint{x0, 0, z0 + 1},
+				TerrainGridPoint{x0 + 1, 0, z0 + 1},
+				TerrainGridPoint{x0 + 1, 0, z0},
+				2,
+				material_id,
+				&vertex_count,
+				&index_count,
+			)
+		}
+	}
+
+	emit_terrain_box(vertices[:], indices[:], 0, 1, 6, 1, 2, 7, 3, &vertex_count, &index_count)
+	emit_terrain_box(vertices[:], indices[:], 9, 1, 2, 10, 3, 3, 4, &vertex_count, &index_count)
+	emit_terrain_box(vertices[:], indices[:], 12, 1, 5, 13, 2, 6, 5, &vertex_count, &index_count)
+
+	stride := geometry_layout_stride_bytes(.Terrain_Packed_U32)
+	vertex_byte_count := vertex_count * stride
+
+	return geometry_append_bytes(
+		pool,
+		.Terrain_Packed_U32,
+		raw_data(vertices[:int(vertex_count)]),
+		vertex_byte_count,
+		vertex_count,
+		stride,
+		indices[:int(index_count)],
+	)
+}
+
+///////////////////////////////////////////
 // Geometry
 ///////////////////////////////////////////
 
@@ -59,6 +271,7 @@ GeometryID :: distinct u32
 GeometryLayoutKind :: enum u32 {
 	Invalid,
 	Position_Color_F32x4,
+	Terrain_Packed_U32,
 }
 
 // Mesh.vert.hlsl decodes this layout by byte offsets.
@@ -114,6 +327,8 @@ geometry_layout_stride_bytes :: proc(layout_kind: GeometryLayoutKind) -> u32 {
 	switch layout_kind {
 	case GeometryLayoutKind.Position_Color_F32x4:
 		return u32(size_of(PositionColorVertex))
+	case GeometryLayoutKind.Terrain_Packed_U32:
+		return u32(size_of(TerrainPackedVertex))
 	case GeometryLayoutKind.Invalid:
 		log.assertf(false, "unknown layout kind: %v", layout_kind)
 	}
@@ -554,10 +769,11 @@ cube_indices := [?]u32 {
 geometry_pool: GeometryPool
 
 depth_texture: ^sdl.GPUTexture
-fill_pipeline: ^sdl.GPUGraphicsPipeline
-line_pipeline: ^sdl.GPUGraphicsPipeline
+prototype_fill_pipeline: ^sdl.GPUGraphicsPipeline
+prototype_line_pipeline: ^sdl.GPUGraphicsPipeline
+terrain_fill_pipeline: ^sdl.GPUGraphicsPipeline
+terrain_line_pipeline: ^sdl.GPUGraphicsPipeline
 
-test_cube_geometry_id: GeometryID
 mvp: matrix[4, 4]f32
 camera := Camera {
 	position   = {0.0, 0.0, -5.0},
@@ -662,24 +878,12 @@ shutdown :: proc() {
 	log.debug("Shutdown complete")
 }
 
-setup_resources :: proc() {
-	log.debug("Setting resources")
-
-	geometry_init(
-		&geometry_pool,
-		GEOMETRY_MAX_GEOMETRIES,
-		GEOMETRY_MAX_VERTEX_BYTES,
-		GEOMETRY_MAX_INDEX_ELEMENTS,
-		GEOMETRY_MAX_VERTEX_UPLOAD_BYTES,
-		GEOMETRY_MAX_UPLOAD_INDEX_ELEMENTS,
-	)
-
-	// Mesh.vert uses one vertex storage buffer for PVP geometry bytes.
-	// Indices are bound through SDL's hardware index-buffer path, not as shader storage.
-	vert_shader, _ := load_shader("assets/shaders/Mesh.vert.dxil", 0, 2, 1, 0)
-	frag_shader, _ := load_shader("assets/shaders/SolidColor.frag.dxil", 0, 0, 0, 0)
-
-	// Create the pipelines
+create_pipelines_fill_and_line :: proc(
+	vert_shader: ^sdl.GPUShader,
+	frag_shader: ^sdl.GPUShader,
+	fill_pipeline: ^^sdl.GPUGraphicsPipeline,
+	line_pipeline: ^^sdl.GPUGraphicsPipeline,
+) {
 	color_target_descriptions := [?]sdl.GPUColorTargetDescription {
 		{format = sdl.GetGPUSwapchainTextureFormat(device, window)},
 	}
@@ -708,17 +912,55 @@ setup_resources :: proc() {
 		fragment_shader = frag_shader,
 	}
 
-
 	pipeline_create_info.rasterizer_state.fill_mode = sdl.GPUFillMode.FILL
-	fill_pipeline = sdl.CreateGPUGraphicsPipeline(device, pipeline_create_info)
-	log.assert(fill_pipeline != nil, "Failed to create fill pipeline!")
+	fill_pipeline^ = sdl.CreateGPUGraphicsPipeline(device, pipeline_create_info)
+	log.assertf(fill_pipeline^ != nil, "Failed to create fill pipeline: %s", sdl.GetError())
 
 	pipeline_create_info.rasterizer_state.fill_mode = sdl.GPUFillMode.LINE
-	line_pipeline = sdl.CreateGPUGraphicsPipeline(device, pipeline_create_info)
-	log.assert(line_pipeline != nil, "Failed to create line pipeline!")
+	line_pipeline^ = sdl.CreateGPUGraphicsPipeline(device, pipeline_create_info)
+	log.assertf(line_pipeline^ != nil, "Failed to create line pipeline: %s", sdl.GetError())
+}
+
+setup_resources :: proc() {
+	log.debug("Setting resources")
+
+	geometry_init(
+		&geometry_pool,
+		GEOMETRY_MAX_GEOMETRIES,
+		GEOMETRY_MAX_VERTEX_BYTES,
+		GEOMETRY_MAX_INDEX_ELEMENTS,
+		GEOMETRY_MAX_VERTEX_UPLOAD_BYTES,
+		GEOMETRY_MAX_UPLOAD_INDEX_ELEMENTS,
+	)
+
+	// todo: this should be removed later after testing is done
+	// Mesh.vert uses one vertex storage buffer for PVP geometry bytes.
+	// Indices are bound through SDL's hardware index-buffer path, not as shader storage.
+	vert_shader, _ := load_shader("assets/shaders/Mesh.vert.dxil", 0, 2, 1, 0)
+	frag_shader, _ := load_shader("assets/shaders/SolidColor.frag.dxil", 0, 0, 0, 0)
+
+	// new shaders for terrain rendering, will be the primary rendering pipeline for terrain geometry
+	terrain_vert_shader, _ := load_shader("assets/shaders/Terrain.vert.dxil", 0, 2, 1, 0)
+	terrain_frag_shader, _ := load_shader("assets/shaders/Terrain.frag.dxil", 0, 0, 0, 0)
+
+	// Create the pipelines
+	create_pipelines_fill_and_line(
+		vert_shader,
+		frag_shader,
+		&prototype_fill_pipeline,
+		&prototype_line_pipeline,
+	)
+	create_pipelines_fill_and_line(
+		terrain_vert_shader,
+		terrain_frag_shader,
+		&terrain_fill_pipeline,
+		&terrain_line_pipeline,
+	)
 
 	sdl.ReleaseGPUShader(device, frag_shader)
 	sdl.ReleaseGPUShader(device, vert_shader)
+	sdl.ReleaseGPUShader(device, terrain_frag_shader)
+	sdl.ReleaseGPUShader(device, terrain_vert_shader)
 
 	w, h: c.int
 	sdl.GetWindowSizeInPixels(window, &w, &h)
@@ -756,7 +998,8 @@ setup_resources :: proc() {
 	)
 	log.assert(depth_texture != nil, "Failed to create depth texture!")
 
-	test_cube_geometry_id = geometry_append(&geometry_pool, cube_vertices[:], cube_indices[:])
+	_ = geometry_append(&geometry_pool, cube_vertices[:], cube_indices[:])
+	_ = append_debug_terrain_patch(&geometry_pool)
 
 	log.debug("Resources initialized")
 }
@@ -766,19 +1009,14 @@ destroy_resources :: proc() {
 	log.assertf(sdl.WaitForGPUIdle(device), "WaitForGPUIdle failed: %s", sdl.GetError())
 	geometry_destroy(&geometry_pool)
 	sdl.ReleaseGPUTexture(device, depth_texture)
-	sdl.ReleaseGPUGraphicsPipeline(device, fill_pipeline)
-	sdl.ReleaseGPUGraphicsPipeline(device, line_pipeline)
+	sdl.ReleaseGPUGraphicsPipeline(device, prototype_fill_pipeline)
+	sdl.ReleaseGPUGraphicsPipeline(device, prototype_line_pipeline)
+	sdl.ReleaseGPUGraphicsPipeline(device, terrain_fill_pipeline)
+	sdl.ReleaseGPUGraphicsPipeline(device, terrain_line_pipeline)
 	log.debug("Resources destroyed")
 }
 
 render :: proc() {
-	log.assertf(test_cube_geometry_id != INVALID_GEOMETRY_ID, "Test cube geometry ID is invalid")
-	geometry := geometry_get(&geometry_pool, test_cube_geometry_id)
-	log.assertf(
-		geometry.layout_kind == .Position_Color_F32x4,
-		"current pipeline only supports Position_Color_F32x4 geometry",
-	)
-
 	cmdbuf := sdl.AcquireGPUCommandBuffer(device)
 	log.assertf(cmdbuf != nil, "AcquireGPUCommandBuffer failed: %s", sdl.GetError())
 
@@ -804,21 +1042,12 @@ render :: proc() {
 		depthTargetInfo.stencil_load_op = sdl.GPULoadOp.DONT_CARE
 		depthTargetInfo.stencil_store_op = sdl.GPUStoreOp.DONT_CARE
 
-		draw_params := GeometryDrawParams {
-			vertex_byte_offset  = geometry.vertex_byte_offset,
-			vertex_stride_bytes = geometry.vertex_stride_bytes,
-		}
 		sdl.PushGPUVertexUniformData(cmdbuf, 0, &mvp, cast(u32)size_of(matrix[4, 4]f32))
-		sdl.PushGPUVertexUniformData(cmdbuf, 1, &draw_params, cast(u32)size_of(GeometryDrawParams))
 
 		render_pass := sdl.BeginGPURenderPass(cmdbuf, &colorTargetInfo, 1, &depthTargetInfo)
-		sdl.BindGPUGraphicsPipeline(
-			render_pass,
-			use_wireframe_mode ? line_pipeline : fill_pipeline,
-		)
 
-		// Hardware indexed PVP: SDL applies the index buffer, then Mesh.vert
-		// pulls the selected vertex from the geometry storage buffer.
+		// Hardware indexed PVP: SDL applies the index buffer, then the selected vertex
+		// shader pulls bytes from the shared geometry storage buffer.
 		storage_buffers := [?]^sdl.GPUBuffer{geometry_pool.vertex_buffer}
 		sdl.BindGPUVertexStorageBuffers(render_pass, 0, raw_data(storage_buffers[:]), 1)
 		sdl.BindGPUIndexBuffer(
@@ -826,14 +1055,51 @@ render :: proc() {
 			sdl.GPUBufferBinding{buffer = geometry_pool.index_buffer, offset = 0},
 			sdl.GPUIndexElementSize._32BIT,
 		)
-		sdl.DrawGPUIndexedPrimitives(
-			render_pass,
-			geometry.index_count,
-			1,
-			geometry.first_index,
-			0,
-			0,
-		)
+
+		for geometry in geometry_pool.geometries[:int(geometry_pool.geometry_count)] {
+			pipeline: ^sdl.GPUGraphicsPipeline
+
+			switch geometry.layout_kind {
+			case .Invalid:
+				log.assertf(false, "unsupported geometry layout: %v", geometry.layout_kind)
+			case .Position_Color_F32x4:
+				draw_params := GeometryDrawParams {
+					vertex_byte_offset  = geometry.vertex_byte_offset,
+					vertex_stride_bytes = geometry.vertex_stride_bytes,
+				}
+				sdl.PushGPUVertexUniformData(
+					cmdbuf,
+					1,
+					&draw_params,
+					cast(u32)size_of(GeometryDrawParams),
+				)
+				pipeline = use_wireframe_mode ? prototype_line_pipeline : prototype_fill_pipeline
+			case .Terrain_Packed_U32:
+				draw_params := TerrainDrawParams {
+					vertex_byte_offset  = geometry.vertex_byte_offset,
+					vertex_stride_bytes = geometry.vertex_stride_bytes,
+					chunk_origin        = {-3.25, -1.0, 1.0, 0.5},
+				}
+				sdl.PushGPUVertexUniformData(
+					cmdbuf,
+					1,
+					&draw_params,
+					cast(u32)size_of(TerrainDrawParams),
+				)
+				pipeline = use_wireframe_mode ? terrain_line_pipeline : terrain_fill_pipeline
+			}
+
+			sdl.BindGPUGraphicsPipeline(render_pass, pipeline)
+			sdl.DrawGPUIndexedPrimitives(
+				render_pass,
+				geometry.index_count,
+				1,
+				geometry.first_index,
+				0,
+				0,
+			)
+		}
+
 		sdl.EndGPURenderPass(render_pass)
 	}
 

@@ -54,6 +54,9 @@ if (Test-Path $ShaderSourceDir) {
 			$outputName = $_.Name -replace "\.hlsl$", ".dxil"
 			$outputPath = Join-Path $ShaderOutputDir $outputName
 			& $dxc.Source -T $profile -E "main" -Fo $outputPath $_.FullName
+			if ($LASTEXITCODE -ne 0) {
+				exit $LASTEXITCODE
+			}
 		}
 }
 
