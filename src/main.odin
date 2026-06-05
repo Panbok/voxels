@@ -61,48 +61,82 @@ Camera :: struct {
 
 GeometryID :: distinct u32
 
-GeometryVertex :: struct {
+GeometryLayoutKind :: enum u32 {
+	Invalid,
+	Position_Color_F32x4,
+}
+
+// Mesh.vert.hlsl decodes this layout by byte offsets.
+PositionColorVertex :: struct {
 	position: [4]f32,
 	color:    [4]f32,
 }
+#assert(size_of(PositionColorVertex) == 32)
 
 Geometry :: struct {
-	vertex_offset: u32, // GeometryVertex elements
-	vertex_count:  u32,
-	index_offset:  u32, // u32 elements
-	index_count:   u32,
+	layout_kind:         GeometryLayoutKind,
+	vertex_byte_offset:  u32,
+	vertex_stride_bytes: u32,
+	vertex_count:        u32,
+	first_index:         u32,
+	index_count:         u32,
 }
 
 GeometryDrawParams :: struct {
-	vertex_offset: u32, // GeometryVertex elements; added in shader after indexed SV_VertexID
-	_padding:      [3]u32, // extra padding for alignment
+	vertex_byte_offset:  u32,
+	vertex_stride_bytes: u32,
+	_padding:            [2]u32, // extra padding for alignment
 }
 
 GeometryPool :: struct {
-	geometries:             []Geometry,
-	geometry_count:         u32,
-	vertex_buffer:          ^sdl.GPUBuffer,
-	index_buffer:           ^sdl.GPUBuffer,
-	vertex_upload_buffer:   ^sdl.GPUTransferBuffer,
-	index_upload_buffer:    ^sdl.GPUTransferBuffer,
-	vertex_capacity:        u32,
-	vertex_count:           u32,
-	index_capacity:         u32,
-	index_count:            u32,
-	vertex_upload_capacity: u32, // bytes
-	index_upload_capacity:  u32, // bytes
+	geometries:                  []Geometry,
+	geometry_count:              u32,
+	vertex_buffer:               ^sdl.GPUBuffer,
+	index_buffer:                ^sdl.GPUBuffer,
+	vertex_upload_buffer:        ^sdl.GPUTransferBuffer,
+	index_upload_buffer:         ^sdl.GPUTransferBuffer,
+	vertex_byte_capacity:        u32,
+	vertex_byte_count:           u32,
+	index_element_capacity:      u32,
+	index_element_count:         u32,
+	vertex_upload_byte_capacity: u32,
+	index_upload_byte_capacity:  u32,
 }
 
 INVALID_GEOMETRY_ID :: GeometryID(0)
 GEOMETRY_MAX_GEOMETRIES :: 1024
-GEOMETRY_MAX_VERTICES :: 1_000_000
-GEOMETRY_MAX_INDICES :: 3_000_000
-GEOMETRY_MAX_UPLOAD_VERTICES :: 65_536
-GEOMETRY_MAX_UPLOAD_INDICES :: 196_608
+GEOMETRY_MAX_POSITION_COLOR_VERTICES :: 1_000_000
+GEOMETRY_MAX_VERTEX_BYTES :: GEOMETRY_MAX_POSITION_COLOR_VERTICES * size_of(PositionColorVertex)
+GEOMETRY_MAX_INDEX_ELEMENTS :: 3_000_000
+GEOMETRY_MAX_UPLOAD_POSITION_COLOR_VERTICES :: 65_536
+GEOMETRY_MAX_VERTEX_UPLOAD_BYTES ::
+	GEOMETRY_MAX_UPLOAD_POSITION_COLOR_VERTICES * size_of(PositionColorVertex)
+GEOMETRY_MAX_UPLOAD_INDEX_ELEMENTS :: 196_608
+GEOMETRY_VERTEX_BYTE_ALIGNMENT :: 4
+
+
+geometry_layout_stride_bytes :: proc(layout_kind: GeometryLayoutKind) -> u32 {
+	switch layout_kind {
+	case GeometryLayoutKind.Position_Color_F32x4:
+		return u32(size_of(PositionColorVertex))
+	case GeometryLayoutKind.Invalid:
+		log.assertf(false, "unknown layout kind: %v", layout_kind)
+	}
+	return 0
+}
+
+geometry_align_vertex_byte_offset :: proc(offset: u64) -> u64 {
+	alignment := u64(GEOMETRY_VERTEX_BYTE_ALIGNMENT)
+	return (offset + alignment - 1) & ~(alignment - 1)
+}
 
 geometry_init :: proc(
 	pool: ^GeometryPool,
-	max_geometries, max_vertices, max_indices, max_upload_vertices, max_upload_indices: u32,
+	max_geometries,
+	max_vertices_bytes,
+	max_indices_elements,
+	max_upload_vertices_bytes,
+	max_upload_indices_elements: u32,
 ) {
 	log.assertf(
 		max_geometries > 0 && max_geometries <= GEOMETRY_MAX_GEOMETRIES,
@@ -111,57 +145,47 @@ geometry_init :: proc(
 		max_geometries,
 	)
 	log.assertf(
-		max_vertices > 0 && max_vertices <= GEOMETRY_MAX_VERTICES,
-		"max_vertices must be in range 1..%d (got %d)",
-		GEOMETRY_MAX_VERTICES,
-		max_vertices,
+		max_vertices_bytes > 0 && max_vertices_bytes <= GEOMETRY_MAX_VERTEX_BYTES,
+		"max_vertex_bytes must be in range 1..%d (got %d)",
+		GEOMETRY_MAX_VERTEX_BYTES,
+		max_vertices_bytes,
 	)
 	log.assertf(
-		max_indices > 0 && max_indices <= GEOMETRY_MAX_INDICES,
-		"max_indices must be in range 1..%d (got %d)",
-		GEOMETRY_MAX_INDICES,
-		max_indices,
+		max_indices_elements > 0 && max_indices_elements <= GEOMETRY_MAX_INDEX_ELEMENTS,
+		"max_index_elements must be in range 1..%d (got %d)",
+		GEOMETRY_MAX_INDEX_ELEMENTS,
+		max_indices_elements,
 	)
 	log.assertf(
-		max_upload_vertices > 0 && max_upload_vertices <= GEOMETRY_MAX_UPLOAD_VERTICES,
-		"max_upload_vertices must be in range 1..%d (got %d)",
-		GEOMETRY_MAX_UPLOAD_VERTICES,
-		max_upload_vertices,
+		max_upload_vertices_bytes > 0 &&
+		max_upload_vertices_bytes <= GEOMETRY_MAX_VERTEX_UPLOAD_BYTES,
+		"max_upload_vertex_bytes must be in range 1..%d (got %d)",
+		GEOMETRY_MAX_VERTEX_UPLOAD_BYTES,
+		max_upload_vertices_bytes,
 	)
 	log.assertf(
-		max_upload_indices > 0 && max_upload_indices <= GEOMETRY_MAX_UPLOAD_INDICES,
-		"max_upload_indices must be in range 1..%d (got %d)",
-		GEOMETRY_MAX_UPLOAD_INDICES,
-		max_upload_indices,
+		max_upload_indices_elements > 0 &&
+		max_upload_indices_elements <= GEOMETRY_MAX_UPLOAD_INDEX_ELEMENTS,
+		"max_upload_index_elements must be in range 1..%d (got %d)",
+		GEOMETRY_MAX_UPLOAD_INDEX_ELEMENTS,
+		max_upload_indices_elements,
 	)
 	log.assertf(
-		max_upload_vertices <= max_vertices,
-		"max_upload_vertices must fit inside max_vertices",
+		max_upload_vertices_bytes <= max_vertices_bytes,
+		"max_upload_vertex_bytes must fit inside max_vertex_bytes",
 	)
 	log.assertf(
-		max_upload_indices <= max_indices,
-		"max_upload_indices must fit inside max_indices",
+		max_upload_indices_elements <= max_indices_elements,
+		"max_upload_index_elements must fit inside max_index_elements",
 	)
 
-	vertex_buffer_size_wide := u64(max_vertices) * u64(size_of(GeometryVertex))
-	index_buffer_size_wide := u64(max_indices) * u64(size_of(u32))
-	vertex_upload_size_wide := u64(max_upload_vertices) * u64(size_of(GeometryVertex))
-	index_upload_size_wide := u64(max_upload_indices) * u64(size_of(u32))
+	index_buffer_size_wide := u64(max_indices_elements) * u64(size_of(u32))
+	index_upload_size_wide := u64(max_upload_indices_elements) * u64(size_of(u32))
 
-	log.assertf(
-		vertex_buffer_size_wide <= u64(max(u32)),
-		"vertex buffer size exceeds u32: %d",
-		vertex_buffer_size_wide,
-	)
 	log.assertf(
 		index_buffer_size_wide <= u64(max(u32)),
 		"index buffer size exceeds u32: %d",
 		index_buffer_size_wide,
-	)
-	log.assertf(
-		vertex_upload_size_wide <= u64(max(u32)),
-		"vertex upload buffer size exceeds u32: %d",
-		vertex_upload_size_wide,
 	)
 	log.assertf(
 		index_upload_size_wide <= u64(max(u32)),
@@ -169,17 +193,17 @@ geometry_init :: proc(
 		index_upload_size_wide,
 	)
 
-	vertex_buffer_size := u32(vertex_buffer_size_wide)
+	vertex_buffer_size := max_vertices_bytes
 	index_buffer_size := u32(index_buffer_size_wide)
-	vertex_upload_size := u32(vertex_upload_size_wide)
+	vertex_upload_size := max_upload_vertices_bytes
 	index_upload_size := u32(index_upload_size_wide)
 
 	pool^ = GeometryPool{}
 	pool.geometries = make([]Geometry, max_geometries)
-	pool.vertex_capacity = max_vertices
-	pool.index_capacity = max_indices
-	pool.vertex_upload_capacity = vertex_upload_size
-	pool.index_upload_capacity = index_upload_size
+	pool.vertex_byte_capacity = max_vertices_bytes
+	pool.index_element_capacity = max_indices_elements
+	pool.vertex_upload_byte_capacity = vertex_upload_size
+	pool.index_upload_byte_capacity = index_upload_size
 
 	pool.vertex_buffer = sdl.CreateGPUBuffer(
 		device,
@@ -206,7 +230,7 @@ geometry_init :: proc(
 		device,
 		sdl.GPUTransferBufferCreateInfo {
 			usage = sdl.GPUTransferBufferUsage.UPLOAD,
-			size = pool.vertex_upload_capacity,
+			size = pool.vertex_upload_byte_capacity,
 		},
 	)
 	log.assertf(
@@ -219,7 +243,7 @@ geometry_init :: proc(
 		device,
 		sdl.GPUTransferBufferCreateInfo {
 			usage = sdl.GPUTransferBufferUsage.UPLOAD,
-			size = pool.index_upload_capacity,
+			size = pool.index_upload_byte_capacity,
 		},
 	)
 	log.assertf(
@@ -229,11 +253,11 @@ geometry_init :: proc(
 	)
 
 	log.debugf(
-		"GeometryPool initialized: vertex_capacity=%d index_capacity=%d vertex_upload_capacity=%d index_upload_capacity=%d",
-		pool.vertex_capacity,
-		pool.index_capacity,
-		pool.vertex_upload_capacity,
-		pool.index_upload_capacity,
+		"GeometryPool initialized: vertex_byte_capacity=%d index_element_capacity=%d vertex_upload_byte_capacity=%d index_upload_byte_capacity=%d",
+		pool.vertex_byte_capacity,
+		pool.index_element_capacity,
+		pool.vertex_upload_byte_capacity,
+		pool.index_upload_byte_capacity,
 	)
 }
 
@@ -255,24 +279,40 @@ geometry_destroy :: proc(pool: ^GeometryPool) {
 	}
 
 	pool.geometry_count = 0
-	pool.vertex_capacity = 0
-	pool.index_capacity = 0
-	pool.vertex_upload_capacity = 0
-	pool.index_upload_capacity = 0
+	pool.vertex_byte_capacity = 0
+	pool.vertex_byte_count = 0
+	pool.index_element_capacity = 0
+	pool.index_element_count = 0
+	pool.vertex_upload_byte_capacity = 0
+	pool.index_upload_byte_capacity = 0
 }
 
-geometry_append :: proc(
+geometry_append_bytes :: proc(
 	pool: ^GeometryPool,
-	vertices: []GeometryVertex,
+	layout_kind: GeometryLayoutKind,
+	vertex_data: rawptr,
+	vertex_byte_count: u32,
+	vertex_count: u32,
+	vertex_stride_bytes: u32,
 	indices: []u32,
 ) -> GeometryID {
-	log.assertf(len(vertices) > 0, "vertices must not be empty")
+	log.assertf(vertex_data != nil, "vertex_data must not be nil")
+	log.assertf(layout_kind != .Invalid, "layout_kind must be valid")
+	log.assertf(vertex_count > 0, "vertex_count must not be zero")
+	log.assertf(vertex_stride_bytes > 0, "vertex_stride_bytes must not be zero")
+	log.assertf(
+		vertex_stride_bytes % GEOMETRY_VERTEX_BYTE_ALIGNMENT == 0,
+		"vertex_stride_bytes must be aligned to %d bytes",
+		GEOMETRY_VERTEX_BYTE_ALIGNMENT,
+	)
 	log.assertf(len(indices) > 0, "indices must not be empty")
-	log.assertf(u64(len(vertices)) <= u64(max(u32)), "vertex count exceeds u32: %d", len(vertices))
 	log.assertf(u64(len(indices)) <= u64(max(u32)), "index count exceeds u32: %d", len(indices))
 	log.assertf(u64(pool.geometry_count) < u64(len(pool.geometries)), "geometry pool is full")
+	log.assertf(
+		geometry_layout_stride_bytes(layout_kind) == vertex_stride_bytes,
+		"vertex_stride_bytes must match layout kind",
+	)
 
-	vertex_count := u32(len(vertices))
 	index_count := u32(len(indices))
 
 	when ODIN_DEBUG {
@@ -287,7 +327,7 @@ geometry_append :: proc(
 		}
 	}
 
-	vertex_bytes_wide := u64(vertex_count) * u64(size_of(GeometryVertex))
+	vertex_bytes_wide := u64(vertex_count) * u64(vertex_stride_bytes)
 	index_bytes_wide := u64(index_count) * u64(size_of(u32))
 	log.assertf(
 		vertex_bytes_wide <= u64(max(u32)),
@@ -299,39 +339,54 @@ geometry_append :: proc(
 		"index append size exceeds u32: %d",
 		index_bytes_wide,
 	)
+	log.assertf(
+		vertex_bytes_wide == u64(vertex_byte_count),
+		"vertex_byte_count must match vertex_count and vertex_stride_bytes",
+	)
 
 	vertex_bytes := u32(vertex_bytes_wide)
 	index_bytes := u32(index_bytes_wide)
 
+	vertex_byte_offset_wide := geometry_align_vertex_byte_offset(u64(pool.vertex_byte_count))
+	vertex_byte_end_wide := vertex_byte_offset_wide + u64(vertex_byte_count)
+	index_element_end_wide := u64(pool.index_element_count) + u64(index_count)
+
 	log.assertf(
-		u64(pool.vertex_count) + u64(vertex_count) <= u64(pool.vertex_capacity),
+		vertex_byte_offset_wide <= u64(max(u32)),
+		"vertex destination offset exceeds u32: %d",
+		vertex_byte_offset_wide,
+	)
+	log.assertf(
+		vertex_byte_end_wide <= u64(pool.vertex_byte_capacity),
 		"geometry vertex capacity exceeded",
 	)
 	log.assertf(
-		u64(pool.index_count) + u64(index_count) <= u64(pool.index_capacity),
+		index_element_end_wide <= u64(pool.index_element_capacity),
 		"geometry index capacity exceeded",
 	)
 	log.assertf(
-		vertex_bytes <= pool.vertex_upload_capacity,
+		vertex_bytes <= pool.vertex_upload_byte_capacity,
 		"geometry vertex append exceeds upload buffer capacity",
 	)
 	log.assertf(
-		index_bytes <= pool.index_upload_capacity,
+		index_bytes <= pool.index_upload_byte_capacity,
 		"geometry index append exceeds upload buffer capacity",
 	)
 
 	geometry := Geometry {
-		vertex_count  = vertex_count,
-		index_count   = index_count,
-		vertex_offset = pool.vertex_count,
-		index_offset  = pool.index_count,
+		layout_kind         = layout_kind,
+		vertex_count        = vertex_count,
+		index_count         = index_count,
+		vertex_byte_offset  = u32(vertex_byte_offset_wide),
+		vertex_stride_bytes = vertex_stride_bytes,
+		first_index         = pool.index_element_count,
 	}
 
 	geometry_index := pool.geometry_count
 	id := GeometryID(geometry_index + 1)
 
-	vertex_dst_offset_wide := u64(geometry.vertex_offset) * u64(size_of(GeometryVertex))
-	index_dst_offset_wide := u64(geometry.index_offset) * u64(size_of(u32))
+	vertex_dst_offset_wide := u64(geometry.vertex_byte_offset)
+	index_dst_offset_wide := u64(geometry.first_index) * u64(size_of(u32))
 	log.assertf(
 		vertex_dst_offset_wide <= u64(max(u32)),
 		"vertex destination offset exceeds u32: %d",
@@ -348,7 +403,7 @@ geometry_append :: proc(
 
 	mapped_data := sdl.MapGPUTransferBuffer(device, pool.vertex_upload_buffer, false)
 	log.assertf(mapped_data != nil, "MapGPUTransferBuffer vertex failed: %s", sdl.GetError())
-	mem.copy(mapped_data, raw_data(vertices), int(vertex_bytes))
+	mem.copy(mapped_data, vertex_data, int(vertex_bytes))
 	sdl.UnmapGPUTransferBuffer(device, pool.vertex_upload_buffer)
 
 	mapped_data = sdl.MapGPUTransferBuffer(device, pool.index_upload_buffer, false)
@@ -391,10 +446,39 @@ geometry_append :: proc(
 
 	pool.geometries[geometry_index] = geometry
 	pool.geometry_count += 1
-	pool.vertex_count += vertex_count
-	pool.index_count += index_count
+	pool.vertex_byte_count = geometry.vertex_byte_offset + vertex_byte_count
+	pool.index_element_count += index_count
 
 	return id
+}
+
+geometry_append :: proc(
+	pool: ^GeometryPool,
+	vertices: []PositionColorVertex,
+	indices: []u32,
+) -> GeometryID {
+	log.assertf(len(vertices) > 0, "vertices must not be empty")
+	log.assertf(u64(len(vertices)) <= u64(max(u32)), "vertex count exceeds u32: %d", len(vertices))
+
+	vertex_count := u32(len(vertices))
+	vertex_stride_bytes := geometry_layout_stride_bytes(.Position_Color_F32x4)
+	vertex_byte_count_wide := u64(vertex_count) * u64(vertex_stride_bytes)
+	log.assertf(
+		vertex_byte_count_wide <= u64(max(u32)),
+		"vertex append size exceeds u32: %d",
+		vertex_byte_count_wide,
+	)
+	vertex_byte_count := u32(vertex_byte_count_wide)
+
+	return geometry_append_bytes(
+		pool,
+		.Position_Color_F32x4,
+		raw_data(vertices),
+		vertex_byte_count,
+		vertex_count,
+		vertex_stride_bytes,
+		indices,
+	)
 }
 
 geometry_get :: proc(pool: ^GeometryPool, id: GeometryID) -> Geometry {
@@ -418,7 +502,7 @@ ASPECT_RATIO :: f32(16.0 / 9.0)
 VELOCITY :: f32(1.5)
 MOUSE_SENSITIVITY :: f32(0.0025)
 
-cube_vertices := [?]GeometryVertex {
+cube_vertices := [?]PositionColorVertex {
 	{position = {-0.5, -0.5, -0.5, 0.0}, color = {1.0, 0.1, 0.1, 1.0}},
 	{position = {0.5, -0.5, -0.5, 0.0}, color = {0.1, 1.0, 0.1, 1.0}},
 	{position = {0.5, 0.5, -0.5, 0.0}, color = {0.1, 0.1, 1.0, 1.0}},
@@ -588,10 +672,10 @@ setup_resources :: proc() {
 	geometry_init(
 		&geometry_pool,
 		GEOMETRY_MAX_GEOMETRIES,
-		GEOMETRY_MAX_VERTICES,
-		GEOMETRY_MAX_INDICES,
-		GEOMETRY_MAX_UPLOAD_VERTICES,
-		GEOMETRY_MAX_UPLOAD_INDICES,
+		GEOMETRY_MAX_VERTEX_BYTES,
+		GEOMETRY_MAX_INDEX_ELEMENTS,
+		GEOMETRY_MAX_VERTEX_UPLOAD_BYTES,
+		GEOMETRY_MAX_UPLOAD_INDEX_ELEMENTS,
 	)
 
 	// Mesh.vert uses one vertex storage buffer for PVP geometry bytes.
@@ -694,6 +778,10 @@ destroy_resources :: proc() {
 render :: proc() {
 	log.assertf(test_cube_geometry_id != INVALID_GEOMETRY_ID, "Test cube geometry ID is invalid")
 	geometry := geometry_get(&geometry_pool, test_cube_geometry_id)
+	log.assertf(
+		geometry.layout_kind == .Position_Color_F32x4,
+		"current pipeline only supports Position_Color_F32x4 geometry",
+	)
 
 	cmdbuf := sdl.AcquireGPUCommandBuffer(device)
 	log.assertf(cmdbuf != nil, "AcquireGPUCommandBuffer failed: %s", sdl.GetError())
@@ -721,7 +809,8 @@ render :: proc() {
 		depthTargetInfo.stencil_store_op = sdl.GPUStoreOp.DONT_CARE
 
 		draw_params := GeometryDrawParams {
-			vertex_offset = geometry.vertex_offset,
+			vertex_byte_offset  = geometry.vertex_byte_offset,
+			vertex_stride_bytes = geometry.vertex_stride_bytes,
 		}
 		sdl.PushGPUVertexUniformData(cmdbuf, 0, &mvp, cast(u32)size_of(matrix[4, 4]f32))
 		sdl.PushGPUVertexUniformData(cmdbuf, 1, &draw_params, cast(u32)size_of(GeometryDrawParams))
@@ -745,7 +834,7 @@ render :: proc() {
 			render_pass,
 			geometry.index_count,
 			1,
-			geometry.index_offset,
+			geometry.first_index,
 			0,
 			0,
 		)
