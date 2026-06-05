@@ -51,8 +51,76 @@ Camera :: struct {
 }
 
 ///////////////////////////////////////////
-// Terrain
+// Terrain & Chunks
 ///////////////////////////////////////////
+
+CHUNK_BLOCK_LENGTH :: 64
+CHUNK_BLOCK_LENGTH_LOG2 :: 6
+CHUNK_BLOCK_LOCAL_MAX :: CHUNK_BLOCK_LENGTH - 1
+CHUNK_BLOCK_COUNT :: CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH
+TERRAIN_BLOCK_WORLD_SIZE :: f32(0.5)
+#assert(CHUNK_BLOCK_LENGTH == 1 << CHUNK_BLOCK_LENGTH_LOG2)
+#assert(CHUNK_BLOCK_LOCAL_MAX <= 0x3F)
+
+ChunkCoord :: struct {
+	x, y, z: i32,
+}
+
+BlockCoord :: struct {
+	x, y, z: i32,
+}
+
+ChunkBounds :: struct {
+	min, max: BlockCoord,
+}
+
+Chunk :: struct {
+	coord:       ChunkCoord,
+	geometry_id: GeometryID,
+}
+
+chunk_create :: proc(coord: ChunkCoord) -> Chunk {
+	return Chunk{coord = coord, geometry_id = INVALID_GEOMETRY_ID}
+}
+
+chunk_origin_from_coord :: proc(coord: ChunkCoord) -> BlockCoord {
+	return BlockCoord {
+		x = coord.x * CHUNK_BLOCK_LENGTH,
+		y = coord.y * CHUNK_BLOCK_LENGTH,
+		z = coord.z * CHUNK_BLOCK_LENGTH,
+	}
+}
+
+chunk_bounds_from_coord :: proc(coord: ChunkCoord) -> ChunkBounds {
+	return ChunkBounds {
+		min = BlockCoord {
+			x = coord.x * CHUNK_BLOCK_LENGTH,
+			y = coord.y * CHUNK_BLOCK_LENGTH,
+			z = coord.z * CHUNK_BLOCK_LENGTH,
+		},
+		max = BlockCoord {
+			x = (coord.x + 1) * CHUNK_BLOCK_LENGTH,
+			y = (coord.y + 1) * CHUNK_BLOCK_LENGTH,
+			z = (coord.z + 1) * CHUNK_BLOCK_LENGTH,
+		},
+	}
+}
+
+terrain_chunk_origin_world_from_coord :: proc(coord: ChunkCoord) -> [4]f32 {
+	origin := chunk_origin_from_coord(coord)
+	return {
+		f32(origin.x) * TERRAIN_BLOCK_WORLD_SIZE,
+		f32(origin.y) * TERRAIN_BLOCK_WORLD_SIZE,
+		f32(origin.z) * TERRAIN_BLOCK_WORLD_SIZE,
+		TERRAIN_BLOCK_WORLD_SIZE,
+	}
+}
+
+terrain_chunk_center_world_from_coord :: proc(coord: ChunkCoord) -> [3]f32 {
+	origin := terrain_chunk_origin_world_from_coord(coord)
+	half_length := f32(CHUNK_BLOCK_LENGTH) * TERRAIN_BLOCK_WORLD_SIZE * 0.5
+	return {origin[0] + half_length, origin[1] + half_length, origin[2] + half_length}
+}
 
 TerrainPackedVertex :: distinct u32
 #assert(size_of(TerrainPackedVertex) == 4)
@@ -72,9 +140,9 @@ terrain_pack_vertex :: proc(
 	local_x, local_y, local_z: u32,
 	normal_id, material_id, corner_id: u32,
 ) -> TerrainPackedVertex {
-	log.assertf(local_x <= 63, "terrain local_x out of range: %d", local_x)
-	log.assertf(local_y <= 63, "terrain local_y out of range: %d", local_y)
-	log.assertf(local_z <= 63, "terrain local_z out of range: %d", local_z)
+	log.assertf(local_x <= CHUNK_BLOCK_LOCAL_MAX, "terrain local_x out of range: %d", local_x)
+	log.assertf(local_y <= CHUNK_BLOCK_LOCAL_MAX, "terrain local_y out of range: %d", local_y)
+	log.assertf(local_z <= CHUNK_BLOCK_LOCAL_MAX, "terrain local_z out of range: %d", local_z)
 	log.assertf(normal_id < 6, "terrain normal_id out of range: %d", normal_id)
 	log.assertf(material_id <= 255, "terrain material_id out of range: %d", material_id)
 	log.assertf(corner_id < 4, "terrain corner_id out of range: %d", corner_id)
@@ -709,7 +777,8 @@ DEPTH_CLEAR_VALUE :: f32(1.0)
 ANGLE :: f32(0.6)
 FOV :: f32(70.0)
 ASPECT_RATIO :: f32(16.0 / 9.0)
-VELOCITY :: f32(1.5)
+DEFAULT_ACCELERATION :: f32(1.5)
+MAX_ACCELERATION :: f32(10.0)
 MOUSE_SENSITIVITY :: f32(0.0025)
 
 cube_vertices := [?]PositionColorVertex {
@@ -775,6 +844,7 @@ terrain_fill_pipeline: ^sdl.GPUGraphicsPipeline
 terrain_line_pipeline: ^sdl.GPUGraphicsPipeline
 
 mvp: matrix[4, 4]f32
+view_projection: matrix[4, 4]f32
 camera := Camera {
 	position   = {0.0, 0.0, -5.0},
 	forward    = {0.0, 0.0, 1.0},
@@ -786,6 +856,8 @@ camera := Camera {
 	near_plane = 0.1,
 	far_plane  = 100.0,
 }
+// todo: replace this single debug chunk with real chunk storage/iteration.
+test_chunk: Chunk
 
 
 debug_mode := true
@@ -819,6 +891,16 @@ sdl_log_output :: proc "c" (
 	}
 
 	log.logf(level, "[SDL:%s] %s", category, cast(string)message)
+}
+
+// todo: remove once the camera is controlled by normal scene/debug tooling.
+debug_position_camera_for_chunk :: proc(coord: ChunkCoord) {
+	center := terrain_chunk_center_world_from_coord(coord)
+	chunk_world_length := f32(CHUNK_BLOCK_LENGTH) * TERRAIN_BLOCK_WORLD_SIZE
+
+	camera.position = {center[0], center[1], center[2] - chunk_world_length * 1.5}
+	camera.yaw = 0
+	camera.pitch = 0
 }
 
 //////////////////////////////////////
@@ -999,7 +1081,12 @@ setup_resources :: proc() {
 	log.assert(depth_texture != nil, "Failed to create depth texture!")
 
 	_ = geometry_append(&geometry_pool, cube_vertices[:], cube_indices[:])
-	_ = append_debug_terrain_patch(&geometry_pool)
+	// todo: replace this debug patch with chunk meshing from chunk data.
+	chunk_geometry_id := append_debug_terrain_patch(&geometry_pool)
+	test_chunk = chunk_create(ChunkCoord{1, 1, 1})
+	test_chunk.geometry_id = chunk_geometry_id
+	debug_position_camera_for_chunk(test_chunk.coord)
+
 
 	log.debug("Resources initialized")
 }
@@ -1042,8 +1129,6 @@ render :: proc() {
 		depthTargetInfo.stencil_load_op = sdl.GPULoadOp.DONT_CARE
 		depthTargetInfo.stencil_store_op = sdl.GPUStoreOp.DONT_CARE
 
-		sdl.PushGPUVertexUniformData(cmdbuf, 0, &mvp, cast(u32)size_of(matrix[4, 4]f32))
-
 		render_pass := sdl.BeginGPURenderPass(cmdbuf, &colorTargetInfo, 1, &depthTargetInfo)
 
 		// Hardware indexed PVP: SDL applies the index buffer, then the selected vertex
@@ -1056,39 +1141,65 @@ render :: proc() {
 			sdl.GPUIndexElementSize._32BIT,
 		)
 
+		// todo: replace this prototype geometry scan with explicit debug/prototype draw ownership.
 		for geometry in geometry_pool.geometries[:int(geometry_pool.geometry_count)] {
-			pipeline: ^sdl.GPUGraphicsPipeline
-
-			switch geometry.layout_kind {
-			case .Invalid:
-				log.assertf(false, "unsupported geometry layout: %v", geometry.layout_kind)
-			case .Position_Color_F32x4:
-				draw_params := GeometryDrawParams {
-					vertex_byte_offset  = geometry.vertex_byte_offset,
-					vertex_stride_bytes = geometry.vertex_stride_bytes,
-				}
-				sdl.PushGPUVertexUniformData(
-					cmdbuf,
-					1,
-					&draw_params,
-					cast(u32)size_of(GeometryDrawParams),
-				)
-				pipeline = use_wireframe_mode ? prototype_line_pipeline : prototype_fill_pipeline
-			case .Terrain_Packed_U32:
-				draw_params := TerrainDrawParams {
-					vertex_byte_offset  = geometry.vertex_byte_offset,
-					vertex_stride_bytes = geometry.vertex_stride_bytes,
-					chunk_origin        = {-3.25, -1.0, 1.0, 0.5},
-				}
-				sdl.PushGPUVertexUniformData(
-					cmdbuf,
-					1,
-					&draw_params,
-					cast(u32)size_of(TerrainDrawParams),
-				)
-				pipeline = use_wireframe_mode ? terrain_line_pipeline : terrain_fill_pipeline
+			if geometry.layout_kind != .Position_Color_F32x4 {
+				continue
 			}
 
+			sdl.PushGPUVertexUniformData(cmdbuf, 0, &mvp, cast(u32)size_of(matrix[4, 4]f32))
+			draw_params := GeometryDrawParams {
+				vertex_byte_offset  = geometry.vertex_byte_offset,
+				vertex_stride_bytes = geometry.vertex_stride_bytes,
+			}
+			sdl.PushGPUVertexUniformData(
+				cmdbuf,
+				1,
+				&draw_params,
+				cast(u32)size_of(GeometryDrawParams),
+			)
+
+			pipeline := use_wireframe_mode ? prototype_line_pipeline : prototype_fill_pipeline
+			sdl.BindGPUGraphicsPipeline(render_pass, pipeline)
+			sdl.DrawGPUIndexedPrimitives(
+				render_pass,
+				geometry.index_count,
+				1,
+				geometry.first_index,
+				0,
+				0,
+			)
+		}
+
+		// todo: replace this single debug chunk draw with iteration over loaded chunks.
+		if test_chunk.geometry_id != INVALID_GEOMETRY_ID {
+			geometry := geometry_get(&geometry_pool, test_chunk.geometry_id)
+			log.assertf(
+				geometry.layout_kind == .Terrain_Packed_U32,
+				"chunk geometry must use terrain layout: %v",
+				geometry.layout_kind,
+			)
+
+			sdl.PushGPUVertexUniformData(
+				cmdbuf,
+				0,
+				&view_projection,
+				cast(u32)size_of(matrix[4, 4]f32),
+			)
+			chunk_origin_world := terrain_chunk_origin_world_from_coord(test_chunk.coord)
+			draw_params := TerrainDrawParams {
+				vertex_byte_offset  = geometry.vertex_byte_offset,
+				vertex_stride_bytes = geometry.vertex_stride_bytes,
+				chunk_origin        = chunk_origin_world,
+			}
+			sdl.PushGPUVertexUniformData(
+				cmdbuf,
+				1,
+				&draw_params,
+				cast(u32)size_of(TerrainDrawParams),
+			)
+
+			pipeline := use_wireframe_mode ? terrain_line_pipeline : terrain_fill_pipeline
 			sdl.BindGPUGraphicsPipeline(render_pass, pipeline)
 			sdl.DrawGPUIndexedPrimitives(
 				render_pass,
@@ -1151,21 +1262,25 @@ update_camera_vectors :: proc() {
 }
 
 update :: proc() {
-	model := la.matrix4_rotate_f32(ANGLE, la.Vector3f32{0, 1, 0})
 	view := la.matrix4_look_at_f32(camera.position, camera.position + camera.forward, camera.up)
 	proj := la.matrix4_perspective_f32(math.to_radians_f32(FOV), ASPECT_RATIO, 0.1, 100.0)
-	mvp = proj * view * model
+	view_projection = proj * view
+	model := la.matrix4_rotate_f32(ANGLE, la.Vector3f32{0, 1, 0})
+	mvp = view_projection * model
 }
 
 handle_input :: proc(dt: f32) {
 	key_count: c.int
 	keys := sdl.GetKeyboardState(&key_count)
-	speed := VELOCITY * dt
 
-	if keys[cast(int)sdl.Scancode.W] {camera.position += camera.forward * speed}
-	if keys[cast(int)sdl.Scancode.S] {camera.position -= camera.forward * speed}
-	if keys[cast(int)sdl.Scancode.D] {camera.position -= camera.right * speed}
-	if keys[cast(int)sdl.Scancode.A] {camera.position += camera.right * speed}
+	velocity := DEFAULT_ACCELERATION
+	if keys[cast(int)sdl.Scancode.LSHIFT] {velocity = MAX_ACCELERATION}
+
+	velocity = velocity * dt
+	if keys[cast(int)sdl.Scancode.W] {camera.position += camera.forward * velocity}
+	if keys[cast(int)sdl.Scancode.S] {camera.position -= camera.forward * velocity}
+	if keys[cast(int)sdl.Scancode.D] {camera.position -= camera.right * velocity}
+	if keys[cast(int)sdl.Scancode.A] {camera.position += camera.right * velocity}
 }
 
 load_shader :: proc(
