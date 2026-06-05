@@ -1,10 +1,5 @@
 package main
 
-// todo: we have several things we need to do before starting to work on voxel part:
-// - do we want to use PVP (yes)
-// - do we want to utilize instanced rendering
-// - do we want to utlize indirect rendering
-
 import sdl "vendor:sdl3"
 
 import "base:runtime"
