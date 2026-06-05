@@ -579,6 +579,7 @@ camera := Camera {
 
 debug_mode := true
 enable_vsync := true
+is_window_open := true
 use_wireframe_mode := false
 
 
@@ -844,6 +845,37 @@ render :: proc() {
 	log.assertf(sdl.SubmitGPUCommandBuffer(cmdbuf), "SubmitGPUCommandBuffer: %s", sdl.GetError())
 }
 
+process_events :: proc() {
+	for event: sdl.Event; sdl.PollEvent(&event); {
+		#partial switch event.type {
+		case .QUIT:
+			log.debug("Quit event received")
+			is_window_open = false
+		case .KEY_DOWN:
+			{
+				if event.key.scancode == sdl.Scancode.ESCAPE {
+					log.debug("Escape key pressed")
+					is_window_open = false
+				}
+
+				if event.key.scancode == sdl.Scancode.G && !event.key.repeat {
+					use_wireframe_mode = !use_wireframe_mode
+				}
+			}
+		case .MOUSE_MOTION:
+			{
+				camera.yaw -= event.motion.xrel * MOUSE_SENSITIVITY
+				camera.pitch -= event.motion.yrel * MOUSE_SENSITIVITY
+				camera.pitch = math.clamp(
+					camera.pitch,
+					math.to_radians_f32(-89.0),
+					math.to_radians_f32(89.0),
+				)
+			}
+		}
+	}
+}
+
 update_camera_vectors :: proc() {
 	camera.forward = la.normalize(
 		la.Vector3f32 {
@@ -864,7 +896,7 @@ update :: proc() {
 	mvp = proj * view * model
 }
 
-move_camera :: proc(dt: f32) {
+handle_input :: proc(dt: f32) {
 	key_count: c.int
 	keys := sdl.GetKeyboardState(&key_count)
 	speed := VELOCITY * dt
@@ -956,42 +988,14 @@ main :: proc() {
 	defer destroy_resources()
 
 	current_time := sdl.GetTicks()
-	loop: for {
+	for is_window_open {
 		now := sdl.GetTicks()
 		dt := cast(f32)(now - current_time) / 1000.0
 		current_time = now
 
-		for event: sdl.Event; sdl.PollEvent(&event); {
-			#partial switch event.type {
-			case .QUIT:
-				log.debug("Quit event received")
-				break loop
-			case .KEY_DOWN:
-				{
-					if event.key.scancode == sdl.Scancode.ESCAPE {
-						log.debug("Escape key pressed")
-						break loop
-					}
-
-					if event.key.scancode == sdl.Scancode.G && !event.key.repeat {
-						use_wireframe_mode = !use_wireframe_mode
-					}
-				}
-			case .MOUSE_MOTION:
-				{
-					camera.yaw -= event.motion.xrel * MOUSE_SENSITIVITY
-					camera.pitch -= event.motion.yrel * MOUSE_SENSITIVITY
-					camera.pitch = math.clamp(
-						camera.pitch,
-						math.to_radians_f32(-89.0),
-						math.to_radians_f32(89.0),
-					)
-				}
-			}
-		}
-
+		process_events()
 		update_camera_vectors()
-		move_camera(dt)
+		handle_input(dt)
 		update()
 		render()
 	}
