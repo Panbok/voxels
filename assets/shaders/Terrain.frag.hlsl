@@ -23,7 +23,7 @@ float face_shade(uint normalID)
     }
 }
 
-float4 main(float3 LocalBlockPosition : TEXCOORD0,
+float4 main(float3 LocalPosition : TEXCOORD0,
 	nointerpolation uint MaterialID : TEXCOORD1,
 	nointerpolation uint NormalID : TEXCOORD2,
 	nointerpolation uint CornerID : TEXCOORD3) : SV_Target0
