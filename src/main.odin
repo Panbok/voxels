@@ -96,11 +96,11 @@ Chunk :: struct {
 }
 
 chunk_create :: proc(coord: ChunkCoord) -> Chunk {
-	return Chunk{coord = coord, geometry_id = INVALID_GEOMETRY_ID}
+	return {coord = coord, geometry_id = INVALID_GEOMETRY_ID}
 }
 
 chunk_origin_from_coord :: proc(coord: ChunkCoord) -> BlockCoord {
-	return BlockCoord {
+	return {
 		x = coord.x * CHUNK_BLOCK_LENGTH,
 		y = coord.y * CHUNK_BLOCK_LENGTH,
 		z = coord.z * CHUNK_BLOCK_LENGTH,
@@ -108,13 +108,13 @@ chunk_origin_from_coord :: proc(coord: ChunkCoord) -> BlockCoord {
 }
 
 chunk_bounds_from_coord :: proc(coord: ChunkCoord) -> ChunkBounds {
-	return ChunkBounds {
-		min = BlockCoord {
+	return {
+		min = {
 			x = coord.x * CHUNK_BLOCK_LENGTH,
 			y = coord.y * CHUNK_BLOCK_LENGTH,
 			z = coord.z * CHUNK_BLOCK_LENGTH,
 		},
-		max = BlockCoord {
+		max = {
 			x = (coord.x + 1) * CHUNK_BLOCK_LENGTH,
 			y = (coord.y + 1) * CHUNK_BLOCK_LENGTH,
 			z = (coord.z + 1) * CHUNK_BLOCK_LENGTH,
@@ -156,11 +156,10 @@ DEBUG_CHUNK_SOLID_LENGTH_X :: DEBUG_CHUNK_SOLID_X1 - DEBUG_CHUNK_SOLID_X0
 DEBUG_CHUNK_SOLID_LENGTH_Y :: DEBUG_CHUNK_SOLID_Y1 - DEBUG_CHUNK_SOLID_Y0
 DEBUG_CHUNK_SOLID_LENGTH_Z :: DEBUG_CHUNK_SOLID_Z1 - DEBUG_CHUNK_SOLID_Z0
 DEBUG_CHUNK_TERRAIN_MAX_FACES ::
-	2 * (
-		DEBUG_CHUNK_SOLID_LENGTH_X * DEBUG_CHUNK_SOLID_LENGTH_Y +
-		DEBUG_CHUNK_SOLID_LENGTH_X * DEBUG_CHUNK_SOLID_LENGTH_Z +
-		DEBUG_CHUNK_SOLID_LENGTH_Y * DEBUG_CHUNK_SOLID_LENGTH_Z
-	)
+	2 *
+	(DEBUG_CHUNK_SOLID_LENGTH_X * DEBUG_CHUNK_SOLID_LENGTH_Y +
+			DEBUG_CHUNK_SOLID_LENGTH_X * DEBUG_CHUNK_SOLID_LENGTH_Z +
+			DEBUG_CHUNK_SOLID_LENGTH_Y * DEBUG_CHUNK_SOLID_LENGTH_Z)
 #assert(DEBUG_CHUNK_SOLID_X0 < DEBUG_CHUNK_SOLID_X1 && DEBUG_CHUNK_SOLID_X1 <= CHUNK_BLOCK_LENGTH)
 #assert(DEBUG_CHUNK_SOLID_Y0 < DEBUG_CHUNK_SOLID_Y1 && DEBUG_CHUNK_SOLID_Y1 <= CHUNK_BLOCK_LENGTH)
 #assert(DEBUG_CHUNK_SOLID_Z0 < DEBUG_CHUNK_SOLID_Z1 && DEBUG_CHUNK_SOLID_Z1 <= CHUNK_BLOCK_LENGTH)
@@ -216,10 +215,10 @@ chunk_voxel_view_terrain_append :: proc(pool: ^GeometryPool, view: ChunkVoxelVie
 					emit_terrain_quad(
 						vertices,
 						indices,
-						TerrainGridPoint{x1, y0, z0},
-						TerrainGridPoint{x1, y1, z0},
-						TerrainGridPoint{x1, y1, z1},
-						TerrainGridPoint{x1, y0, z1},
+						{x1, y0, z0},
+						{x1, y1, z0},
+						{x1, y1, z1},
+						{x1, y0, z1},
 						0,
 						material_id,
 						&vertex_count,
@@ -230,10 +229,10 @@ chunk_voxel_view_terrain_append :: proc(pool: ^GeometryPool, view: ChunkVoxelVie
 					emit_terrain_quad(
 						vertices,
 						indices,
-						TerrainGridPoint{x0, y0, z0},
-						TerrainGridPoint{x0, y0, z1},
-						TerrainGridPoint{x0, y1, z1},
-						TerrainGridPoint{x0, y1, z0},
+						{x0, y0, z0},
+						{x0, y0, z1},
+						{x0, y1, z1},
+						{x0, y1, z0},
 						1,
 						material_id,
 						&vertex_count,
@@ -244,10 +243,10 @@ chunk_voxel_view_terrain_append :: proc(pool: ^GeometryPool, view: ChunkVoxelVie
 					emit_terrain_quad(
 						vertices,
 						indices,
-						TerrainGridPoint{x0, y1, z0},
-						TerrainGridPoint{x0, y1, z1},
-						TerrainGridPoint{x1, y1, z1},
-						TerrainGridPoint{x1, y1, z0},
+						{x0, y1, z0},
+						{x0, y1, z1},
+						{x1, y1, z1},
+						{x1, y1, z0},
 						2,
 						material_id,
 						&vertex_count,
@@ -258,10 +257,10 @@ chunk_voxel_view_terrain_append :: proc(pool: ^GeometryPool, view: ChunkVoxelVie
 					emit_terrain_quad(
 						vertices,
 						indices,
-						TerrainGridPoint{x0, y0, z0},
-						TerrainGridPoint{x1, y0, z0},
-						TerrainGridPoint{x1, y0, z1},
-						TerrainGridPoint{x0, y0, z1},
+						{x0, y0, z0},
+						{x1, y0, z0},
+						{x1, y0, z1},
+						{x0, y0, z1},
 						3,
 						material_id,
 						&vertex_count,
@@ -272,10 +271,10 @@ chunk_voxel_view_terrain_append :: proc(pool: ^GeometryPool, view: ChunkVoxelVie
 					emit_terrain_quad(
 						vertices,
 						indices,
-						TerrainGridPoint{x0, y0, z1},
-						TerrainGridPoint{x1, y0, z1},
-						TerrainGridPoint{x1, y1, z1},
-						TerrainGridPoint{x0, y1, z1},
+						{x0, y0, z1},
+						{x1, y0, z1},
+						{x1, y1, z1},
+						{x0, y1, z1},
 						4,
 						material_id,
 						&vertex_count,
@@ -286,10 +285,10 @@ chunk_voxel_view_terrain_append :: proc(pool: ^GeometryPool, view: ChunkVoxelVie
 					emit_terrain_quad(
 						vertices,
 						indices,
-						TerrainGridPoint{x0, y0, z0},
-						TerrainGridPoint{x0, y1, z0},
-						TerrainGridPoint{x1, y1, z0},
-						TerrainGridPoint{x1, y0, z0},
+						{x0, y0, z0},
+						{x0, y1, z0},
+						{x1, y1, z0},
+						{x1, y0, z0},
 						5,
 						material_id,
 						&vertex_count,
@@ -411,10 +410,10 @@ emit_terrain_box :: proc(
 	emit_terrain_quad(
 		verticies,
 		indicies,
-		TerrainGridPoint{x1, y0, z0},
-		TerrainGridPoint{x1, y1, z0},
-		TerrainGridPoint{x1, y1, z1},
-		TerrainGridPoint{x1, y0, z1},
+		{x1, y0, z0},
+		{x1, y1, z0},
+		{x1, y1, z1},
+		{x1, y0, z1},
 		0,
 		material_id,
 		vertex_count,
@@ -423,10 +422,10 @@ emit_terrain_box :: proc(
 	emit_terrain_quad(
 		verticies,
 		indicies,
-		TerrainGridPoint{x0, y0, z0},
-		TerrainGridPoint{x0, y0, z1},
-		TerrainGridPoint{x0, y1, z1},
-		TerrainGridPoint{x0, y1, z0},
+		{x0, y0, z0},
+		{x0, y0, z1},
+		{x0, y1, z1},
+		{x0, y1, z0},
 		1,
 		material_id,
 		vertex_count,
@@ -435,10 +434,10 @@ emit_terrain_box :: proc(
 	emit_terrain_quad(
 		verticies,
 		indicies,
-		TerrainGridPoint{x0, y1, z0},
-		TerrainGridPoint{x0, y1, z1},
-		TerrainGridPoint{x1, y1, z1},
-		TerrainGridPoint{x1, y1, z0},
+		{x0, y1, z0},
+		{x0, y1, z1},
+		{x1, y1, z1},
+		{x1, y1, z0},
 		2,
 		material_id,
 		vertex_count,
@@ -447,10 +446,10 @@ emit_terrain_box :: proc(
 	emit_terrain_quad(
 		verticies,
 		indicies,
-		TerrainGridPoint{x0, y0, z0},
-		TerrainGridPoint{x1, y0, z0},
-		TerrainGridPoint{x1, y0, z1},
-		TerrainGridPoint{x0, y0, z1},
+		{x0, y0, z0},
+		{x1, y0, z0},
+		{x1, y0, z1},
+		{x0, y0, z1},
 		3,
 		material_id,
 		vertex_count,
@@ -459,10 +458,10 @@ emit_terrain_box :: proc(
 	emit_terrain_quad(
 		verticies,
 		indicies,
-		TerrainGridPoint{x0, y0, z1},
-		TerrainGridPoint{x1, y0, z1},
-		TerrainGridPoint{x1, y1, z1},
-		TerrainGridPoint{x0, y1, z1},
+		{x0, y0, z1},
+		{x1, y0, z1},
+		{x1, y1, z1},
+		{x0, y1, z1},
 		4,
 		material_id,
 		vertex_count,
@@ -471,10 +470,10 @@ emit_terrain_box :: proc(
 	emit_terrain_quad(
 		verticies,
 		indicies,
-		TerrainGridPoint{x0, y0, z0},
-		TerrainGridPoint{x0, y1, z0},
-		TerrainGridPoint{x1, y1, z0},
-		TerrainGridPoint{x1, y0, z0},
+		{x0, y0, z0},
+		{x0, y1, z0},
+		{x1, y1, z0},
+		{x1, y0, z0},
 		5,
 		material_id,
 		vertex_count,
@@ -492,10 +491,10 @@ append_debug_terrain_patch :: proc(pool: ^GeometryPool) -> GeometryID {
 	emit_terrain_quad(
 		vertices[:],
 		indices[:],
-		TerrainGridPoint{0, 0, 0},
-		TerrainGridPoint{0, 0, 4},
-		TerrainGridPoint{4, 0, 4},
-		TerrainGridPoint{4, 0, 0},
+		{0, 0, 0},
+		{0, 0, 4},
+		{4, 0, 4},
+		{4, 0, 0},
 		2,
 		0,
 		&vertex_count,
@@ -512,10 +511,10 @@ append_debug_terrain_patch :: proc(pool: ^GeometryPool) -> GeometryID {
 			emit_terrain_quad(
 				vertices[:],
 				indices[:],
-				TerrainGridPoint{x0, 0, z0},
-				TerrainGridPoint{x0, 0, z0 + 1},
-				TerrainGridPoint{x0 + 1, 0, z0 + 1},
-				TerrainGridPoint{x0 + 1, 0, z0},
+				{x0, 0, z0},
+				{x0, 0, z0 + 1},
+				{x0 + 1, 0, z0 + 1},
+				{x0 + 1, 0, z0},
 				2,
 				material_id,
 				&vertex_count,
