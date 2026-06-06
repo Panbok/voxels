@@ -62,6 +62,22 @@ TERRAIN_BLOCK_WORLD_SIZE :: f32(0.5)
 #assert(CHUNK_BLOCK_LENGTH == 1 << CHUNK_BLOCK_LENGTH_LOG2)
 #assert(CHUNK_BLOCK_LOCAL_MAX <= 0x3F)
 
+BlockOccupancy :: enum u8 {
+	Empty,
+	Solid,
+}
+
+BlockMaterialID :: distinct u8
+
+ChunkVoxelViewElement :: struct {
+	occupancy:   BlockOccupancy,
+	material_id: BlockMaterialID,
+}
+
+ChunkVoxelView :: struct {
+	blocks: #soa[]ChunkVoxelViewElement,
+}
+
 ChunkCoord :: struct {
 	x, y, z: i32,
 }
@@ -104,6 +120,202 @@ chunk_bounds_from_coord :: proc(coord: ChunkCoord) -> ChunkBounds {
 			z = (coord.z + 1) * CHUNK_BLOCK_LENGTH,
 		},
 	}
+}
+
+chunk_block_index :: proc(x, y, z: u32) -> u32 {
+	log.assertf(x < CHUNK_BLOCK_LENGTH, "x out of bounds: %d", x)
+	log.assertf(y < CHUNK_BLOCK_LENGTH, "y out of bounds: %d", y)
+	log.assertf(z < CHUNK_BLOCK_LENGTH, "z out of bounds: %d", z)
+	return x + y * CHUNK_BLOCK_LENGTH + z * CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH
+}
+
+chunk_voxel_view_is_solid :: proc(view: ChunkVoxelView, x, y, z: i32) -> bool {
+	if x < 0 ||
+	   y < 0 ||
+	   z < 0 ||
+	   x >= CHUNK_BLOCK_LENGTH ||
+	   y >= CHUNK_BLOCK_LENGTH ||
+	   z >= CHUNK_BLOCK_LENGTH {
+		return false
+	}
+
+	return view.blocks.occupancy[chunk_block_index(u32(x), u32(y), u32(z))] == .Solid
+}
+
+chunk_voxel_view_material_id :: proc(view: ChunkVoxelView, x, y, z: u32) -> BlockMaterialID {
+	return view.blocks.material_id[chunk_block_index(x, y, z)]
+}
+
+DEBUG_CHUNK_SOLID_X0 :: 8
+DEBUG_CHUNK_SOLID_X1 :: 24
+DEBUG_CHUNK_SOLID_Y0 :: 0
+DEBUG_CHUNK_SOLID_Y1 :: 8
+DEBUG_CHUNK_SOLID_Z0 :: 8
+DEBUG_CHUNK_SOLID_Z1 :: 24
+DEBUG_CHUNK_SOLID_LENGTH_X :: DEBUG_CHUNK_SOLID_X1 - DEBUG_CHUNK_SOLID_X0
+DEBUG_CHUNK_SOLID_LENGTH_Y :: DEBUG_CHUNK_SOLID_Y1 - DEBUG_CHUNK_SOLID_Y0
+DEBUG_CHUNK_SOLID_LENGTH_Z :: DEBUG_CHUNK_SOLID_Z1 - DEBUG_CHUNK_SOLID_Z0
+DEBUG_CHUNK_TERRAIN_MAX_FACES ::
+	2 * (
+		DEBUG_CHUNK_SOLID_LENGTH_X * DEBUG_CHUNK_SOLID_LENGTH_Y +
+		DEBUG_CHUNK_SOLID_LENGTH_X * DEBUG_CHUNK_SOLID_LENGTH_Z +
+		DEBUG_CHUNK_SOLID_LENGTH_Y * DEBUG_CHUNK_SOLID_LENGTH_Z
+	)
+#assert(DEBUG_CHUNK_SOLID_X0 < DEBUG_CHUNK_SOLID_X1 && DEBUG_CHUNK_SOLID_X1 <= CHUNK_BLOCK_LENGTH)
+#assert(DEBUG_CHUNK_SOLID_Y0 < DEBUG_CHUNK_SOLID_Y1 && DEBUG_CHUNK_SOLID_Y1 <= CHUNK_BLOCK_LENGTH)
+#assert(DEBUG_CHUNK_SOLID_Z0 < DEBUG_CHUNK_SOLID_Z1 && DEBUG_CHUNK_SOLID_Z1 <= CHUNK_BLOCK_LENGTH)
+
+chunk_voxel_debug_view_builder :: proc(view: ^ChunkVoxelView) {
+	view.blocks = make(#soa[]ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, transient_allocator)
+
+	for _, i in view.blocks {
+		view.blocks.occupancy[i] = .Empty
+	}
+
+	for z in DEBUG_CHUNK_SOLID_Z0 ..< DEBUG_CHUNK_SOLID_Z1 {
+		for y in DEBUG_CHUNK_SOLID_Y0 ..< DEBUG_CHUNK_SOLID_Y1 {
+			for x in DEBUG_CHUNK_SOLID_X0 ..< DEBUG_CHUNK_SOLID_X1 {
+				index := chunk_block_index(u32(x), u32(y), u32(z))
+				view.blocks.occupancy[index] = .Solid
+				view.blocks.material_id[index] = BlockMaterialID(0)
+			}
+		}
+	}
+}
+
+chunk_voxel_view_terrain_append :: proc(pool: ^GeometryPool, view: ChunkVoxelView) -> GeometryID {
+	log.assertf(pool != nil, "pool is nil")
+	log.assertf(
+		len(view.blocks) == CHUNK_BLOCK_COUNT,
+		"chunk voxel view must have %d blocks",
+		CHUNK_BLOCK_COUNT,
+	)
+
+	vertices := make([]TerrainPackedVertex, DEBUG_CHUNK_TERRAIN_MAX_FACES * 4, transient_allocator)
+	indices := make([]u32, DEBUG_CHUNK_TERRAIN_MAX_FACES * 6, transient_allocator)
+
+	vertex_count: u32
+	index_count: u32
+
+	for z in 0 ..< CHUNK_BLOCK_LENGTH {
+		for y in 0 ..< CHUNK_BLOCK_LENGTH {
+			for x in 0 ..< CHUNK_BLOCK_LENGTH {
+				if !chunk_voxel_view_is_solid(view, i32(x), i32(y), i32(z)) {
+					continue
+				}
+
+				x0 := u32(x)
+				y0 := u32(y)
+				z0 := u32(z)
+				x1 := x0 + 1
+				y1 := y0 + 1
+				z1 := z0 + 1
+				material_id := u32(u8(chunk_voxel_view_material_id(view, x0, y0, z0)))
+
+				if !chunk_voxel_view_is_solid(view, i32(x) + 1, i32(y), i32(z)) {
+					emit_terrain_quad(
+						vertices,
+						indices,
+						TerrainGridPoint{x1, y0, z0},
+						TerrainGridPoint{x1, y1, z0},
+						TerrainGridPoint{x1, y1, z1},
+						TerrainGridPoint{x1, y0, z1},
+						0,
+						material_id,
+						&vertex_count,
+						&index_count,
+					)
+				}
+				if !chunk_voxel_view_is_solid(view, i32(x) - 1, i32(y), i32(z)) {
+					emit_terrain_quad(
+						vertices,
+						indices,
+						TerrainGridPoint{x0, y0, z0},
+						TerrainGridPoint{x0, y0, z1},
+						TerrainGridPoint{x0, y1, z1},
+						TerrainGridPoint{x0, y1, z0},
+						1,
+						material_id,
+						&vertex_count,
+						&index_count,
+					)
+				}
+				if !chunk_voxel_view_is_solid(view, i32(x), i32(y) + 1, i32(z)) {
+					emit_terrain_quad(
+						vertices,
+						indices,
+						TerrainGridPoint{x0, y1, z0},
+						TerrainGridPoint{x0, y1, z1},
+						TerrainGridPoint{x1, y1, z1},
+						TerrainGridPoint{x1, y1, z0},
+						2,
+						material_id,
+						&vertex_count,
+						&index_count,
+					)
+				}
+				if !chunk_voxel_view_is_solid(view, i32(x), i32(y) - 1, i32(z)) {
+					emit_terrain_quad(
+						vertices,
+						indices,
+						TerrainGridPoint{x0, y0, z0},
+						TerrainGridPoint{x1, y0, z0},
+						TerrainGridPoint{x1, y0, z1},
+						TerrainGridPoint{x0, y0, z1},
+						3,
+						material_id,
+						&vertex_count,
+						&index_count,
+					)
+				}
+				if !chunk_voxel_view_is_solid(view, i32(x), i32(y), i32(z) + 1) {
+					emit_terrain_quad(
+						vertices,
+						indices,
+						TerrainGridPoint{x0, y0, z1},
+						TerrainGridPoint{x1, y0, z1},
+						TerrainGridPoint{x1, y1, z1},
+						TerrainGridPoint{x0, y1, z1},
+						4,
+						material_id,
+						&vertex_count,
+						&index_count,
+					)
+				}
+				if !chunk_voxel_view_is_solid(view, i32(x), i32(y), i32(z) - 1) {
+					emit_terrain_quad(
+						vertices,
+						indices,
+						TerrainGridPoint{x0, y0, z0},
+						TerrainGridPoint{x0, y1, z0},
+						TerrainGridPoint{x1, y1, z0},
+						TerrainGridPoint{x1, y0, z0},
+						5,
+						material_id,
+						&vertex_count,
+						&index_count,
+					)
+				}
+			}
+		}
+	}
+
+	if index_count == 0 {
+		return INVALID_GEOMETRY_ID
+	}
+
+	stride := geometry_layout_stride_bytes(.Terrain_Packed_U32)
+	vertex_byte_count := vertex_count * stride
+
+	return geometry_append_bytes(
+		pool,
+		.Terrain_Packed_U32,
+		raw_data(vertices[:int(vertex_count)]),
+		vertex_byte_count,
+		vertex_count,
+		stride,
+		indices[:int(index_count)],
+	)
 }
 
 terrain_chunk_origin_world_from_coord :: proc(coord: ChunkCoord) -> [4]f32 {
@@ -1080,9 +1292,14 @@ setup_resources :: proc() {
 	)
 	log.assert(depth_texture != nil, "Failed to create depth texture!")
 
-	_ = geometry_append(&geometry_pool, cube_vertices[:], cube_indices[:])
-	// todo: replace this debug patch with chunk meshing from chunk data.
-	chunk_geometry_id := append_debug_terrain_patch(&geometry_pool)
+	view := ChunkVoxelView{}
+
+	temp := mem.begin_arena_temp_memory(&transient_arena)
+	defer mem.end_arena_temp_memory(temp)
+
+	chunk_voxel_debug_view_builder(&view)
+	chunk_geometry_id := chunk_voxel_view_terrain_append(&geometry_pool, view)
+
 	test_chunk = chunk_create(ChunkCoord{1, 1, 1})
 	test_chunk.geometry_id = chunk_geometry_id
 	debug_position_camera_for_chunk(test_chunk.coord)
