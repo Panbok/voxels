@@ -177,6 +177,20 @@ chunk_voxel_view_material_id :: proc(view: ChunkVoxelView, x, y, z: u32) -> Bloc
 	return view.blocks.material_id[chunk_block_index(x, y, z)]
 }
 
+chunk_voxel_view_fill_empty :: proc(view: ^ChunkVoxelView) {
+	log.assertf(
+		len(view.blocks) == CHUNK_BLOCK_COUNT,
+		"chunk voxel view must have %d blocks, got %d",
+		CHUNK_BLOCK_COUNT,
+		len(view.blocks),
+	)
+
+	for _, i in view.blocks {
+		view.blocks.occupancy[i] = .Empty
+		view.blocks.material_id[i] = BlockMaterialID(0)
+	}
+}
+
 DEBUG_CHUNK_SOLID_X0 :: 8
 DEBUG_CHUNK_SOLID_X1 :: 24
 DEBUG_CHUNK_SOLID_Y0 :: 0
@@ -187,12 +201,9 @@ DEBUG_CHUNK_SOLID_Z1 :: 24
 #assert(DEBUG_CHUNK_SOLID_Y0 < DEBUG_CHUNK_SOLID_Y1 && DEBUG_CHUNK_SOLID_Y1 <= CHUNK_BLOCK_LENGTH)
 #assert(DEBUG_CHUNK_SOLID_Z0 < DEBUG_CHUNK_SOLID_Z1 && DEBUG_CHUNK_SOLID_Z1 <= CHUNK_BLOCK_LENGTH)
 
-chunk_voxel_debug_view_builder :: proc(view: ^ChunkVoxelView) {
+chunk_voxel_debug_rect_view_builder :: proc(view: ^ChunkVoxelView) {
 	view.blocks = make(#soa[]ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, transient_allocator)
-
-	for _, i in view.blocks {
-		view.blocks.occupancy[i] = .Empty
-	}
+	chunk_voxel_view_fill_empty(view)
 
 	for z in DEBUG_CHUNK_SOLID_Z0 ..< DEBUG_CHUNK_SOLID_Z1 {
 		for y in DEBUG_CHUNK_SOLID_Y0 ..< DEBUG_CHUNK_SOLID_Y1 {
@@ -311,7 +322,7 @@ chunk_voxel_view_build_naive_mesh :: proc(
 						continue
 					}
 
-					emit_terrain_face(
+					terrain_emit_face(
 						output.vertices,
 						output.indices,
 						u32(x),
@@ -333,6 +344,347 @@ chunk_voxel_view_build_naive_mesh :: proc(
 	return output
 }
 
+when ODIN_DEBUG {
+	debug_chunk_mesher_contract_checks_run :: proc() {
+		temp := mem.begin_arena_temp_memory(&transient_arena)
+		defer mem.end_arena_temp_memory(temp)
+
+		view := ChunkVoxelView {
+			blocks = make(#soa[]ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, transient_allocator),
+		}
+
+		packed_fields := terrain_unpack_vertex(terrain_pack_vertex(2, 3, 4, 5, 6, 1))
+		log.assertf(
+			packed_fields.block_x == 2,
+			"terrain pack/unpack: expected block_x 2, got %d",
+			packed_fields.block_x,
+		)
+		log.assertf(
+			packed_fields.block_y == 3,
+			"terrain pack/unpack: expected block_y 3, got %d",
+			packed_fields.block_y,
+		)
+		log.assertf(
+			packed_fields.block_z == 4,
+			"terrain pack/unpack: expected block_z 4, got %d",
+			packed_fields.block_z,
+		)
+		log.assertf(
+			packed_fields.normal_id == 5,
+			"terrain pack/unpack: expected normal 5, got %d",
+			packed_fields.normal_id,
+		)
+		log.assertf(
+			packed_fields.material_id == 6,
+			"terrain pack/unpack: expected material 6, got %d",
+			packed_fields.material_id,
+		)
+		log.assertf(
+			packed_fields.corner_id == 1,
+			"terrain pack/unpack: expected corner 1, got %d",
+			packed_fields.corner_id,
+		)
+
+		chunk_voxel_view_fill_empty(&view)
+		empty_output := chunk_voxel_view_build_naive_mesh(
+			view,
+			.Treat_Out_Of_Chunk_As_Empty,
+			transient_allocator,
+		)
+		log.assertf(
+			empty_output.face_count == 0,
+			"empty chunk: expected 0 faces, got %d",
+			empty_output.face_count,
+		)
+		log.assertf(
+			len(empty_output.vertices) == 0,
+			"empty chunk: expected 0 vertices, got %d",
+			len(empty_output.vertices),
+		)
+		log.assertf(
+			len(empty_output.indices) == 0,
+			"empty chunk: expected 0 indices, got %d",
+			len(empty_output.indices),
+		)
+
+		// one edge block proves boundary policy at local 0
+		chunk_voxel_view_fill_empty(&view)
+		index := chunk_block_index(0, 0, 0)
+		view.blocks.occupancy[index] = .Solid
+		view.blocks.material_id[index] = BlockMaterialID(5)
+
+		edge_output := chunk_voxel_view_build_naive_mesh(
+			view,
+			.Treat_Out_Of_Chunk_As_Empty,
+			transient_allocator,
+		)
+		log.assertf(
+			edge_output.face_count == 6,
+			"edge chunk: expected 6 face, got %d",
+			edge_output.face_count,
+		)
+
+		// one interior block exact payload
+		chunk_voxel_view_fill_empty(&view)
+		index = chunk_block_index(2, 3, 4)
+		view.blocks.occupancy[index] = .Solid
+		view.blocks.material_id[index] = BlockMaterialID(5)
+
+
+		output := chunk_voxel_view_build_naive_mesh(
+			view,
+			.Treat_Out_Of_Chunk_As_Empty,
+			transient_allocator,
+		)
+		log.assertf(
+			output.face_count == 6,
+			"edge chunk: expected 6 face, got %d",
+			output.face_count,
+		)
+		log.assertf(
+			len(output.vertices) == 24,
+			"edge chunk: expected 24 vertices, got %d",
+			len(output.vertices),
+		)
+		log.assertf(
+			len(output.indices) == 36,
+			"edge chunk: expected 36 indices, got %d",
+			len(output.indices),
+		)
+
+		expected_normals := [?]u32{0, 1, 2, 3, 4, 5}
+		for face_index in 0 ..< 6 {
+			expected_normal := expected_normals[face_index]
+			for corner_id in 0 ..< 4 {
+				corner_index := face_index * 4 + corner_id
+				unpacked_vertex := terrain_unpack_vertex(output.vertices[corner_index])
+
+				log.assertf(
+					unpacked_vertex.block_x == 2,
+					"single block vertex %d: expected block_x 2, got %d",
+					corner_index,
+					unpacked_vertex.block_x,
+				)
+				log.assertf(
+					unpacked_vertex.block_y == 3,
+					"single block vertex %d: expected block_y 3, got %d",
+					corner_index,
+					unpacked_vertex.block_y,
+				)
+				log.assertf(
+					unpacked_vertex.block_z == 4,
+					"single block vertex %d: expected block_z 4, got %d",
+					corner_index,
+					unpacked_vertex.block_z,
+				)
+				log.assertf(
+					unpacked_vertex.normal_id == expected_normal,
+					"single block vertex %d: expected normal %d, got %d",
+					corner_index,
+					expected_normal,
+					unpacked_vertex.normal_id,
+				)
+				log.assertf(
+					unpacked_vertex.material_id == 5,
+					"single block vertex %d: expected material 5, got %d",
+					corner_index,
+					unpacked_vertex.material_id,
+				)
+				log.assertf(
+					unpacked_vertex.corner_id == u32(corner_id),
+					"single block vertex %d: expected corner %d, got %d",
+					corner_index,
+					corner_id,
+					unpacked_vertex.corner_id,
+				)
+			}
+		}
+
+		for face_index in 0 ..< 6 {
+			base := u32(face_index * 4)
+			i := face_index * 6
+			log.assertf(output.indices[i + 0] == base + 0, "single block index %d mismatch", i + 0)
+			log.assertf(output.indices[i + 1] == base + 1, "single block index %d mismatch", i + 1)
+			log.assertf(output.indices[i + 2] == base + 2, "single block index %d mismatch", i + 2)
+			log.assertf(output.indices[i + 3] == base + 0, "single block index %d mismatch", i + 3)
+			log.assertf(output.indices[i + 4] == base + 2, "single block index %d mismatch", i + 4)
+			log.assertf(output.indices[i + 5] == base + 3, "single block index %d mismatch", i + 5)
+		}
+
+		// adjacent X/Y/Z: each pair should remove one shared face from each block
+		adjacent_pairs := [?][2]BlockCoord {
+			{{1, 1, 1}, {2, 1, 1}},
+			{{1, 1, 1}, {1, 2, 1}},
+			{{1, 1, 1}, {1, 1, 2}},
+		}
+
+		for pair, pair_index in adjacent_pairs {
+			chunk_voxel_view_fill_empty(&view)
+
+			for block in pair {
+				index := chunk_block_index(u32(block.x), u32(block.y), u32(block.z))
+				view.blocks.occupancy[index] = .Solid
+				view.blocks.material_id[index] = BlockMaterialID(1)
+			}
+
+			count := chunk_voxel_view_count_exposed_faces(view, .Treat_Out_Of_Chunk_As_Empty)
+			log.assertf(
+				count == 10,
+				"adjacent pair %d: expected 10 faces, got %d",
+				pair_index,
+				count,
+			)
+		}
+
+		// 2x2x2 solid cube: surface area is 6 * 2 * 2 = 24 faces.
+		chunk_voxel_view_fill_empty(&view)
+		for z in 1 ..< 3 {
+			for y in 1 ..< 3 {
+				for x in 1 ..< 3 {
+					index := chunk_block_index(u32(x), u32(y), u32(z))
+					view.blocks.occupancy[index] = .Solid
+					view.blocks.material_id[index] = BlockMaterialID(2)
+				}
+			}
+		}
+
+		output = chunk_voxel_view_build_naive_mesh(
+			view,
+			.Treat_Out_Of_Chunk_As_Empty,
+			transient_allocator,
+		)
+		log.assertf(output.face_count == 24, "2x2x2: expected 24 faces, got %d", output.face_count)
+		log.assertf(
+			len(output.vertices) == 96,
+			"2x2x2: expected 96 vertices, got %d",
+			len(output.vertices),
+		)
+		log.assertf(
+			len(output.indices) == 144,
+			"2x2x2: expected 144 indices, got %d",
+			len(output.indices),
+		)
+
+		// current rectangular debug fixture: 16 x 8 x 16 => 2*(16*8 + 16*16 + 8*16) = 1024.
+		chunk_voxel_debug_rect_view_builder(&view)
+
+		rect_count := chunk_voxel_view_count_exposed_faces(view, .Treat_Out_Of_Chunk_As_Empty)
+		log.assertf(rect_count == 1024, "debug rect: expected 1024 faces, got %d", rect_count)
+
+		// full chunk: only six outer surfaces emit.
+		chunk_voxel_view_fill_empty(&view)
+		for z in 0 ..< CHUNK_BLOCK_LENGTH {
+			for y in 0 ..< CHUNK_BLOCK_LENGTH {
+				for x in 0 ..< CHUNK_BLOCK_LENGTH {
+					index := chunk_block_index(u32(x), u32(y), u32(z))
+					view.blocks.occupancy[index] = .Solid
+					view.blocks.material_id[index] = BlockMaterialID(3)
+				}
+			}
+		}
+
+		output = chunk_voxel_view_build_naive_mesh(
+			view,
+			.Treat_Out_Of_Chunk_As_Empty,
+			transient_allocator,
+		)
+		log.assertf(
+			output.face_count == 24576,
+			"full chunk: expected 24576 faces, got %d",
+			output.face_count,
+		)
+		log.assertf(
+			len(output.vertices) == 98304,
+			"full chunk: expected 98304 vertices, got %d",
+			len(output.vertices),
+		)
+		log.assertf(
+			len(output.indices) == 147456,
+			"full chunk: expected 147456 indices, got %d",
+			len(output.indices),
+		)
+
+		// checkerboard: count-only, do not build mesh output.
+		chunk_voxel_view_fill_empty(&view)
+		for z in 0 ..< CHUNK_BLOCK_LENGTH {
+			for y in 0 ..< CHUNK_BLOCK_LENGTH {
+				for x in 0 ..< CHUNK_BLOCK_LENGTH {
+					if ((x + y + z) & 1) == 0 {
+						index := chunk_block_index(u32(x), u32(y), u32(z))
+						view.blocks.occupancy[index] = .Solid
+						view.blocks.material_id[index] = BlockMaterialID(4)
+					}
+				}
+			}
+		}
+
+		checker_count := chunk_voxel_view_count_exposed_faces(view, .Treat_Out_Of_Chunk_As_Empty)
+		log.assertf(
+			checker_count == 786432,
+			"checkerboard: expected 786432 faces, got %d",
+			checker_count,
+		)
+
+		log.debug("Chunk mesher contract checks passed")
+	}
+}
+
+
+///////////////////////////////////////////
+// Terrain
+///////////////////////////////////////////
+TERRAIN_PACK_LOCAL_X_SHIFT :: 0
+TERRAIN_PACK_LOCAL_Y_SHIFT :: 6
+TERRAIN_PACK_LOCAL_Z_SHIFT :: 12
+TERRAIN_PACK_NORMAL_SHIFT :: 18
+TERRAIN_PACK_MATERIAL_SHIFT :: 21
+TERRAIN_PACK_CORNER_SHIFT :: 29
+TERRAIN_PACK_LOCAL_MASK :: 0x3F
+TERRAIN_PACK_NORMAL_MASK :: 0x7
+TERRAIN_PACK_MATERIAL_MASK :: 0xFF
+TERRAIN_PACK_CORNER_MASK :: 0x3
+
+TERRAIN_FACE_DESCS := [?]TerrainFaceDesc {
+	// +X
+	{neighbor_dx = 1, neighbor_dy = 0, neighbor_dz = 0, normal_id = 0},
+
+	// -X
+	{neighbor_dx = -1, neighbor_dy = 0, neighbor_dz = 0, normal_id = 1},
+
+	// +Y
+	{neighbor_dx = 0, neighbor_dy = 1, neighbor_dz = 0, normal_id = 2},
+
+	// -Y
+	{neighbor_dx = 0, neighbor_dy = -1, neighbor_dz = 0, normal_id = 3},
+
+	// +Z
+	{neighbor_dx = 0, neighbor_dy = 0, neighbor_dz = 1, normal_id = 4},
+
+	// -Z
+	{neighbor_dx = 0, neighbor_dy = 0, neighbor_dz = -1, normal_id = 5},
+}
+
+TerrainPackedVertex :: distinct u32
+#assert(size_of(TerrainPackedVertex) == 4)
+
+TerrainUnpackedVertex :: struct {
+	block_x, block_y, block_z:         u32,
+	normal_id, material_id, corner_id: u32,
+}
+#assert(size_of(TerrainUnpackedVertex) == 24)
+
+TerrainDrawParams :: struct {
+	vertex_byte_offset:  u32,
+	vertex_stride_bytes: u32,
+	_padding:            [2]u32,
+	chunk_origin:        [4]f32, // xyz used, w = block_world_size
+}
+
+TerrainFaceDesc :: struct {
+	neighbor_dx, neighbor_dy, neighbor_dz: i32,
+	normal_id:                             u32,
+}
+
 terrain_chunk_origin_world_from_coord :: proc(coord: ChunkCoord) -> [4]f32 {
 	origin := chunk_origin_from_coord(coord)
 	return {
@@ -349,75 +701,6 @@ terrain_chunk_center_world_from_coord :: proc(coord: ChunkCoord) -> [3]f32 {
 	return {origin[0] + half_length, origin[1] + half_length, origin[2] + half_length}
 }
 
-///////////////////////////////////////////
-// Terrain
-///////////////////////////////////////////
-
-TERRAIN_FACE_DESCS := [?]TerrainFaceDesc {
-	// +X
-	{
-		neighbor_dx = 1,
-		neighbor_dy = 0,
-		neighbor_dz = 0,
-		normal_id = 0,
-	},
-
-	// -X
-	{
-		neighbor_dx = -1,
-		neighbor_dy = 0,
-		neighbor_dz = 0,
-		normal_id = 1,
-	},
-
-	// +Y
-	{
-		neighbor_dx = 0,
-		neighbor_dy = 1,
-		neighbor_dz = 0,
-		normal_id = 2,
-	},
-
-	// -Y
-	{
-		neighbor_dx = 0,
-		neighbor_dy = -1,
-		neighbor_dz = 0,
-		normal_id = 3,
-	},
-
-	// +Z
-	{
-		neighbor_dx = 0,
-		neighbor_dy = 0,
-		neighbor_dz = 1,
-		normal_id = 4,
-	},
-
-	// -Z
-	{
-		neighbor_dx = 0,
-		neighbor_dy = 0,
-		neighbor_dz = -1,
-		normal_id = 5,
-	},
-}
-
-TerrainPackedVertex :: distinct u32
-#assert(size_of(TerrainPackedVertex) == 4)
-
-TerrainDrawParams :: struct {
-	vertex_byte_offset:  u32,
-	vertex_stride_bytes: u32,
-	_padding:            [2]u32,
-	chunk_origin:        [4]f32, // xyz used, w = block_world_size
-}
-
-TerrainFaceDesc :: struct {
-	neighbor_dx, neighbor_dy, neighbor_dz: i32,
-	normal_id: u32,
-}
-
 terrain_pack_vertex :: proc(
 	block_x, block_y, block_z: u32,
 	normal_id, material_id, corner_id: u32,
@@ -429,16 +712,28 @@ terrain_pack_vertex :: proc(
 	log.assertf(material_id <= 255, "terrain material_id out of range: %d", material_id)
 	log.assertf(corner_id < 4, "terrain corner_id out of range: %d", corner_id)
 	return TerrainPackedVertex(
-		(block_x << 0) |
-		(block_y << 6) |
-		(block_z << 12) |
-		(normal_id << 18) |
-		(material_id << 21) |
-		(corner_id << 29),
+		(block_x << TERRAIN_PACK_LOCAL_X_SHIFT) |
+		(block_y << TERRAIN_PACK_LOCAL_Y_SHIFT) |
+		(block_z << TERRAIN_PACK_LOCAL_Z_SHIFT) |
+		(normal_id << TERRAIN_PACK_NORMAL_SHIFT) |
+		(material_id << TERRAIN_PACK_MATERIAL_SHIFT) |
+		(corner_id << TERRAIN_PACK_CORNER_SHIFT),
 	)
 }
 
-emit_terrain_face :: proc(
+terrain_unpack_vertex :: proc(vertex: TerrainPackedVertex) -> TerrainUnpackedVertex {
+	packed := u32(vertex)
+	return {
+		block_x = (packed >> TERRAIN_PACK_LOCAL_X_SHIFT) & TERRAIN_PACK_LOCAL_MASK,
+		block_y = (packed >> TERRAIN_PACK_LOCAL_Y_SHIFT) & TERRAIN_PACK_LOCAL_MASK,
+		block_z = (packed >> TERRAIN_PACK_LOCAL_Z_SHIFT) & TERRAIN_PACK_LOCAL_MASK,
+		normal_id = (packed >> TERRAIN_PACK_NORMAL_SHIFT) & TERRAIN_PACK_NORMAL_MASK,
+		material_id = (packed >> TERRAIN_PACK_MATERIAL_SHIFT) & TERRAIN_PACK_MATERIAL_MASK,
+		corner_id = (packed >> TERRAIN_PACK_CORNER_SHIFT) & TERRAIN_PACK_CORNER_MASK,
+	}
+}
+
+terrain_emit_face :: proc(
 	vertices: []TerrainPackedVertex,
 	indices: []u32,
 	block_x, block_y, block_z: u32,
@@ -899,7 +1194,10 @@ geometry_append :: proc(
 	)
 }
 
-geometry_append_chunk_mesh_output :: proc(pool: ^GeometryPool, output: ChunkMeshOutput) -> GeometryID {
+geometry_append_chunk_mesh_output :: proc(
+	pool: ^GeometryPool,
+	output: ChunkMeshOutput,
+) -> GeometryID {
 	log.assertf(pool != nil, "pool is nil")
 
 	if output.face_count == 0 {
@@ -920,7 +1218,10 @@ geometry_append_chunk_mesh_output :: proc(pool: ^GeometryPool, output: ChunkMesh
 	vertex_count := output.face_count * 4
 	index_count := output.face_count * 6
 
-	log.assertf(len(output.vertices) == int(vertex_count), "chunk mesh output vertex count mismatch")
+	log.assertf(
+		len(output.vertices) == int(vertex_count),
+		"chunk mesh output vertex count mismatch",
+	)
 	log.assertf(len(output.indices) == int(index_count), "chunk mesh output index count mismatch")
 
 	stride := geometry_layout_stride_bytes(.Terrain_Packed_U32)
@@ -958,56 +1259,6 @@ ASPECT_RATIO :: f32(16.0 / 9.0)
 DEFAULT_ACCELERATION :: f32(1.5)
 MAX_ACCELERATION :: f32(10.0)
 MOUSE_SENSITIVITY :: f32(0.0025)
-
-cube_vertices := [?]PositionColorVertex {
-	{position = {-0.5, -0.5, -0.5, 0.0}, color = {1.0, 0.1, 0.1, 1.0}},
-	{position = {0.5, -0.5, -0.5, 0.0}, color = {0.1, 1.0, 0.1, 1.0}},
-	{position = {0.5, 0.5, -0.5, 0.0}, color = {0.1, 0.1, 1.0, 1.0}},
-	{position = {-0.5, 0.5, -0.5, 0.0}, color = {1.0, 1.0, 0.1, 1.0}},
-	{position = {-0.5, -0.5, 0.5, 0.0}, color = {1.0, 0.1, 1.0, 1.0}},
-	{position = {0.5, -0.5, 0.5, 0.0}, color = {0.1, 1.0, 1.0, 1.0}},
-	{position = {0.5, 0.5, 0.5, 0.0}, color = {1.0, 1.0, 1.0, 1.0}},
-	{position = {-0.5, 0.5, 0.5, 0.0}, color = {0.2, 0.6, 1.0, 1.0}},
-}
-
-cube_indices := [?]u32 {
-	0,
-	2,
-	1,
-	2,
-	0,
-	3,
-	1,
-	6,
-	5,
-	6,
-	1,
-	2,
-	5,
-	7,
-	4,
-	7,
-	5,
-	6,
-	4,
-	3,
-	0,
-	3,
-	4,
-	7,
-	3,
-	6,
-	2,
-	6,
-	3,
-	7,
-	4,
-	1,
-	5,
-	1,
-	4,
-	0,
-}
 
 //////////////////////////////////////
 // State
@@ -1263,7 +1514,7 @@ setup_resources :: proc() {
 	temp := mem.begin_arena_temp_memory(&transient_arena)
 	defer mem.end_arena_temp_memory(temp)
 
-	chunk_voxel_debug_view_builder(&view)
+	chunk_voxel_debug_rect_view_builder(&view)
 
 	mesh_output := chunk_voxel_view_build_naive_mesh(
 		view,
@@ -1271,10 +1522,7 @@ setup_resources :: proc() {
 		transient_allocator,
 	)
 
-	chunk_geometry_id := geometry_append_chunk_mesh_output(
-		&geometry_pool,
-		mesh_output,
-	)
+	chunk_geometry_id := geometry_append_chunk_mesh_output(&geometry_pool, mesh_output)
 
 	test_chunk = chunk_create(ChunkCoord{1, 1, 1})
 	test_chunk.geometry_id = chunk_geometry_id
@@ -1549,6 +1797,10 @@ main :: proc() {
 	persistent_allocator = mem.arena_allocator(&persistent_arena)
 
 	context.allocator = persistent_allocator
+
+	when ODIN_DEBUG {
+		debug_chunk_mesher_contract_checks_run()
+	}
 
 	init()
 	defer shutdown()
