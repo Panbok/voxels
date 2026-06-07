@@ -1,12 +1,12 @@
 static const float3 DEBUG_MATERIAL_COLORS[8] = {
-    float3(0.38f, 0.75f, 0.34f),
-    float3(0.55f, 0.38f, 0.22f),
-    float3(0.45f, 0.45f, 0.48f),
-    float3(0.70f, 0.68f, 0.55f),
-    float3(0.25f, 0.45f, 0.85f),
-    float3(0.80f, 0.35f, 0.25f),
-    float3(0.85f, 0.78f, 0.36f),
-    float3(0.85f, 0.85f, 0.85f),
+    float3(0.38f, 0.75f, 0.34f),     // Grass
+    float3(0.55f, 0.38f, 0.22f),     // Dirt
+    float3(0.45f, 0.45f, 0.48f),     // Stone
+    float3(0.70f, 0.68f, 0.55f),     // Sand
+    float3(0.25f, 0.45f, 0.85f),     // Water
+    float3(0.80f, 0.35f, 0.25f),     // Lava / Red Sand / Terracotta
+    float3(0.85f, 0.78f, 0.36f),     // Gold / Sandstone / Hay
+    float3(0.85f, 0.85f, 0.85f),     // Snow / Ice / White Concrete
 };
 
 float face_shade(uint normalID)

@@ -201,6 +201,11 @@ DEBUG_CHUNK_SOLID_Z1 :: 24
 #assert(DEBUG_CHUNK_SOLID_Y0 < DEBUG_CHUNK_SOLID_Y1 && DEBUG_CHUNK_SOLID_Y1 <= CHUNK_BLOCK_LENGTH)
 #assert(DEBUG_CHUNK_SOLID_Z0 < DEBUG_CHUNK_SOLID_Z1 && DEBUG_CHUNK_SOLID_Z1 <= CHUNK_BLOCK_LENGTH)
 
+DEBUG_CHUNK_GRID_X :: 3
+DEBUG_CHUNK_GRID_Z :: 3
+DEBUG_CHUNK_COUNT :: DEBUG_CHUNK_GRID_X * DEBUG_CHUNK_GRID_Z
+#assert(DEBUG_CHUNK_COUNT > 0)
+
 chunk_voxel_debug_rect_view_builder :: proc(view: ^ChunkVoxelView) {
 	view.blocks = make(#soa[]ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, transient_allocator)
 	chunk_voxel_view_fill_empty(view)
@@ -349,8 +354,8 @@ chunk_voxel_debug_heightfield_view_builder :: proc(view: ^ChunkVoxelView, chunk:
 	chunk_voxel_view_fill_empty(view)
 
 	origin := chunk_origin_from_coord(chunk)
-	for z in 0..<CHUNK_BLOCK_LENGTH {
-		for x in 0..<CHUNK_BLOCK_LENGTH {
+	for z in 0 ..< CHUNK_BLOCK_LENGTH {
+		for x in 0 ..< CHUNK_BLOCK_LENGTH {
 			world_x := origin.x + i32(x)
 			world_z := origin.z + i32(z)
 
@@ -371,7 +376,7 @@ chunk_voxel_debug_heightfield_view_builder :: proc(view: ^ChunkVoxelView, chunk:
 			height := i32(height_f)
 			height = math.clamp(height, 0, CHUNK_BLOCK_LENGTH - 1)
 
-			for y in 0..<CHUNK_BLOCK_LENGTH {
+			for y in 0 ..< CHUNK_BLOCK_LENGTH {
 				world_y := origin.y + i32(y)
 
 				// Heightfield terrain is solid at and below the sampled surface.
@@ -387,7 +392,7 @@ chunk_voxel_debug_heightfield_view_builder :: proc(view: ^ChunkVoxelView, chunk:
 				if blocks_below_surface < DEBUG_GRASS_CAP_BLOCK_DEPTH {
 					material_id = BlockMaterialID(DEBUG_GRASS_MAT_ID)
 				} else if blocks_below_surface <
-				           DEBUG_GRASS_CAP_BLOCK_DEPTH + DEBUG_DIRT_LAYER_BLOCK_DEPTH {
+				   DEBUG_GRASS_CAP_BLOCK_DEPTH + DEBUG_DIRT_LAYER_BLOCK_DEPTH {
 					material_id = BlockMaterialID(DEBUG_DIRT_MAT_ID)
 				}
 
@@ -577,7 +582,7 @@ when ODIN_DEBUG {
 			chunk_voxel_view_fill_empty(&view)
 
 			for block in pair {
-				index := chunk_block_index(u32(block.x), u32(block.y), u32(block.z))
+				index = chunk_block_index(u32(block.x), u32(block.y), u32(block.z))
 				view.blocks.occupancy[index] = .Solid
 				view.blocks.material_id[index] = BlockMaterialID(1)
 			}
@@ -596,7 +601,7 @@ when ODIN_DEBUG {
 		for z in 1 ..< 3 {
 			for y in 1 ..< 3 {
 				for x in 1 ..< 3 {
-					index := chunk_block_index(u32(x), u32(y), u32(z))
+					index = chunk_block_index(u32(x), u32(y), u32(z))
 					view.blocks.occupancy[index] = .Solid
 					view.blocks.material_id[index] = BlockMaterialID(2)
 				}
@@ -631,7 +636,7 @@ when ODIN_DEBUG {
 		for z in 0 ..< CHUNK_BLOCK_LENGTH {
 			for y in 0 ..< CHUNK_BLOCK_LENGTH {
 				for x in 0 ..< CHUNK_BLOCK_LENGTH {
-					index := chunk_block_index(u32(x), u32(y), u32(z))
+					index = chunk_block_index(u32(x), u32(y), u32(z))
 					view.blocks.occupancy[index] = .Solid
 					view.blocks.material_id[index] = BlockMaterialID(3)
 				}
@@ -665,7 +670,7 @@ when ODIN_DEBUG {
 			for y in 0 ..< CHUNK_BLOCK_LENGTH {
 				for x in 0 ..< CHUNK_BLOCK_LENGTH {
 					if ((x + y + z) & 1) == 0 {
-						index := chunk_block_index(u32(x), u32(y), u32(z))
+						index = chunk_block_index(u32(x), u32(y), u32(z))
 						view.blocks.occupancy[index] = .Solid
 						view.blocks.material_id[index] = BlockMaterialID(4)
 					}
@@ -682,17 +687,22 @@ when ODIN_DEBUG {
 
 		chunk_voxel_debug_heightfield_view_builder(&view, ChunkCoord{0, 0, 0})
 		heightfield_top_y: [CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH]i32
-		for z in 0..<CHUNK_BLOCK_LENGTH {
-			for x in 0..<CHUNK_BLOCK_LENGTH {
+		for z in 0 ..< CHUNK_BLOCK_LENGTH {
+			for x in 0 ..< CHUNK_BLOCK_LENGTH {
 				top_y: i32 = -1
-				for y in 0..<CHUNK_BLOCK_LENGTH {
-					index := chunk_block_index(u32(x), u32(y), u32(z))
+				for y in 0 ..< CHUNK_BLOCK_LENGTH {
+					index = chunk_block_index(u32(x), u32(y), u32(z))
 					if view.blocks.occupancy[index] == .Solid {
 						top_y = i32(y)
 					}
 				}
 
-				log.assertf(top_y >= 0, "heightfield column %d,%d: expected at least one solid block", x, z)
+				log.assertf(
+					top_y >= 0,
+					"heightfield column %d,%d: expected at least one solid block",
+					x,
+					z,
+				)
 				heightfield_top_y[x + z * CHUNK_BLOCK_LENGTH] = top_y
 
 				top_index := chunk_block_index(u32(x), u32(top_y), u32(z))
@@ -706,13 +716,14 @@ when ODIN_DEBUG {
 					top_material_id,
 				)
 
-				for y in 0..<CHUNK_BLOCK_LENGTH {
+				for y in 0 ..< CHUNK_BLOCK_LENGTH {
 					blocks_below_surface := top_y - i32(y)
-					if blocks_below_surface < 0 || blocks_below_surface >= DEBUG_GRASS_CAP_BLOCK_DEPTH {
+					if blocks_below_surface < 0 ||
+					   blocks_below_surface >= DEBUG_GRASS_CAP_BLOCK_DEPTH {
 						continue
 					}
 
-					index := chunk_block_index(u32(x), u32(y), u32(z))
+					index = chunk_block_index(u32(x), u32(y), u32(z))
 					log.assertf(
 						view.blocks.occupancy[index] == .Solid,
 						"heightfield column %d,%d: expected grass-cap block %d to be solid",
@@ -739,7 +750,7 @@ when ODIN_DEBUG {
 			.Treat_Out_Of_Chunk_As_Empty,
 			transient_allocator,
 		)
-		for face_index in 0..<heightfield_output.face_count {
+		for face_index in 0 ..< heightfield_output.face_count {
 			vertex := terrain_unpack_vertex(heightfield_output.vertices[face_index * 4])
 			top_y := heightfield_top_y[vertex.block_x + vertex.block_z * CHUNK_BLOCK_LENGTH]
 
@@ -1422,9 +1433,9 @@ camera := Camera {
 	near_plane = 0.1,
 	far_plane  = 100.0,
 }
-// todo: replace this single debug chunk with real chunk storage/iteration.
-test_chunk: Chunk
-
+// todo: replace this debug chunk array with real chunk storage/iteration.
+debug_chunks: [DEBUG_CHUNK_COUNT]Chunk
+debug_chunk_count: u32
 
 debug_mode := true
 enable_vsync := true
@@ -1646,22 +1657,62 @@ setup_resources :: proc() {
 	)
 	log.assert(depth_texture != nil, "Failed to create depth texture!")
 
-	view := ChunkVoxelView{}
-
 	temp := mem.begin_arena_temp_memory(&transient_arena)
 	defer mem.end_arena_temp_memory(temp)
 
-	test_chunk = chunk_create(ChunkCoord{0, 0, 0})
-	chunk_voxel_debug_heightfield_view_builder(&view, test_chunk.coord)
-	mesh_output := chunk_voxel_view_build_naive_mesh(
-		view,
-		.Treat_Out_Of_Chunk_As_Empty,
-		transient_allocator,
+	chunks_attempted: u32
+	chunks_uploaded: u32
+	chunks_empty: u32
+	total_faces: u32
+
+	debug_chunk_count = 0
+	for gz in 0 ..< DEBUG_CHUNK_GRID_Z {
+		for gx in 0 ..< DEBUG_CHUNK_GRID_X {
+			chunks_attempted += 1
+
+			coord := ChunkCoord{i32(gx) - 1, 0, i32(gz) - 1}
+
+			view := ChunkVoxelView{}
+			chunk_voxel_debug_heightfield_view_builder(&view, coord)
+
+			mesh_output := chunk_voxel_view_build_naive_mesh(
+				view,
+				.Treat_Out_Of_Chunk_As_Empty,
+				transient_allocator,
+			)
+			total_faces += mesh_output.face_count
+
+			if mesh_output.face_count == 0 {
+				chunks_empty += 1
+			} else {
+				chunks_uploaded += 1
+			}
+
+			chunk := chunk_create(coord)
+			chunk.geometry_id = geometry_append_chunk_mesh_output(&geometry_pool, mesh_output)
+
+			log.debugf(
+				"Debug chunk mesh: coord=%v faces=%d vertices=%d indices=%d",
+				chunk.coord,
+				mesh_output.face_count,
+				mesh_output.face_count * 4,
+				mesh_output.face_count * 6,
+			)
+
+			debug_chunks[debug_chunk_count] = chunk
+			debug_chunk_count += 1
+		}
+	}
+
+	log.debugf(
+		"Debug chunk grid: attempted=%d uploaded=%d empty=%d total_faces=%d",
+		chunks_attempted,
+		chunks_uploaded,
+		chunks_empty,
+		total_faces,
 	)
 
-	chunk_geometry_id := geometry_append_chunk_mesh_output(&geometry_pool, mesh_output)
-	test_chunk.geometry_id = chunk_geometry_id
-	debug_position_camera_for_chunk(test_chunk.coord)
+	debug_position_camera_for_chunk(debug_chunks[0].coord)
 
 	log.debug("Resources initialized")
 }
@@ -1746,9 +1797,13 @@ render :: proc() {
 			)
 		}
 
-		// todo: replace this single debug chunk draw with iteration over loaded chunks.
-		if test_chunk.geometry_id != INVALID_GEOMETRY_ID {
-			geometry := geometry_get(&geometry_pool, test_chunk.geometry_id)
+		// todo: replace this debug chunks draw with iteration over loaded chunks.
+		for chunk in debug_chunks[:debug_chunk_count] {
+			if chunk.geometry_id == INVALID_GEOMETRY_ID {
+				continue
+			}
+
+			geometry := geometry_get(&geometry_pool, chunk.geometry_id)
 			log.assertf(
 				geometry.layout_kind == .Terrain_Packed_U32,
 				"chunk geometry must use terrain layout: %v",
@@ -1761,7 +1816,7 @@ render :: proc() {
 				&view_projection,
 				cast(u32)size_of(matrix[4, 4]f32),
 			)
-			chunk_origin_world := terrain_chunk_origin_world_from_coord(test_chunk.coord)
+			chunk_origin_world := terrain_chunk_origin_world_from_coord(chunk.coord)
 			draw_params := TerrainDrawParams {
 				vertex_byte_offset  = geometry.vertex_byte_offset,
 				vertex_stride_bytes = geometry.vertex_stride_bytes,
