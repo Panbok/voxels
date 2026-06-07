@@ -5,7 +5,7 @@ import sdl "vendor:sdl3"
 import "base:runtime"
 import "core:c"
 import "core:log"
-import "core:math"
+import math "core:math"
 import la "core:math/linalg"
 import "core:mem"
 import "core:os"
@@ -344,6 +344,61 @@ chunk_voxel_view_build_naive_mesh :: proc(
 	return output
 }
 
+chunk_voxel_debug_heightfield_view_builder :: proc(view: ^ChunkVoxelView, chunk: ChunkCoord) {
+	view.blocks = make(#soa[]ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, transient_allocator)
+	chunk_voxel_view_fill_empty(view)
+
+	origin := chunk_origin_from_coord(chunk)
+	for z in 0..<CHUNK_BLOCK_LENGTH {
+		for x in 0..<CHUNK_BLOCK_LENGTH {
+			world_x := origin.x + i32(x)
+			world_z := origin.z + i32(z)
+
+			// Sample in world block coordinates so neighboring chunks use the same
+			// heightfield instead of repeating the same local 64x64 tile.
+			//
+			// The base height keeps terrain above the chunk floor. The three waves
+			// use different axes/frequencies so the debug terrain has broad hills
+			// instead of a single obvious stripe pattern.
+			height_f :=
+				18.0 +
+				math.sin_f32(f32(world_x) * 0.13) * 7.0 +
+				math.cos_f32(f32(world_z) * 0.11) * 5.0 +
+				math.sin_f32(f32(world_x + world_z) * 0.07) * 4.0
+
+			// Clamp to the vertical block range this first debug chunk can represent.
+			// Later multi-height terrain can decide whether to generate stacked chunks.
+			height := i32(height_f)
+			height = math.clamp(height, 0, CHUNK_BLOCK_LENGTH - 1)
+
+			for y in 0..<CHUNK_BLOCK_LENGTH {
+				world_y := origin.y + i32(y)
+
+				// Heightfield terrain is solid at and below the sampled surface.
+				if world_y > height {
+					continue
+				}
+
+				// Material is still block-level. A shallow grass cap keeps ordinary
+				// slope side faces green; otherwise just-below-top dirt blocks show as
+				// brown speckles wherever neighboring columns are lower.
+				blocks_below_surface := height - world_y
+				material_id := BlockMaterialID(DEBUG_STONE_MAT_ID)
+				if blocks_below_surface < DEBUG_GRASS_CAP_BLOCK_DEPTH {
+					material_id = BlockMaterialID(DEBUG_GRASS_MAT_ID)
+				} else if blocks_below_surface <
+				           DEBUG_GRASS_CAP_BLOCK_DEPTH + DEBUG_DIRT_LAYER_BLOCK_DEPTH {
+					material_id = BlockMaterialID(DEBUG_DIRT_MAT_ID)
+				}
+
+				index := chunk_block_index(u32(x), u32(y), u32(z))
+				view.blocks.occupancy[index] = .Solid
+				view.blocks.material_id[index] = material_id
+			}
+		}
+	}
+}
+
 when ODIN_DEBUG {
 	debug_chunk_mesher_contract_checks_run :: proc() {
 		temp := mem.begin_arena_temp_memory(&transient_arena)
@@ -625,6 +680,82 @@ when ODIN_DEBUG {
 			checker_count,
 		)
 
+		chunk_voxel_debug_heightfield_view_builder(&view, ChunkCoord{0, 0, 0})
+		heightfield_top_y: [CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH]i32
+		for z in 0..<CHUNK_BLOCK_LENGTH {
+			for x in 0..<CHUNK_BLOCK_LENGTH {
+				top_y: i32 = -1
+				for y in 0..<CHUNK_BLOCK_LENGTH {
+					index := chunk_block_index(u32(x), u32(y), u32(z))
+					if view.blocks.occupancy[index] == .Solid {
+						top_y = i32(y)
+					}
+				}
+
+				log.assertf(top_y >= 0, "heightfield column %d,%d: expected at least one solid block", x, z)
+				heightfield_top_y[x + z * CHUNK_BLOCK_LENGTH] = top_y
+
+				top_index := chunk_block_index(u32(x), u32(top_y), u32(z))
+				top_material_id := u32(u8(view.blocks.material_id[top_index]))
+				log.assertf(
+					top_material_id == DEBUG_GRASS_MAT_ID,
+					"heightfield column %d,%d: expected top material %d, got %d",
+					x,
+					z,
+					DEBUG_GRASS_MAT_ID,
+					top_material_id,
+				)
+
+				for y in 0..<CHUNK_BLOCK_LENGTH {
+					blocks_below_surface := top_y - i32(y)
+					if blocks_below_surface < 0 || blocks_below_surface >= DEBUG_GRASS_CAP_BLOCK_DEPTH {
+						continue
+					}
+
+					index := chunk_block_index(u32(x), u32(y), u32(z))
+					log.assertf(
+						view.blocks.occupancy[index] == .Solid,
+						"heightfield column %d,%d: expected grass-cap block %d to be solid",
+						x,
+						z,
+						y,
+					)
+
+					material_id := u32(u8(view.blocks.material_id[index]))
+					log.assertf(
+						material_id == DEBUG_GRASS_MAT_ID,
+						"heightfield column %d,%d: expected grass-cap material %d, got %d",
+						x,
+						z,
+						DEBUG_GRASS_MAT_ID,
+						material_id,
+					)
+				}
+			}
+		}
+
+		heightfield_output := chunk_voxel_view_build_naive_mesh(
+			view,
+			.Treat_Out_Of_Chunk_As_Empty,
+			transient_allocator,
+		)
+		for face_index in 0..<heightfield_output.face_count {
+			vertex := terrain_unpack_vertex(heightfield_output.vertices[face_index * 4])
+			top_y := heightfield_top_y[vertex.block_x + vertex.block_z * CHUNK_BLOCK_LENGTH]
+
+			if i32(vertex.block_y) != top_y {
+				continue
+			}
+
+			log.assertf(
+				vertex.material_id == DEBUG_GRASS_MAT_ID,
+				"heightfield face %d: expected top block material %d, got %d",
+				face_index,
+				DEBUG_GRASS_MAT_ID,
+				vertex.material_id,
+			)
+		}
+
 		log.debug("Chunk mesher contract checks passed")
 	}
 }
@@ -643,6 +774,12 @@ TERRAIN_PACK_LOCAL_MASK :: 0x3F
 TERRAIN_PACK_NORMAL_MASK :: 0x7
 TERRAIN_PACK_MATERIAL_MASK :: 0xFF
 TERRAIN_PACK_CORNER_MASK :: 0x3
+
+DEBUG_GRASS_MAT_ID :: 0
+DEBUG_DIRT_MAT_ID :: 1
+DEBUG_STONE_MAT_ID :: 2
+DEBUG_GRASS_CAP_BLOCK_DEPTH :: 4
+DEBUG_DIRT_LAYER_BLOCK_DEPTH :: 4
 
 TERRAIN_FACE_DESCS := [?]TerrainFaceDesc {
 	// +X
@@ -1514,8 +1651,8 @@ setup_resources :: proc() {
 	temp := mem.begin_arena_temp_memory(&transient_arena)
 	defer mem.end_arena_temp_memory(temp)
 
-	chunk_voxel_debug_rect_view_builder(&view)
-
+	test_chunk = chunk_create(ChunkCoord{0, 0, 0})
+	chunk_voxel_debug_heightfield_view_builder(&view, test_chunk.coord)
 	mesh_output := chunk_voxel_view_build_naive_mesh(
 		view,
 		.Treat_Out_Of_Chunk_As_Empty,
@@ -1523,11 +1660,8 @@ setup_resources :: proc() {
 	)
 
 	chunk_geometry_id := geometry_append_chunk_mesh_output(&geometry_pool, mesh_output)
-
-	test_chunk = chunk_create(ChunkCoord{1, 1, 1})
 	test_chunk.geometry_id = chunk_geometry_id
 	debug_position_camera_for_chunk(test_chunk.coord)
-
 
 	log.debug("Resources initialized")
 }
