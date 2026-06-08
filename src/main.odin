@@ -287,10 +287,10 @@ DEBUG_CHUNK_SOLID_Z1 :: 24
 #assert(DEBUG_CHUNK_SOLID_Y0 < DEBUG_CHUNK_SOLID_Y1 && DEBUG_CHUNK_SOLID_Y1 <= CHUNK_BLOCK_LENGTH)
 #assert(DEBUG_CHUNK_SOLID_Z0 < DEBUG_CHUNK_SOLID_Z1 && DEBUG_CHUNK_SOLID_Z1 <= CHUNK_BLOCK_LENGTH)
 
-DEBUG_CHUNK_GRID_X :: 3
-DEBUG_CHUNK_GRID_Z :: 3
-DEBUG_CHUNK_COUNT :: DEBUG_CHUNK_GRID_X * DEBUG_CHUNK_GRID_Z
-#assert(DEBUG_CHUNK_COUNT > 0)
+STARTUP_CHUNK_GRID_X :: 3
+STARTUP_CHUNK_GRID_Z :: 3
+STARTUP_CHUNK_COUNT :: STARTUP_CHUNK_GRID_X * STARTUP_CHUNK_GRID_Z
+#assert(STARTUP_CHUNK_COUNT > 0)
 
 BlockOccupancy :: enum u8 {
 	Empty,
@@ -301,6 +301,7 @@ BlockMaterialID :: distinct u8
 
 ChunkMeshBoundaryPolicy :: enum {
 	Treat_Out_Of_Chunk_As_Empty,
+	Sample_Neighbor_Snapshots,
 }
 
 ChunkVoxelViewElement :: struct {
@@ -325,8 +326,16 @@ ChunkSnapshot :: struct {
 	voxel_view: ChunkVoxelView,
 }
 
+ChunkMeshNeighborSnapshots :: struct {
+	plus_x, minus_x: Maybe(ChunkSnapshot),
+	plus_y, minus_y: Maybe(ChunkSnapshot),
+	plus_z, minus_z: Maybe(ChunkSnapshot),
+}
+
+
 ChunkMeshJob :: struct {
 	snapshot:         ChunkSnapshot,
+	neighbors:       ChunkMeshNeighborSnapshots,
 	boundary_policy:  ChunkMeshBoundaryPolicy,
 	output_allocator: mem.Allocator,
 }
@@ -408,6 +417,7 @@ chunk_voxel_view_is_solid_for_meshing :: proc(
 	view: ChunkVoxelView,
 	x, y, z: i32,
 	boundary_policy: ChunkMeshBoundaryPolicy,
+	neighbor_snapshots: Maybe(ChunkMeshNeighborSnapshots) = nil,
 ) -> bool {
 	if chunk_block_coord_is_inside(x, y, z) {
 		return chunk_voxel_view_is_solid_local(view, u32(x), u32(y), u32(z))
@@ -416,6 +426,54 @@ chunk_voxel_view_is_solid_for_meshing :: proc(
 	#partial switch boundary_policy {
 	case .Treat_Out_Of_Chunk_As_Empty:
 		return false
+	case .Sample_Neighbor_Snapshots:
+		neighbors, ok := neighbor_snapshots.?
+		log.assert(ok, "neighbors must be provided when boundary policy is Sample_Neighbor_Snapshots")
+
+		out_of_chunk_axis_count := 0
+		if x < 0 || x >= CHUNK_BLOCK_LENGTH {out_of_chunk_axis_count += 1}
+		if y < 0 || y >= CHUNK_BLOCK_LENGTH {out_of_chunk_axis_count += 1}
+		if z < 0 || z >= CHUNK_BLOCK_LENGTH {out_of_chunk_axis_count += 1}
+		log.assertf(
+			out_of_chunk_axis_count == 1,
+			"neighbor snapshot sampling expects exactly one out-of-chunk axis, got %d",
+			out_of_chunk_axis_count,
+		)
+
+		neighbor: Maybe(ChunkSnapshot)
+		neighbor_x, neighbor_y, neighbor_z := x, y, z
+
+		if x < 0 {
+			neighbor = neighbors.minus_x
+			neighbor_x = CHUNK_BLOCK_LOCAL_MAX
+		} else if x >= CHUNK_BLOCK_LENGTH  {
+			neighbor = neighbors.plus_x
+			neighbor_x = 0
+		} else if y < 0 {
+			neighbor = neighbors.minus_y
+			neighbor_y = CHUNK_BLOCK_LOCAL_MAX
+		} else if y >= CHUNK_BLOCK_LENGTH {
+			neighbor = neighbors.plus_y
+			neighbor_y = 0
+		} else if z < 0 {
+			neighbor = neighbors.minus_z
+			neighbor_z = CHUNK_BLOCK_LOCAL_MAX
+		} else if z >= CHUNK_BLOCK_LENGTH {
+			neighbor = neighbors.plus_z
+			neighbor_z = 0
+		}
+
+		neighbor_snapshot, neighbor_ok := neighbor.?
+		if !neighbor_ok {
+			return false
+		}
+
+		return chunk_voxel_view_is_solid_local(
+			neighbor_snapshot.voxel_view,
+			u32(neighbor_x),
+			u32(neighbor_y),
+			u32(neighbor_z),
+		)
 	}
 
 	log.assertf(false, "unhandled chunk mesher boundary policy: %v", boundary_policy)
@@ -458,6 +516,7 @@ chunk_voxel_debug_rect_view_builder :: proc(view: ^ChunkVoxelView) {
 chunk_voxel_view_count_exposed_faces :: proc(
 	view: ChunkVoxelView,
 	boundary_policy: ChunkMeshBoundaryPolicy,
+	neighbor_snapshots: Maybe(ChunkMeshNeighborSnapshots) = nil,
 ) -> u32 {
 	log.assertf(
 		len(view.blocks) == CHUNK_BLOCK_COUNT,
@@ -475,6 +534,7 @@ chunk_voxel_view_count_exposed_faces :: proc(
 					i32(y),
 					i32(z),
 					boundary_policy,
+					neighbor_snapshots,
 				) {
 					continue
 				}
@@ -490,6 +550,7 @@ chunk_voxel_view_count_exposed_faces :: proc(
 						neighbor_y,
 						neighbor_z,
 						boundary_policy,
+						neighbor_snapshots,
 					) {
 						face_count += 1
 					}
@@ -505,8 +566,9 @@ chunk_voxel_view_build_naive_mesh :: proc(
 	view: ChunkVoxelView,
 	boundary_policy: ChunkMeshBoundaryPolicy,
 	allocator: mem.Allocator,
+	neighbor_snapshots: Maybe(ChunkMeshNeighborSnapshots) = nil,
 ) -> ChunkMeshOutput {
-	face_count := chunk_voxel_view_count_exposed_faces(view, boundary_policy)
+	face_count := chunk_voxel_view_count_exposed_faces(view, boundary_policy, neighbor_snapshots)
 
 	if face_count == 0 {
 		return {}
@@ -540,6 +602,7 @@ chunk_voxel_view_build_naive_mesh :: proc(
 					i32(y),
 					i32(z),
 					boundary_policy,
+					neighbor_snapshots,
 				) {
 					continue
 				}
@@ -557,6 +620,7 @@ chunk_voxel_view_build_naive_mesh :: proc(
 						neighbor_y,
 						neighbor_z,
 						boundary_policy,
+						neighbor_snapshots,
 					) {
 						continue
 					}
@@ -595,6 +659,7 @@ chunk_mesh_job_execute_sync :: proc(job: ChunkMeshJob) -> ChunkMeshOutput {
 		job.snapshot.voxel_view,
 		job.boundary_policy,
 		job.output_allocator,
+		job.neighbors,
 	)
 }
 
@@ -625,118 +690,29 @@ chunk_store_append :: proc(chunk: Chunk) {
 	state.chunk_count += 1
 }
 
-chunk_store_load_debug_heightfield_grid :: proc(grid_z, grid_x: u32) {
-	chunk_store_clear()
-
-	chunks_attempted: u32
-	chunks_uploaded: u32
-	chunks_empty: u32
-	total_faces: u32
-
-	for gz in 0 ..< grid_z {
-		for gx in 0 ..< grid_x {
-			chunks_attempted += 1
-
-			coord := ChunkCoord{i32(gx) - 1, 0, i32(gz) - 1}
-
-			// todo: use noise functions to properly generate chunk voxels
-			view := ChunkVoxelView{}
-			chunk_voxel_debug_heightfield_view_builder(&view, coord)
-
-			mesh_output := chunk_mesh_job_execute_sync(
-				{
-					snapshot = {coord = coord, voxel_view = view},
-					boundary_policy = .Treat_Out_Of_Chunk_As_Empty,
-					output_allocator = state.transient_allocator,
-				},
-			)
-			total_faces += mesh_output.face_count
-
-			if mesh_output.face_count == 0 {
-				chunks_empty += 1
-			} else {
-				chunks_uploaded += 1
-			}
-
-			chunk := chunk_create(coord)
-			chunk.geometry_id = geometry_append_chunk_mesh_output(
-				&state.geometry_pool,
-				mesh_output,
-			)
-
-			log.debugf(
-				"Chunk mesh: coord=%v faces=%d vertices=%d indices=%d",
-				chunk.coord,
-				mesh_output.face_count,
-				mesh_output.face_count * 4,
-				mesh_output.face_count * 6,
-			)
-
-			chunk_store_append(chunk)
+chunk_snapshot_find_by_coord :: proc(
+	snapshots: []ChunkSnapshot,
+	coord: ChunkCoord,
+) -> Maybe(ChunkSnapshot) {
+	for i in 0 ..< len(snapshots) {
+		if snapshots[i].coord == coord {
+			return snapshots[i]
 		}
 	}
-
-	log.debugf(
-		"Debug heightfield chunks loaded: attempted=%d uploaded=%d empty=%d total_faces=%d",
-		chunks_attempted,
-		chunks_uploaded,
-		chunks_empty,
-		total_faces,
-	)
+	return nil
 }
 
-chunk_voxel_debug_heightfield_view_builder :: proc(view: ^ChunkVoxelView, chunk: ChunkCoord) {
-	view.blocks = make(#soa[]ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, state.transient_allocator)
-	chunk_voxel_view_fill_empty(view)
-
-	origin := chunk_origin_from_coord(chunk)
-	for z in 0 ..< CHUNK_BLOCK_LENGTH {
-		for x in 0 ..< CHUNK_BLOCK_LENGTH {
-			world_x := origin.x + i32(x)
-			world_z := origin.z + i32(z)
-
-			// Sample in world block coordinates so neighboring chunks use the same
-			// heightfield instead of repeating the same local 64x64 tile.
-			//
-			// The base height keeps terrain above the chunk floor. The three waves
-			// use different axes/frequencies so the debug terrain has broad hills
-			// instead of a single obvious stripe pattern.
-			height_f :=
-				18.0 +
-				math.sin_f32(f32(world_x) * 0.13) * 7.0 +
-				math.cos_f32(f32(world_z) * 0.11) * 5.0 +
-				math.sin_f32(f32(world_x + world_z) * 0.07) * 4.0
-
-			// Clamp to the vertical block range this first debug chunk can represent.
-			// Later multi-height terrain can decide whether to generate stacked chunks.
-			height := i32(height_f)
-			height = math.clamp(height, 0, CHUNK_BLOCK_LENGTH - 1)
-
-			for y in 0 ..< CHUNK_BLOCK_LENGTH {
-				world_y := origin.y + i32(y)
-
-				// Heightfield terrain is solid at and below the sampled surface.
-				if world_y > height {
-					continue
-				}
-
-				// Material is still block-level. A shallow grass cap keeps ordinary
-				// slope side faces green; otherwise just-below-top dirt blocks show as
-				// brown speckles wherever neighboring columns are lower.
-				blocks_below_surface := height - world_y
-				material_id := BlockMaterialID(DEBUG_STONE_MAT_ID)
-				if blocks_below_surface < DEBUG_GRASS_CAP_BLOCK_DEPTH {
-					material_id = BlockMaterialID(DEBUG_GRASS_MAT_ID)
-				} else if blocks_below_surface <
-				   DEBUG_GRASS_CAP_BLOCK_DEPTH + DEBUG_DIRT_LAYER_BLOCK_DEPTH {
-					material_id = BlockMaterialID(DEBUG_DIRT_MAT_ID)
-				}
-
-				index := chunk_block_index(u32(x), u32(y), u32(z))
-				view.blocks.occupancy[index] = .Solid
-				view.blocks.material_id[index] = material_id
-			}
-		}
+chunk_mesh_neighbors_find :: proc(
+	snapshots: []ChunkSnapshot,
+	coord: ChunkCoord,
+) -> ChunkMeshNeighborSnapshots {
+	return {
+		plus_x  = chunk_snapshot_find_by_coord(snapshots, ChunkCoord{coord.x + 1, coord.y, coord.z}),
+		minus_x = chunk_snapshot_find_by_coord(snapshots, ChunkCoord{coord.x - 1, coord.y, coord.z}),
+		plus_y  = chunk_snapshot_find_by_coord(snapshots, ChunkCoord{coord.x, coord.y + 1, coord.z}),
+		minus_y = chunk_snapshot_find_by_coord(snapshots, ChunkCoord{coord.x, coord.y - 1, coord.z}),
+		plus_z  = chunk_snapshot_find_by_coord(snapshots, ChunkCoord{coord.x, coord.y, coord.z + 1}),
+		minus_z = chunk_snapshot_find_by_coord(snapshots, ChunkCoord{coord.x, coord.y, coord.z - 1}),
 	}
 }
 
@@ -936,6 +912,70 @@ when ODIN_DEBUG {
 			)
 		}
 
+		// adjacent chunks: touching boundary blocks suppress their shared faces.
+		left_view := ChunkVoxelView {
+			blocks = make(
+				#soa[]ChunkVoxelViewElement,
+				CHUNK_BLOCK_COUNT,
+				state.transient_allocator,
+			),
+		}
+		right_view := ChunkVoxelView {
+			blocks = make(
+				#soa[]ChunkVoxelViewElement,
+				CHUNK_BLOCK_COUNT,
+				state.transient_allocator,
+			),
+		}
+		chunk_voxel_view_fill_empty(&left_view)
+		chunk_voxel_view_fill_empty(&right_view)
+
+		left_index := chunk_block_index(CHUNK_BLOCK_LOCAL_MAX, 1, 1)
+		left_view.blocks.occupancy[left_index] = .Solid
+		left_view.blocks.material_id[left_index] = BlockMaterialID(7)
+
+		right_index := chunk_block_index(0, 1, 1)
+		right_view.blocks.occupancy[right_index] = .Solid
+		right_view.blocks.material_id[right_index] = BlockMaterialID(7)
+
+		left_snapshot := ChunkSnapshot {
+			coord = {0, 0, 0},
+			voxel_view = left_view,
+		}
+		right_snapshot := ChunkSnapshot {
+			coord = {1, 0, 0},
+			voxel_view = right_view,
+		}
+		neighbor_test_snapshots := [?]ChunkSnapshot{left_snapshot, right_snapshot}
+
+		left_neighbor_output := chunk_mesh_job_execute_sync(
+			{
+				snapshot = left_snapshot,
+				neighbors = chunk_mesh_neighbors_find(neighbor_test_snapshots[:], left_snapshot.coord),
+				boundary_policy = .Sample_Neighbor_Snapshots,
+				output_allocator = state.transient_allocator,
+			},
+		)
+		log.assertf(
+			left_neighbor_output.face_count == 5,
+			"left boundary block: expected 5 faces with +X neighbor, got %d",
+			left_neighbor_output.face_count,
+		)
+
+		right_neighbor_output := chunk_mesh_job_execute_sync(
+			{
+				snapshot = right_snapshot,
+				neighbors = chunk_mesh_neighbors_find(neighbor_test_snapshots[:], right_snapshot.coord),
+				boundary_policy = .Sample_Neighbor_Snapshots,
+				output_allocator = state.transient_allocator,
+			},
+		)
+		log.assertf(
+			right_neighbor_output.face_count == 5,
+			"right boundary block: expected 5 faces with -X neighbor, got %d",
+			right_neighbor_output.face_count,
+		)
+
 		// 2x2x2 solid cube: surface area is 6 * 2 * 2 = 24 faces.
 		chunk_voxel_view_fill_empty(&view)
 		for z in 1 ..< 3 {
@@ -1025,7 +1065,7 @@ when ODIN_DEBUG {
 			checker_count,
 		)
 
-		chunk_voxel_debug_heightfield_view_builder(&view, ChunkCoord{0, 0, 0})
+		terrain_heightfield_voxel_view_build(&view, ChunkCoord{0, 0, 0}, state.transient_allocator)
 		heightfield_top_y: [CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH]i32
 		for z in 0 ..< CHUNK_BLOCK_LENGTH {
 			for x in 0 ..< CHUNK_BLOCK_LENGTH {
@@ -1048,18 +1088,18 @@ when ODIN_DEBUG {
 				top_index := chunk_block_index(u32(x), u32(top_y), u32(z))
 				top_material_id := u32(u8(view.blocks.material_id[top_index]))
 				log.assertf(
-					top_material_id == DEBUG_GRASS_MAT_ID,
+					top_material_id == TERRAIN_GRASS_MAT_ID,
 					"heightfield column %d,%d: expected top material %d, got %d",
 					x,
 					z,
-					DEBUG_GRASS_MAT_ID,
+					TERRAIN_GRASS_MAT_ID,
 					top_material_id,
 				)
 
 				for y in 0 ..< CHUNK_BLOCK_LENGTH {
 					blocks_below_surface := top_y - i32(y)
 					if blocks_below_surface < 0 ||
-					   blocks_below_surface >= DEBUG_GRASS_CAP_BLOCK_DEPTH {
+					   blocks_below_surface >= TERRAIN_GRASS_CAP_BLOCK_DEPTH {
 						continue
 					}
 
@@ -1074,11 +1114,11 @@ when ODIN_DEBUG {
 
 					material_id := u32(u8(view.blocks.material_id[index]))
 					log.assertf(
-						material_id == DEBUG_GRASS_MAT_ID,
+						material_id == TERRAIN_GRASS_MAT_ID,
 						"heightfield column %d,%d: expected grass-cap material %d, got %d",
 						x,
 						z,
-						DEBUG_GRASS_MAT_ID,
+						TERRAIN_GRASS_MAT_ID,
 						material_id,
 					)
 				}
@@ -1099,10 +1139,10 @@ when ODIN_DEBUG {
 			}
 
 			log.assertf(
-				vertex.material_id == DEBUG_GRASS_MAT_ID,
+				vertex.material_id == TERRAIN_GRASS_MAT_ID,
 				"heightfield face %d: expected top block material %d, got %d",
 				face_index,
-				DEBUG_GRASS_MAT_ID,
+				TERRAIN_GRASS_MAT_ID,
 				vertex.material_id,
 			)
 		}
@@ -1127,11 +1167,11 @@ TERRAIN_PACK_NORMAL_MASK :: 0x7
 TERRAIN_PACK_MATERIAL_MASK :: 0xFF
 TERRAIN_PACK_CORNER_MASK :: 0x3
 
-DEBUG_GRASS_MAT_ID :: 0
-DEBUG_DIRT_MAT_ID :: 1
-DEBUG_STONE_MAT_ID :: 2
-DEBUG_GRASS_CAP_BLOCK_DEPTH :: 4
-DEBUG_DIRT_LAYER_BLOCK_DEPTH :: 4
+TERRAIN_GRASS_MAT_ID :: 0
+TERRAIN_DIRT_MAT_ID :: 1
+TERRAIN_STONE_MAT_ID :: 2
+TERRAIN_GRASS_CAP_BLOCK_DEPTH :: 4
+TERRAIN_DIRT_LAYER_BLOCK_DEPTH :: 4
 
 TERRAIN_FACE_DESCS := [?]TerrainFaceDesc {
 	// +X
@@ -1252,6 +1292,75 @@ terrain_emit_face :: proc(
 
 	vertex_count^ += 4
 	index_count^ += 6
+}
+
+terrain_heightfield_voxel_view_build :: proc(
+	view: ^ChunkVoxelView,
+	chunk: ChunkCoord,
+	allocator: mem.Allocator,
+) {
+	view.blocks = make(#soa[]ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, allocator)
+	chunk_voxel_view_fill_empty(view)
+
+	origin := chunk_origin_from_coord(chunk)
+	for z in 0 ..< CHUNK_BLOCK_LENGTH {
+		for x in 0 ..< CHUNK_BLOCK_LENGTH {
+			world_x := origin.x + i32(x)
+			world_z := origin.z + i32(z)
+
+			// Sample in world block coordinates so neighboring chunks use the same
+			// heightfield instead of repeating the same local 64x64 tile.
+			//
+			// The base height keeps terrain above the chunk floor. The three waves
+			// use different axes/frequencies so the heightfield terrain has broad hills
+			// instead of a single obvious stripe pattern.
+			height_f :=
+				18.0 +
+				math.sin_f32(f32(world_x) * 0.13) * 7.0 +
+				math.cos_f32(f32(world_z) * 0.11) * 5.0 +
+				math.sin_f32(f32(world_x + world_z) * 0.07) * 4.0
+
+			// Clamp to the vertical block range this first heightfield chunk can represent.
+			// Later multi-height terrain can decide whether to generate stacked chunks.
+			height := i32(height_f)
+			height = math.clamp(height, 0, CHUNK_BLOCK_LENGTH - 1)
+
+			for y in 0 ..< CHUNK_BLOCK_LENGTH {
+				world_y := origin.y + i32(y)
+
+				// Heightfield terrain is solid at and below the sampled surface.
+				if world_y > height {
+					continue
+				}
+
+				// Material is still block-level. A shallow grass cap keeps ordinary
+				// slope side faces green; otherwise just-below-top dirt blocks show as
+				// brown speckles wherever neighboring columns are lower.
+				blocks_below_surface := height - world_y
+				material_id := BlockMaterialID(TERRAIN_STONE_MAT_ID)
+				if blocks_below_surface < TERRAIN_GRASS_CAP_BLOCK_DEPTH {
+					material_id = BlockMaterialID(TERRAIN_GRASS_MAT_ID)
+				} else if blocks_below_surface <
+				   TERRAIN_GRASS_CAP_BLOCK_DEPTH + TERRAIN_DIRT_LAYER_BLOCK_DEPTH {
+					material_id = BlockMaterialID(TERRAIN_DIRT_MAT_ID)
+				}
+
+				index := chunk_block_index(u32(x), u32(y), u32(z))
+				view.blocks.occupancy[index] = .Solid
+				view.blocks.material_id[index] = material_id
+			}
+		}
+	}
+}
+
+terrain_generate_heightfield_snapshot :: proc(
+	coord: ChunkCoord,
+	allocator: mem.Allocator,
+) -> ChunkSnapshot {
+	view := ChunkVoxelView{}
+	// todo: use noise functions to properly generate chunk voxels
+	terrain_heightfield_voxel_view_build(&view, coord, allocator)
+	return {coord = coord, voxel_view = view}
 }
 
 ///////////////////////////////////////////
@@ -2108,8 +2217,69 @@ setup_resources :: proc() {
 	temp := mem.begin_arena_temp_memory(&state.transient_arena)
 	defer mem.end_arena_temp_memory(temp)
 
-	chunk_store_init(DEBUG_CHUNK_COUNT)
-	chunk_store_load_debug_heightfield_grid(DEBUG_CHUNK_GRID_Z, DEBUG_CHUNK_GRID_X)
+	chunk_store_init(STARTUP_CHUNK_COUNT)
+	chunk_store_clear()
+
+	chunks_attempted: u32
+	chunks_uploaded: u32
+	chunks_empty: u32
+	total_faces: u32
+
+	startup_snapshots: [STARTUP_CHUNK_COUNT]ChunkSnapshot
+	startup_snapshot_count: u32
+	for gz in 0 ..< STARTUP_CHUNK_GRID_Z {
+		for gx in 0 ..< STARTUP_CHUNK_GRID_X {
+			coord := ChunkCoord{i32(gx) - 1, 0, i32(gz) - 1}
+			startup_snapshots[startup_snapshot_count] = terrain_generate_heightfield_snapshot(
+				coord,
+				state.transient_allocator,
+			)
+			startup_snapshot_count += 1
+		}
+	}
+
+	startup_snapshot_slice := startup_snapshots[:int(startup_snapshot_count)]
+	for snapshot in startup_snapshot_slice {
+		chunks_attempted += 1
+
+		neighbors := chunk_mesh_neighbors_find(startup_snapshot_slice, snapshot.coord)
+		mesh_output := chunk_mesh_job_execute_sync(
+			{
+				snapshot = snapshot,
+				boundary_policy = .Sample_Neighbor_Snapshots,
+				output_allocator = state.transient_allocator,
+				neighbors = neighbors,
+			},
+		)
+		total_faces += mesh_output.face_count
+
+		if mesh_output.face_count == 0 {
+			chunks_empty += 1
+		} else {
+			chunks_uploaded += 1
+		}
+
+		chunk := chunk_create(snapshot.coord)
+		chunk.geometry_id = geometry_append_chunk_mesh_output(&state.geometry_pool, mesh_output)
+
+		log.debugf(
+			"Chunk mesh: coord=%v faces=%d vertices=%d indices=%d",
+			chunk.coord,
+			mesh_output.face_count,
+			mesh_output.face_count * 4,
+			mesh_output.face_count * 6,
+		)
+
+		chunk_store_append(chunk)
+	}
+
+	log.debugf(
+		"Startup heightfield chunks loaded: attempted=%d uploaded=%d empty=%d total_faces=%d",
+		chunks_attempted,
+		chunks_uploaded,
+		chunks_empty,
+		total_faces,
+	)
 
 	first_chunk := state.chunks[0]
 
