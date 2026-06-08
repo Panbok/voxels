@@ -12,31 +12,111 @@ import "core:os"
 import "core:strings"
 
 //////////////////////////////////////
-// Memory
-//////////////////////////////////////
-
-persistent_slab: [64 * mem.Megabyte]u8
-transient_slab: [16 * mem.Megabyte]u8
-persistent_arena: mem.Arena
-transient_arena: mem.Arena
-persistent_allocator: mem.Allocator
-transient_allocator: mem.Allocator
-
-//////////////////////////////////////
-// Window & GPU
-//////////////////////////////////////
-
-window: ^sdl.Window
-device: ^sdl.GPUDevice
-
-//////////////////////////////////////
-// Types
+// Constants
 /////////////////////////////////////
 
-ShaderType :: enum {
-	Vertex,
-	Fragment,
+WINDOW_DEFAULT_HEIGHT :: 720
+WINDOW_DEFAULT_WIDTH :: 1280
+RENDERER_DEFAULT_DRIVER :: "direct3d12"
+DEPTH_CLEAR_VALUE :: f32(1.0)
+ANGLE :: f32(0.6)
+FOV :: f32(70.0)
+ASPECT_RATIO :: f32(16.0 / 9.0)
+DEFAULT_ACCELERATION :: f32(1.5)
+MAX_ACCELERATION :: f32(10.0)
+MOUSE_SENSITIVITY :: f32(0.0025)
+
+//////////////////////////////////////
+// State
+/////////////////////////////////////
+
+Memory :: struct {
+	persistent_slab:      [64 * mem.Megabyte]u8,
+	transient_slab:       [16 * mem.Megabyte]u8,
+	persistent_arena:     mem.Arena,
+	transient_arena:      mem.Arena,
+	persistent_allocator: mem.Allocator,
+	transient_allocator:  mem.Allocator,
 }
+
+Graphics :: struct {
+	window:                  ^sdl.Window,
+	device:                  ^sdl.GPUDevice,
+	depth_texture:           ^sdl.GPUTexture,
+	prototype_fill_pipeline: ^sdl.GPUGraphicsPipeline,
+	prototype_line_pipeline: ^sdl.GPUGraphicsPipeline,
+	terrain_fill_pipeline:   ^sdl.GPUGraphicsPipeline,
+	terrain_line_pipeline:   ^sdl.GPUGraphicsPipeline,
+	mvp:                     matrix[4, 4]f32,
+	view_projection:         matrix[4, 4]f32,
+	camera:                  Camera,
+}
+
+FrameDebugStats :: struct {
+	// Current frame stats
+	chunks_total:                 u32,
+	chunks_without_geometry:      u32,
+	chunks_frustum_culled:        u32,
+	chunks_drawn:                 u32,
+	terrain_faces_drawn:          u32,
+	terrain_indices_drawn:        u32,
+
+	// Previous frame stats
+	prev_chunks_total:            u32,
+	prev_chunks_without_geometry: u32,
+	prev_chunks_frustum_culled:   u32,
+	prev_chunks_drawn:            u32,
+	prev_terrain_faces_drawn:     u32,
+	prev_terrain_indices_drawn:   u32,
+}
+
+state := struct {
+	// Memory
+	using memory:            Memory,
+
+	// Geometry
+	geometry_pool:           GeometryPool,
+
+	// Graphics & Window
+	using graphics:          Graphics,
+
+	// Debug
+	// todo: replace this debug chunk array with real chunk storage/iteration.
+	debug_chunks:            [DEBUG_CHUNK_COUNT]Chunk,
+	debug_chunk_count:       u32,
+	debug_mode:              bool,
+	enable_vsync:            bool,
+	is_window_open:          bool,
+	use_wireframe_mode:      bool,
+
+	// Frame debug stats
+	using frame_debug_stats: FrameDebugStats,
+} {
+	camera = {
+		position = {0.0, 0.0, -5.0},
+		forward = {0.0, 0.0, 1.0},
+		up = {0.0, 1.0, 0.0},
+		right = {1.0, 0.0, 0.0},
+		world_up = {0.0, 1.0, 0.0},
+		yaw = 0.0,
+		pitch = 0.0,
+		near_plane = 0.1,
+		far_plane = 100.0,
+	},
+	debug_mode = true,
+	enable_vsync = true,
+	is_window_open = true,
+	use_wireframe_mode = false,
+}
+
+///////////////////////////////////////////
+// Math
+///////////////////////////////////////////
+
+UVec2 :: [2]u32
+
+Vec3 :: [3]f32
+Vec4 :: [4]f32
 
 Camera :: struct {
 	position:   Vec3,
@@ -49,15 +129,6 @@ Camera :: struct {
 	near_plane: f32,
 	far_plane:  f32,
 }
-
-///////////////////////////////////////////
-// Math
-///////////////////////////////////////////
-
-UVec2 :: [2]u32
-
-Vec3 :: [3]f32
-Vec4 :: [4]f32
 
 WorldAABB :: struct {
 	min, max: Vec3,
@@ -201,6 +272,21 @@ TERRAIN_BLOCK_WORLD_SIZE :: f32(0.5)
 #assert(CHUNK_BLOCK_LENGTH == 1 << CHUNK_BLOCK_LENGTH_LOG2)
 #assert(CHUNK_BLOCK_LOCAL_MAX <= 0x3F)
 
+DEBUG_CHUNK_SOLID_X0 :: 8
+DEBUG_CHUNK_SOLID_X1 :: 24
+DEBUG_CHUNK_SOLID_Y0 :: 0
+DEBUG_CHUNK_SOLID_Y1 :: 8
+DEBUG_CHUNK_SOLID_Z0 :: 8
+DEBUG_CHUNK_SOLID_Z1 :: 24
+#assert(DEBUG_CHUNK_SOLID_X0 < DEBUG_CHUNK_SOLID_X1 && DEBUG_CHUNK_SOLID_X1 <= CHUNK_BLOCK_LENGTH)
+#assert(DEBUG_CHUNK_SOLID_Y0 < DEBUG_CHUNK_SOLID_Y1 && DEBUG_CHUNK_SOLID_Y1 <= CHUNK_BLOCK_LENGTH)
+#assert(DEBUG_CHUNK_SOLID_Z0 < DEBUG_CHUNK_SOLID_Z1 && DEBUG_CHUNK_SOLID_Z1 <= CHUNK_BLOCK_LENGTH)
+
+DEBUG_CHUNK_GRID_X :: 3
+DEBUG_CHUNK_GRID_Z :: 3
+DEBUG_CHUNK_COUNT :: DEBUG_CHUNK_GRID_X * DEBUG_CHUNK_GRID_Z
+#assert(DEBUG_CHUNK_COUNT > 0)
+
 BlockOccupancy :: enum u8 {
 	Empty,
 	Solid,
@@ -287,13 +373,13 @@ chunk_block_index :: proc(x, y, z: u32) -> u32 {
 }
 
 chunk_block_coord_is_inside :: proc(x, y, z: i32) -> bool {
-	return (
+	return(
 		x >= 0 &&
 		y >= 0 &&
 		z >= 0 &&
 		x < CHUNK_BLOCK_LENGTH &&
 		y < CHUNK_BLOCK_LENGTH &&
-		z < CHUNK_BLOCK_LENGTH
+		z < CHUNK_BLOCK_LENGTH \
 	)
 }
 
@@ -338,23 +424,8 @@ chunk_voxel_view_fill_empty :: proc(view: ^ChunkVoxelView) {
 	}
 }
 
-DEBUG_CHUNK_SOLID_X0 :: 8
-DEBUG_CHUNK_SOLID_X1 :: 24
-DEBUG_CHUNK_SOLID_Y0 :: 0
-DEBUG_CHUNK_SOLID_Y1 :: 8
-DEBUG_CHUNK_SOLID_Z0 :: 8
-DEBUG_CHUNK_SOLID_Z1 :: 24
-#assert(DEBUG_CHUNK_SOLID_X0 < DEBUG_CHUNK_SOLID_X1 && DEBUG_CHUNK_SOLID_X1 <= CHUNK_BLOCK_LENGTH)
-#assert(DEBUG_CHUNK_SOLID_Y0 < DEBUG_CHUNK_SOLID_Y1 && DEBUG_CHUNK_SOLID_Y1 <= CHUNK_BLOCK_LENGTH)
-#assert(DEBUG_CHUNK_SOLID_Z0 < DEBUG_CHUNK_SOLID_Z1 && DEBUG_CHUNK_SOLID_Z1 <= CHUNK_BLOCK_LENGTH)
-
-DEBUG_CHUNK_GRID_X :: 3
-DEBUG_CHUNK_GRID_Z :: 3
-DEBUG_CHUNK_COUNT :: DEBUG_CHUNK_GRID_X * DEBUG_CHUNK_GRID_Z
-#assert(DEBUG_CHUNK_COUNT > 0)
-
 chunk_voxel_debug_rect_view_builder :: proc(view: ^ChunkVoxelView) {
-	view.blocks = make(#soa[]ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, transient_allocator)
+	view.blocks = make(#soa[]ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, state.transient_allocator)
 	chunk_voxel_view_fill_empty(view)
 
 	for z in DEBUG_CHUNK_SOLID_Z0 ..< DEBUG_CHUNK_SOLID_Z1 {
@@ -497,7 +568,7 @@ chunk_voxel_view_build_naive_mesh :: proc(
 }
 
 chunk_voxel_debug_heightfield_view_builder :: proc(view: ^ChunkVoxelView, chunk: ChunkCoord) {
-	view.blocks = make(#soa[]ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, transient_allocator)
+	view.blocks = make(#soa[]ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, state.transient_allocator)
 	chunk_voxel_view_fill_empty(view)
 
 	origin := chunk_origin_from_coord(chunk)
@@ -553,11 +624,15 @@ chunk_voxel_debug_heightfield_view_builder :: proc(view: ^ChunkVoxelView, chunk:
 
 when ODIN_DEBUG {
 	debug_chunk_mesher_contract_checks_run :: proc() {
-		temp := mem.begin_arena_temp_memory(&transient_arena)
+		temp := mem.begin_arena_temp_memory(&state.transient_arena)
 		defer mem.end_arena_temp_memory(temp)
 
 		view := ChunkVoxelView {
-			blocks = make(#soa[]ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, transient_allocator),
+			blocks = make(
+				#soa[]ChunkVoxelViewElement,
+				CHUNK_BLOCK_COUNT,
+				state.transient_allocator,
+			),
 		}
 
 		packed_fields := terrain_unpack_vertex(terrain_pack_vertex(2, 3, 4, 5, 6, 1))
@@ -596,7 +671,7 @@ when ODIN_DEBUG {
 		empty_output := chunk_voxel_view_build_naive_mesh(
 			view,
 			.Treat_Out_Of_Chunk_As_Empty,
-			transient_allocator,
+			state.transient_allocator,
 		)
 		log.assertf(
 			empty_output.face_count == 0,
@@ -623,7 +698,7 @@ when ODIN_DEBUG {
 		edge_output := chunk_voxel_view_build_naive_mesh(
 			view,
 			.Treat_Out_Of_Chunk_As_Empty,
-			transient_allocator,
+			state.transient_allocator,
 		)
 		log.assertf(
 			edge_output.face_count == 6,
@@ -641,7 +716,7 @@ when ODIN_DEBUG {
 		output := chunk_voxel_view_build_naive_mesh(
 			view,
 			.Treat_Out_Of_Chunk_As_Empty,
-			transient_allocator,
+			state.transient_allocator,
 		)
 		log.assertf(
 			output.face_count == 6,
@@ -758,7 +833,7 @@ when ODIN_DEBUG {
 		output = chunk_voxel_view_build_naive_mesh(
 			view,
 			.Treat_Out_Of_Chunk_As_Empty,
-			transient_allocator,
+			state.transient_allocator,
 		)
 		log.assertf(output.face_count == 24, "2x2x2: expected 24 faces, got %d", output.face_count)
 		log.assertf(
@@ -793,7 +868,7 @@ when ODIN_DEBUG {
 		output = chunk_voxel_view_build_naive_mesh(
 			view,
 			.Treat_Out_Of_Chunk_As_Empty,
-			transient_allocator,
+			state.transient_allocator,
 		)
 		log.assertf(
 			output.face_count == 24576,
@@ -895,7 +970,7 @@ when ODIN_DEBUG {
 		heightfield_output := chunk_voxel_view_build_naive_mesh(
 			view,
 			.Treat_Out_Of_Chunk_As_Empty,
-			transient_allocator,
+			state.transient_allocator,
 		)
 		for face_index in 0 ..< heightfield_output.face_count {
 			vertex := terrain_unpack_vertex(heightfield_output.vertices[face_index * 4])
@@ -921,7 +996,8 @@ when ODIN_DEBUG {
 
 ///////////////////////////////////////////
 // Terrain
-///////////////////////////////////////////
+///////////////////////////////////////////\
+
 TERRAIN_PACK_LOCAL_X_SHIFT :: 0
 TERRAIN_PACK_LOCAL_Y_SHIFT :: 6
 TERRAIN_PACK_LOCAL_Z_SHIFT :: 12
@@ -1064,6 +1140,17 @@ terrain_emit_face :: proc(
 // Geometry
 ///////////////////////////////////////////
 
+INVALID_GEOMETRY_ID :: GeometryID(0)
+GEOMETRY_MAX_GEOMETRIES :: 1024
+GEOMETRY_MAX_POSITION_COLOR_VERTICES :: 1_000_000
+GEOMETRY_MAX_VERTEX_BYTES :: GEOMETRY_MAX_POSITION_COLOR_VERTICES * size_of(PositionColorVertex)
+GEOMETRY_MAX_INDEX_ELEMENTS :: 3_000_000
+GEOMETRY_MAX_UPLOAD_POSITION_COLOR_VERTICES :: 65_536
+GEOMETRY_MAX_VERTEX_UPLOAD_BYTES ::
+	GEOMETRY_MAX_UPLOAD_POSITION_COLOR_VERTICES * size_of(PositionColorVertex)
+GEOMETRY_MAX_UPLOAD_INDEX_ELEMENTS :: 196_608
+GEOMETRY_VERTEX_BYTE_ALIGNMENT :: 4
+
 GeometryID :: distinct u32
 
 GeometryLayoutKind :: enum u32 {
@@ -1108,18 +1195,6 @@ GeometryPool :: struct {
 	vertex_upload_byte_capacity: u32,
 	index_upload_byte_capacity:  u32,
 }
-
-INVALID_GEOMETRY_ID :: GeometryID(0)
-GEOMETRY_MAX_GEOMETRIES :: 1024
-GEOMETRY_MAX_POSITION_COLOR_VERTICES :: 1_000_000
-GEOMETRY_MAX_VERTEX_BYTES :: GEOMETRY_MAX_POSITION_COLOR_VERTICES * size_of(PositionColorVertex)
-GEOMETRY_MAX_INDEX_ELEMENTS :: 3_000_000
-GEOMETRY_MAX_UPLOAD_POSITION_COLOR_VERTICES :: 65_536
-GEOMETRY_MAX_VERTEX_UPLOAD_BYTES ::
-	GEOMETRY_MAX_UPLOAD_POSITION_COLOR_VERTICES * size_of(PositionColorVertex)
-GEOMETRY_MAX_UPLOAD_INDEX_ELEMENTS :: 196_608
-GEOMETRY_VERTEX_BYTE_ALIGNMENT :: 4
-
 
 geometry_layout_stride_bytes :: proc(layout_kind: GeometryLayoutKind) -> u32 {
 	switch layout_kind {
@@ -1214,7 +1289,7 @@ geometry_init :: proc(
 	pool.index_upload_byte_capacity = index_upload_size
 
 	pool.vertex_buffer = sdl.CreateGPUBuffer(
-		device,
+		state.device,
 		sdl.GPUBufferCreateInfo {
 			// Read by Mesh.vert as ByteAddressBuffer for programmable vertex pulling.
 			usage = {.GRAPHICS_STORAGE_READ},
@@ -1224,7 +1299,7 @@ geometry_init :: proc(
 	log.assertf(pool.vertex_buffer != nil, "CreateGPUBuffer vertex failed: %s", sdl.GetError())
 
 	pool.index_buffer = sdl.CreateGPUBuffer(
-	device,
+	state.device,
 	sdl.GPUBufferCreateInfo {
 		// Keep this as a real SDL index buffer so indexed draws and vertex reuse still work.
 		usage = {.INDEX},
@@ -1235,7 +1310,7 @@ geometry_init :: proc(
 
 
 	pool.vertex_upload_buffer = sdl.CreateGPUTransferBuffer(
-		device,
+		state.device,
 		sdl.GPUTransferBufferCreateInfo {
 			usage = sdl.GPUTransferBufferUsage.UPLOAD,
 			size = pool.vertex_upload_byte_capacity,
@@ -1248,7 +1323,7 @@ geometry_init :: proc(
 	)
 
 	pool.index_upload_buffer = sdl.CreateGPUTransferBuffer(
-		device,
+		state.device,
 		sdl.GPUTransferBufferCreateInfo {
 			usage = sdl.GPUTransferBufferUsage.UPLOAD,
 			size = pool.index_upload_byte_capacity,
@@ -1271,19 +1346,19 @@ geometry_init :: proc(
 
 geometry_destroy :: proc(pool: ^GeometryPool) {
 	if pool.vertex_upload_buffer != nil {
-		sdl.ReleaseGPUTransferBuffer(device, pool.vertex_upload_buffer)
+		sdl.ReleaseGPUTransferBuffer(state.device, pool.vertex_upload_buffer)
 	}
 
 	if pool.index_upload_buffer != nil {
-		sdl.ReleaseGPUTransferBuffer(device, pool.index_upload_buffer)
+		sdl.ReleaseGPUTransferBuffer(state.device, pool.index_upload_buffer)
 	}
 
 	if pool.vertex_buffer != nil {
-		sdl.ReleaseGPUBuffer(device, pool.vertex_buffer)
+		sdl.ReleaseGPUBuffer(state.device, pool.vertex_buffer)
 	}
 
 	if pool.index_buffer != nil {
-		sdl.ReleaseGPUBuffer(device, pool.index_buffer)
+		sdl.ReleaseGPUBuffer(state.device, pool.index_buffer)
 	}
 
 	pool.geometry_count = 0
@@ -1409,17 +1484,17 @@ geometry_append_bytes :: proc(
 	vertex_dst_offset := u32(vertex_dst_offset_wide)
 	index_dst_offset := u32(index_dst_offset_wide)
 
-	mapped_data := sdl.MapGPUTransferBuffer(device, pool.vertex_upload_buffer, false)
+	mapped_data := sdl.MapGPUTransferBuffer(state.device, pool.vertex_upload_buffer, false)
 	log.assertf(mapped_data != nil, "MapGPUTransferBuffer vertex failed: %s", sdl.GetError())
 	mem.copy(mapped_data, vertex_data, int(vertex_bytes))
-	sdl.UnmapGPUTransferBuffer(device, pool.vertex_upload_buffer)
+	sdl.UnmapGPUTransferBuffer(state.device, pool.vertex_upload_buffer)
 
-	mapped_data = sdl.MapGPUTransferBuffer(device, pool.index_upload_buffer, false)
+	mapped_data = sdl.MapGPUTransferBuffer(state.device, pool.index_upload_buffer, false)
 	log.assertf(mapped_data != nil, "MapGPUTransferBuffer index failed: %s", sdl.GetError())
 	mem.copy(mapped_data, raw_data(indices), int(index_bytes))
-	sdl.UnmapGPUTransferBuffer(device, pool.index_upload_buffer)
+	sdl.UnmapGPUTransferBuffer(state.device, pool.index_upload_buffer)
 
-	upload_cmd_buf := sdl.AcquireGPUCommandBuffer(device)
+	upload_cmd_buf := sdl.AcquireGPUCommandBuffer(state.device)
 	log.assertf(upload_cmd_buf != nil, "AcquireGPUCommandBuffer failed: %s", sdl.GetError())
 	copy_pass := sdl.BeginGPUCopyPass(upload_cmd_buf)
 
@@ -1541,70 +1616,6 @@ geometry_get :: proc(pool: ^GeometryPool, id: GeometryID) -> Geometry {
 }
 
 //////////////////////////////////////
-// Constants
-/////////////////////////////////////
-
-WINDOW_DEFAULT_HEIGHT :: 720
-WINDOW_DEFAULT_WIDTH :: 1280
-RENDERER_DEFAULT_DRIVER :: "direct3d12"
-DEPTH_CLEAR_VALUE :: f32(1.0)
-ANGLE :: f32(0.6)
-FOV :: f32(70.0)
-ASPECT_RATIO :: f32(16.0 / 9.0)
-DEFAULT_ACCELERATION :: f32(1.5)
-MAX_ACCELERATION :: f32(10.0)
-MOUSE_SENSITIVITY :: f32(0.0025)
-
-//////////////////////////////////////
-// State
-/////////////////////////////////////
-
-geometry_pool: GeometryPool
-
-depth_texture: ^sdl.GPUTexture
-prototype_fill_pipeline: ^sdl.GPUGraphicsPipeline
-prototype_line_pipeline: ^sdl.GPUGraphicsPipeline
-terrain_fill_pipeline: ^sdl.GPUGraphicsPipeline
-terrain_line_pipeline: ^sdl.GPUGraphicsPipeline
-
-mvp: matrix[4, 4]f32
-view_projection: matrix[4, 4]f32
-camera := Camera {
-	position   = {0.0, 0.0, -5.0},
-	forward    = {0.0, 0.0, 1.0},
-	up         = {0.0, 1.0, 0.0},
-	right      = {1.0, 0.0, 0.0},
-	world_up   = {0.0, 1.0, 0.0},
-	yaw        = 0.0,
-	pitch      = 0.0,
-	near_plane = 0.1,
-	far_plane  = 100.0,
-}
-// todo: replace this debug chunk array with real chunk storage/iteration.
-debug_chunks: [DEBUG_CHUNK_COUNT]Chunk
-debug_chunk_count: u32
-
-debug_mode := true
-enable_vsync := true
-is_window_open := true
-use_wireframe_mode := false
-
-// Frame debug stats
-chunks_total: u32 = 0
-chunks_without_geometry: u32 = 0
-chunks_frustum_culled: u32 = 0
-chunks_drawn: u32 = 0
-terrain_faces_drawn: u32 = 0
-terrain_indices_drawn: u32 = 0
-
-prev_chunks_total: u32 = 0
-prev_chunks_without_geometry: u32 = 0
-prev_chunks_frustum_culled: u32 = 0
-prev_chunks_drawn: u32 = 0
-prev_terrain_faces_drawn: u32 = 0
-prev_terrain_indices_drawn: u32 = 0
-
-//////////////////////////////////////
 // Helpers
 /////////////////////////////////////
 
@@ -1636,66 +1647,18 @@ debug_position_camera_for_chunk :: proc(coord: ChunkCoord) {
 	center := terrain_chunk_center_world_from_coord(coord)
 	chunk_world_length := f32(CHUNK_BLOCK_LENGTH) * TERRAIN_BLOCK_WORLD_SIZE
 
-	camera.position = {center[0], center[1], center[2] - chunk_world_length * 1.5}
-	camera.yaw = 0
-	camera.pitch = 0
+	state.camera.position = {center[0], center[1], center[2] - chunk_world_length * 1.5}
+	state.camera.yaw = 0
+	state.camera.pitch = 0
 }
 
 //////////////////////////////////////
-// Systems
+// Graphics
 /////////////////////////////////////
 
-init :: proc() {
-	log.debug("Init application")
-
-	log.assertf(sdl.Init({.VIDEO}), "Failed to initialize SDL: %s", sdl.GetError())
-
-	device = sdl.CreateGPUDevice({.DXIL}, debug_mode, nil)
-	log.assertf(device != nil, "Failed to create GPU device: %s", sdl.GetError())
-
-	window = sdl.CreateWindow(
-		"Voxels Engine",
-		WINDOW_DEFAULT_WIDTH,
-		WINDOW_DEFAULT_HEIGHT,
-		{.RESIZABLE},
-	)
-	log.assertf(window != nil, "Failed to create window: %s", sdl.GetError())
-	log.assertf(
-		sdl.SetWindowRelativeMouseMode(window, true),
-		"Failed to enable relative mouse mode: %s",
-		sdl.GetError(),
-	)
-
-	log.assertf(
-		sdl.ClaimWindowForGPUDevice(device, window),
-		"Failed to claim window for GPU device: %s",
-		sdl.GetError(),
-	)
-
-	log.assertf(
-		sdl.SetGPUSwapchainParameters(
-			device,
-			window,
-			sdl.GPUSwapchainComposition.SDR,
-			enable_vsync ? sdl.GPUPresentMode.VSYNC : sdl.GPUPresentMode.IMMEDIATE,
-		),
-		"Failed to set GPU swapchain parameters: %s",
-		sdl.GetError(),
-	)
-
-	sdl.SetLogOutputFunction(sdl_log_output, nil)
-	sdl.SetLogPriority(.GPU, .DEBUG)
-
-	log.debug("Application initialized")
-}
-
-shutdown :: proc() {
-	log.debug("Application shutdown")
-	sdl.ReleaseWindowFromGPUDevice(device, window)
-	sdl.DestroyGPUDevice(device)
-	sdl.DestroyWindow(window)
-	sdl.Quit()
-	log.debug("Shutdown complete")
+ShaderType :: enum {
+	Vertex,
+	Fragment,
 }
 
 create_pipelines_fill_and_line :: proc(
@@ -1705,7 +1668,7 @@ create_pipelines_fill_and_line :: proc(
 	line_pipeline: ^^sdl.GPUGraphicsPipeline,
 ) {
 	color_target_descriptions := [?]sdl.GPUColorTargetDescription {
-		{format = sdl.GetGPUSwapchainTextureFormat(device, window)},
+		{format = sdl.GetGPUSwapchainTextureFormat(state.device, state.window)},
 	}
 
 	pipeline_create_info := sdl.GPUGraphicsPipelineCreateInfo {
@@ -1733,19 +1696,226 @@ create_pipelines_fill_and_line :: proc(
 	}
 
 	pipeline_create_info.rasterizer_state.fill_mode = sdl.GPUFillMode.FILL
-	fill_pipeline^ = sdl.CreateGPUGraphicsPipeline(device, pipeline_create_info)
+	fill_pipeline^ = sdl.CreateGPUGraphicsPipeline(state.device, pipeline_create_info)
 	log.assertf(fill_pipeline^ != nil, "Failed to create fill pipeline: %s", sdl.GetError())
 
 	pipeline_create_info.rasterizer_state.fill_mode = sdl.GPUFillMode.LINE
-	line_pipeline^ = sdl.CreateGPUGraphicsPipeline(device, pipeline_create_info)
+	line_pipeline^ = sdl.CreateGPUGraphicsPipeline(state.device, pipeline_create_info)
 	log.assertf(line_pipeline^ != nil, "Failed to create line pipeline: %s", sdl.GetError())
+}
+
+render :: proc() {
+	cmdbuf := sdl.AcquireGPUCommandBuffer(state.device)
+	log.assertf(cmdbuf != nil, "AcquireGPUCommandBuffer failed: %s", sdl.GetError())
+
+	swapchain_texture: ^sdl.GPUTexture
+	log.assertf(
+		sdl.WaitAndAcquireGPUSwapchainTexture(cmdbuf, state.window, &swapchain_texture, nil, nil),
+		"WaitAndAcquireGPUSwapchainTexture failed: %s",
+		sdl.GetError(),
+	)
+
+	if (swapchain_texture != nil) {
+		frustum := frustum_from_camera(state.camera, math.to_radians_f32(FOV), ASPECT_RATIO)
+
+		colorTargetInfo := sdl.GPUColorTargetInfo{}
+		colorTargetInfo.texture = swapchain_texture
+		colorTargetInfo.clear_color = sdl.FColor{0.05, 0.10, 0.20, 1.0}
+		colorTargetInfo.load_op = sdl.GPULoadOp.CLEAR
+		colorTargetInfo.store_op = sdl.GPUStoreOp.STORE
+
+		depthTargetInfo := sdl.GPUDepthStencilTargetInfo{}
+		depthTargetInfo.texture = state.depth_texture
+		depthTargetInfo.clear_depth = DEPTH_CLEAR_VALUE
+		depthTargetInfo.load_op = sdl.GPULoadOp.CLEAR
+		depthTargetInfo.store_op = sdl.GPUStoreOp.DONT_CARE
+		depthTargetInfo.stencil_load_op = sdl.GPULoadOp.DONT_CARE
+		depthTargetInfo.stencil_store_op = sdl.GPUStoreOp.DONT_CARE
+
+		render_pass := sdl.BeginGPURenderPass(cmdbuf, &colorTargetInfo, 1, &depthTargetInfo)
+
+		// Hardware indexed PVP: SDL applies the index buffer, then the selected vertex
+		// shader pulls bytes from the shared geometry storage buffer.
+		storage_buffers := [?]^sdl.GPUBuffer{state.geometry_pool.vertex_buffer}
+		sdl.BindGPUVertexStorageBuffers(render_pass, 0, raw_data(storage_buffers[:]), 1)
+		sdl.BindGPUIndexBuffer(
+			render_pass,
+			sdl.GPUBufferBinding{buffer = state.geometry_pool.index_buffer, offset = 0},
+			sdl.GPUIndexElementSize._32BIT,
+		)
+
+		// todo: replace this prototype geometry scan with explicit debug/prototype draw ownership.
+		for geometry in state.geometry_pool.geometries[:int(state.geometry_pool.geometry_count)] {
+			if geometry.layout_kind != .Position_Color_F32x4 {
+				continue
+			}
+
+			sdl.PushGPUVertexUniformData(cmdbuf, 0, &state.mvp, cast(u32)size_of(matrix[4, 4]f32))
+			draw_params := GeometryDrawParams {
+				vertex_byte_offset  = geometry.vertex_byte_offset,
+				vertex_stride_bytes = geometry.vertex_stride_bytes,
+			}
+			sdl.PushGPUVertexUniformData(
+				cmdbuf,
+				1,
+				&draw_params,
+				cast(u32)size_of(GeometryDrawParams),
+			)
+
+			pipeline :=
+				state.use_wireframe_mode ? state.prototype_line_pipeline : state.prototype_fill_pipeline
+			sdl.BindGPUGraphicsPipeline(render_pass, pipeline)
+			sdl.DrawGPUIndexedPrimitives(
+				render_pass,
+				geometry.index_count,
+				1,
+				geometry.first_index,
+				0,
+				0,
+			)
+		}
+
+		// todo: replace this debug chunks draw with iteration over loaded chunks.
+		for chunk in state.debug_chunks[:state.debug_chunk_count] {
+			state.chunks_total += 1
+
+			if chunk.geometry_id == INVALID_GEOMETRY_ID {
+				state.chunks_without_geometry += 1
+				continue
+			}
+
+			aabb := chunk_world_get_aabb(chunk.coord)
+			if !frustum_test_aabb(frustum, aabb) {
+				state.chunks_frustum_culled += 1
+				continue
+			}
+
+			geometry := geometry_get(&state.geometry_pool, chunk.geometry_id)
+			log.assertf(
+				geometry.layout_kind == .Terrain_Packed_U32,
+				"chunk geometry must use terrain layout: %v",
+				geometry.layout_kind,
+			)
+
+			sdl.PushGPUVertexUniformData(
+				cmdbuf,
+				0,
+				&state.view_projection,
+				cast(u32)size_of(matrix[4, 4]f32),
+			)
+			chunk_origin_world := terrain_chunk_origin_world_from_coord(chunk.coord)
+			draw_params := TerrainDrawParams {
+				vertex_byte_offset  = geometry.vertex_byte_offset,
+				vertex_stride_bytes = geometry.vertex_stride_bytes,
+				chunk_origin        = chunk_origin_world,
+			}
+			sdl.PushGPUVertexUniformData(
+				cmdbuf,
+				1,
+				&draw_params,
+				cast(u32)size_of(TerrainDrawParams),
+			)
+
+			pipeline :=
+				state.use_wireframe_mode ? state.terrain_line_pipeline : state.terrain_fill_pipeline
+			sdl.BindGPUGraphicsPipeline(render_pass, pipeline)
+			sdl.DrawGPUIndexedPrimitives(
+				render_pass,
+				geometry.index_count,
+				1,
+				geometry.first_index,
+				0,
+				0,
+			)
+
+			state.terrain_faces_drawn += geometry.index_count / 6
+			state.terrain_indices_drawn += geometry.index_count
+
+			state.chunks_drawn += 1
+		}
+
+		sdl.EndGPURenderPass(render_pass)
+	}
+
+	log.assertf(sdl.SubmitGPUCommandBuffer(cmdbuf), "SubmitGPUCommandBuffer: %s", sdl.GetError())
+
+	state.prev_chunks_total = state.chunks_total
+	state.prev_chunks_without_geometry = state.chunks_without_geometry
+	state.prev_chunks_frustum_culled = state.chunks_frustum_culled
+	state.prev_chunks_drawn = state.chunks_drawn
+	state.prev_terrain_faces_drawn = state.terrain_faces_drawn
+	state.prev_terrain_indices_drawn = state.terrain_indices_drawn
+
+	state.chunks_total = 0
+	state.chunks_without_geometry = 0
+	state.chunks_frustum_culled = 0
+	state.chunks_drawn = 0
+	state.terrain_faces_drawn = 0
+	state.terrain_indices_drawn = 0
+}
+
+//////////////////////////////////////
+// Systems
+/////////////////////////////////////
+
+init :: proc() {
+	log.debug("Init application")
+
+	log.assertf(sdl.Init({.VIDEO}), "Failed to initialize SDL: %s", sdl.GetError())
+
+	state.device = sdl.CreateGPUDevice({.DXIL}, state.debug_mode, nil)
+	log.assertf(state.device != nil, "Failed to create GPU device: %s", sdl.GetError())
+
+	state.window = sdl.CreateWindow(
+		"Voxels Engine",
+		WINDOW_DEFAULT_WIDTH,
+		WINDOW_DEFAULT_HEIGHT,
+		{.RESIZABLE},
+	)
+	log.assertf(state.window != nil, "Failed to create window: %s", sdl.GetError())
+	log.assertf(
+		sdl.SetWindowRelativeMouseMode(state.window, true),
+		"Failed to enable relative mouse mode: %s",
+		sdl.GetError(),
+	)
+
+	log.assertf(
+		sdl.ClaimWindowForGPUDevice(state.device, state.window),
+		"Failed to claim window for GPU device: %s",
+		sdl.GetError(),
+	)
+
+	log.assertf(
+		sdl.SetGPUSwapchainParameters(
+			state.device,
+			state.window,
+			sdl.GPUSwapchainComposition.SDR,
+			state.enable_vsync ? sdl.GPUPresentMode.VSYNC : sdl.GPUPresentMode.IMMEDIATE,
+		),
+		"Failed to set GPU swapchain parameters: %s",
+		sdl.GetError(),
+	)
+
+	sdl.SetLogOutputFunction(sdl_log_output, nil)
+	sdl.SetLogPriority(.GPU, .DEBUG)
+
+	log.debug("Application initialized")
+}
+
+shutdown :: proc() {
+	log.debug("Application shutdown")
+	sdl.ReleaseWindowFromGPUDevice(state.device, state.window)
+	sdl.DestroyGPUDevice(state.device)
+	sdl.DestroyWindow(state.window)
+	sdl.Quit()
+	log.debug("Shutdown complete")
 }
 
 setup_resources :: proc() {
 	log.debug("Setting resources")
 
 	geometry_init(
-		&geometry_pool,
+		&state.geometry_pool,
 		GEOMETRY_MAX_GEOMETRIES,
 		GEOMETRY_MAX_VERTEX_BYTES,
 		GEOMETRY_MAX_INDEX_ELEMENTS,
@@ -1767,23 +1937,23 @@ setup_resources :: proc() {
 	create_pipelines_fill_and_line(
 		vert_shader,
 		frag_shader,
-		&prototype_fill_pipeline,
-		&prototype_line_pipeline,
+		&state.prototype_fill_pipeline,
+		&state.prototype_line_pipeline,
 	)
 	create_pipelines_fill_and_line(
 		terrain_vert_shader,
 		terrain_frag_shader,
-		&terrain_fill_pipeline,
-		&terrain_line_pipeline,
+		&state.terrain_fill_pipeline,
+		&state.terrain_line_pipeline,
 	)
 
-	sdl.ReleaseGPUShader(device, frag_shader)
-	sdl.ReleaseGPUShader(device, vert_shader)
-	sdl.ReleaseGPUShader(device, terrain_frag_shader)
-	sdl.ReleaseGPUShader(device, terrain_vert_shader)
+	sdl.ReleaseGPUShader(state.device, frag_shader)
+	sdl.ReleaseGPUShader(state.device, vert_shader)
+	sdl.ReleaseGPUShader(state.device, terrain_frag_shader)
+	sdl.ReleaseGPUShader(state.device, terrain_vert_shader)
 
 	w, h: c.int
-	sdl.GetWindowSizeInPixels(window, &w, &h)
+	sdl.GetWindowSizeInPixels(state.window, &w, &h)
 
 	depth_texture_props := sdl.CreateProperties()
 	log.assertf(
@@ -1802,8 +1972,8 @@ setup_resources :: proc() {
 		sdl.GetError(),
 	)
 
-	depth_texture = sdl.CreateGPUTexture(
-		device,
+	state.depth_texture = sdl.CreateGPUTexture(
+		state.device,
 		sdl.GPUTextureCreateInfo {
 			type = sdl.GPUTextureType.D2,
 			width = cast(u32)(w),
@@ -1816,9 +1986,9 @@ setup_resources :: proc() {
 			props = depth_texture_props,
 		},
 	)
-	log.assert(depth_texture != nil, "Failed to create depth texture!")
+	log.assert(state.depth_texture != nil, "Failed to create depth texture!")
 
-	temp := mem.begin_arena_temp_memory(&transient_arena)
+	temp := mem.begin_arena_temp_memory(&state.transient_arena)
 	defer mem.end_arena_temp_memory(temp)
 
 	chunks_attempted: u32
@@ -1826,7 +1996,7 @@ setup_resources :: proc() {
 	chunks_empty: u32
 	total_faces: u32
 
-	debug_chunk_count = 0
+	state.debug_chunk_count = 0
 	for gz in 0 ..< DEBUG_CHUNK_GRID_Z {
 		for gx in 0 ..< DEBUG_CHUNK_GRID_X {
 			chunks_attempted += 1
@@ -1839,7 +2009,7 @@ setup_resources :: proc() {
 			mesh_output := chunk_voxel_view_build_naive_mesh(
 				view,
 				.Treat_Out_Of_Chunk_As_Empty,
-				transient_allocator,
+				state.transient_allocator,
 			)
 			total_faces += mesh_output.face_count
 
@@ -1850,7 +2020,10 @@ setup_resources :: proc() {
 			}
 
 			chunk := chunk_create(coord)
-			chunk.geometry_id = geometry_append_chunk_mesh_output(&geometry_pool, mesh_output)
+			chunk.geometry_id = geometry_append_chunk_mesh_output(
+				&state.geometry_pool,
+				mesh_output,
+			)
 
 			log.debugf(
 				"Debug chunk mesh: coord=%v faces=%d vertices=%d indices=%d",
@@ -1860,8 +2033,8 @@ setup_resources :: proc() {
 				mesh_output.face_count * 6,
 			)
 
-			debug_chunks[debug_chunk_count] = chunk
-			debug_chunk_count += 1
+			state.debug_chunks[state.debug_chunk_count] = chunk
+			state.debug_chunk_count += 1
 		}
 	}
 
@@ -1873,169 +2046,21 @@ setup_resources :: proc() {
 		total_faces,
 	)
 
-	debug_position_camera_for_chunk(debug_chunks[0].coord)
+	debug_position_camera_for_chunk(state.debug_chunks[0].coord)
 
 	log.debug("Resources initialized")
 }
 
 destroy_resources :: proc() {
 	log.debug("Destroying resources")
-	log.assertf(sdl.WaitForGPUIdle(device), "WaitForGPUIdle failed: %s", sdl.GetError())
-	geometry_destroy(&geometry_pool)
-	sdl.ReleaseGPUTexture(device, depth_texture)
-	sdl.ReleaseGPUGraphicsPipeline(device, prototype_fill_pipeline)
-	sdl.ReleaseGPUGraphicsPipeline(device, prototype_line_pipeline)
-	sdl.ReleaseGPUGraphicsPipeline(device, terrain_fill_pipeline)
-	sdl.ReleaseGPUGraphicsPipeline(device, terrain_line_pipeline)
+	log.assertf(sdl.WaitForGPUIdle(state.device), "WaitForGPUIdle failed: %s", sdl.GetError())
+	geometry_destroy(&state.geometry_pool)
+	sdl.ReleaseGPUTexture(state.device, state.depth_texture)
+	sdl.ReleaseGPUGraphicsPipeline(state.device, state.prototype_fill_pipeline)
+	sdl.ReleaseGPUGraphicsPipeline(state.device, state.prototype_line_pipeline)
+	sdl.ReleaseGPUGraphicsPipeline(state.device, state.terrain_fill_pipeline)
+	sdl.ReleaseGPUGraphicsPipeline(state.device, state.terrain_line_pipeline)
 	log.debug("Resources destroyed")
-}
-
-render :: proc() {
-	cmdbuf := sdl.AcquireGPUCommandBuffer(device)
-	log.assertf(cmdbuf != nil, "AcquireGPUCommandBuffer failed: %s", sdl.GetError())
-
-	swapchain_texture: ^sdl.GPUTexture
-	log.assertf(
-		sdl.WaitAndAcquireGPUSwapchainTexture(cmdbuf, window, &swapchain_texture, nil, nil),
-		"WaitAndAcquireGPUSwapchainTexture failed: %s",
-		sdl.GetError(),
-	)
-
-	if (swapchain_texture != nil) {
-		frustum := frustum_from_camera(camera, math.to_radians_f32(FOV), ASPECT_RATIO)
-
-		colorTargetInfo := sdl.GPUColorTargetInfo{}
-		colorTargetInfo.texture = swapchain_texture
-		colorTargetInfo.clear_color = sdl.FColor{0.05, 0.10, 0.20, 1.0}
-		colorTargetInfo.load_op = sdl.GPULoadOp.CLEAR
-		colorTargetInfo.store_op = sdl.GPUStoreOp.STORE
-
-		depthTargetInfo := sdl.GPUDepthStencilTargetInfo{}
-		depthTargetInfo.texture = depth_texture
-		depthTargetInfo.clear_depth = DEPTH_CLEAR_VALUE
-		depthTargetInfo.load_op = sdl.GPULoadOp.CLEAR
-		depthTargetInfo.store_op = sdl.GPUStoreOp.DONT_CARE
-		depthTargetInfo.stencil_load_op = sdl.GPULoadOp.DONT_CARE
-		depthTargetInfo.stencil_store_op = sdl.GPUStoreOp.DONT_CARE
-
-		render_pass := sdl.BeginGPURenderPass(cmdbuf, &colorTargetInfo, 1, &depthTargetInfo)
-
-		// Hardware indexed PVP: SDL applies the index buffer, then the selected vertex
-		// shader pulls bytes from the shared geometry storage buffer.
-		storage_buffers := [?]^sdl.GPUBuffer{geometry_pool.vertex_buffer}
-		sdl.BindGPUVertexStorageBuffers(render_pass, 0, raw_data(storage_buffers[:]), 1)
-		sdl.BindGPUIndexBuffer(
-			render_pass,
-			sdl.GPUBufferBinding{buffer = geometry_pool.index_buffer, offset = 0},
-			sdl.GPUIndexElementSize._32BIT,
-		)
-
-		// todo: replace this prototype geometry scan with explicit debug/prototype draw ownership.
-		for geometry in geometry_pool.geometries[:int(geometry_pool.geometry_count)] {
-			if geometry.layout_kind != .Position_Color_F32x4 {
-				continue
-			}
-
-			sdl.PushGPUVertexUniformData(cmdbuf, 0, &mvp, cast(u32)size_of(matrix[4, 4]f32))
-			draw_params := GeometryDrawParams {
-				vertex_byte_offset  = geometry.vertex_byte_offset,
-				vertex_stride_bytes = geometry.vertex_stride_bytes,
-			}
-			sdl.PushGPUVertexUniformData(
-				cmdbuf,
-				1,
-				&draw_params,
-				cast(u32)size_of(GeometryDrawParams),
-			)
-
-			pipeline := use_wireframe_mode ? prototype_line_pipeline : prototype_fill_pipeline
-			sdl.BindGPUGraphicsPipeline(render_pass, pipeline)
-			sdl.DrawGPUIndexedPrimitives(
-				render_pass,
-				geometry.index_count,
-				1,
-				geometry.first_index,
-				0,
-				0,
-			)
-		}
-
-		// todo: replace this debug chunks draw with iteration over loaded chunks.
-		for chunk in debug_chunks[:debug_chunk_count] {
-			chunks_total += 1
-
-			if chunk.geometry_id == INVALID_GEOMETRY_ID {
-				chunks_without_geometry += 1
-				continue
-			}
-
-			aabb := chunk_world_get_aabb(chunk.coord)
-			if !frustum_test_aabb(frustum, aabb) {
-				chunks_frustum_culled += 1
-				continue
-			}
-
-			geometry := geometry_get(&geometry_pool, chunk.geometry_id)
-			log.assertf(
-				geometry.layout_kind == .Terrain_Packed_U32,
-				"chunk geometry must use terrain layout: %v",
-				geometry.layout_kind,
-			)
-
-			sdl.PushGPUVertexUniformData(
-				cmdbuf,
-				0,
-				&view_projection,
-				cast(u32)size_of(matrix[4, 4]f32),
-			)
-			chunk_origin_world := terrain_chunk_origin_world_from_coord(chunk.coord)
-			draw_params := TerrainDrawParams {
-				vertex_byte_offset  = geometry.vertex_byte_offset,
-				vertex_stride_bytes = geometry.vertex_stride_bytes,
-				chunk_origin        = chunk_origin_world,
-			}
-			sdl.PushGPUVertexUniformData(
-				cmdbuf,
-				1,
-				&draw_params,
-				cast(u32)size_of(TerrainDrawParams),
-			)
-
-			pipeline := use_wireframe_mode ? terrain_line_pipeline : terrain_fill_pipeline
-			sdl.BindGPUGraphicsPipeline(render_pass, pipeline)
-			sdl.DrawGPUIndexedPrimitives(
-				render_pass,
-				geometry.index_count,
-				1,
-				geometry.first_index,
-				0,
-				0,
-			)
-
-			terrain_faces_drawn += geometry.index_count / 6
-			terrain_indices_drawn += geometry.index_count
-
-			chunks_drawn += 1
-		}
-
-		sdl.EndGPURenderPass(render_pass)
-	}
-
-	log.assertf(sdl.SubmitGPUCommandBuffer(cmdbuf), "SubmitGPUCommandBuffer: %s", sdl.GetError())
-
-	prev_chunks_total = chunks_total
-	prev_chunks_without_geometry = chunks_without_geometry
-	prev_chunks_frustum_culled = chunks_frustum_culled
-	prev_chunks_drawn = chunks_drawn
-	prev_terrain_faces_drawn = terrain_faces_drawn
-	prev_terrain_indices_drawn = terrain_indices_drawn
-
-	chunks_total = 0
-	chunks_without_geometry = 0
-	chunks_frustum_culled = 0
-	chunks_drawn = 0
-	terrain_faces_drawn = 0
-	terrain_indices_drawn = 0
 }
 
 process_events :: proc() {
@@ -2043,29 +2068,36 @@ process_events :: proc() {
 		#partial switch event.type {
 		case .QUIT:
 			log.debug("Quit event received")
-			is_window_open = false
+			state.is_window_open = false
 		case .KEY_DOWN:
 			{
 				if event.key.scancode == sdl.Scancode.ESCAPE {
 					log.debug("Escape key pressed")
-					is_window_open = false
+					state.is_window_open = false
 				}
 
 				if event.key.scancode == sdl.Scancode.G && !event.key.repeat {
-					use_wireframe_mode = !use_wireframe_mode
+					state.use_wireframe_mode = !state.use_wireframe_mode
 				}
 
 				if event.key.scancode == sdl.Scancode.I && !event.key.repeat {
-					log.debugf("Debug info: chunks_total=%d, chunks_without_geometry=%d, chunks_frustum_culled=%d, chunks_drawn=%d, terrain_faces_drawn=%d, terrain_indices_drawn=%d",
-						prev_chunks_total, prev_chunks_without_geometry, prev_chunks_frustum_culled, prev_chunks_drawn, prev_terrain_faces_drawn, prev_terrain_indices_drawn)
+					log.debugf(
+						"Debug info: chunks_total=%d, chunks_without_geometry=%d, chunks_frustum_culled=%d, chunks_drawn=%d, terrain_faces_drawn=%d, terrain_indices_drawn=%d",
+						state.prev_chunks_total,
+						state.prev_chunks_without_geometry,
+						state.prev_chunks_frustum_culled,
+						state.prev_chunks_drawn,
+						state.prev_terrain_faces_drawn,
+						state.prev_terrain_indices_drawn,
+					)
 				}
 			}
 		case .MOUSE_MOTION:
 			{
-				camera.yaw -= event.motion.xrel * MOUSE_SENSITIVITY
-				camera.pitch -= event.motion.yrel * MOUSE_SENSITIVITY
-				camera.pitch = math.clamp(
-					camera.pitch,
+				state.camera.yaw -= event.motion.xrel * MOUSE_SENSITIVITY
+				state.camera.pitch -= event.motion.yrel * MOUSE_SENSITIVITY
+				state.camera.pitch = math.clamp(
+					state.camera.pitch,
 					math.to_radians_f32(-89.0),
 					math.to_radians_f32(89.0),
 				)
@@ -2075,29 +2107,33 @@ process_events :: proc() {
 }
 
 update_camera_vectors :: proc() {
-	camera.forward = la.normalize(
+	state.camera.forward = la.normalize(
 		la.Vector3f32 {
-			math.sin(camera.yaw) * math.cos(camera.pitch),
-			math.sin(camera.pitch),
-			math.cos(camera.yaw) * math.cos(camera.pitch),
+			math.sin(state.camera.yaw) * math.cos(state.camera.pitch),
+			math.sin(state.camera.pitch),
+			math.cos(state.camera.yaw) * math.cos(state.camera.pitch),
 		},
 	)
 
-	camera.right = la.normalize(la.cross(camera.world_up, camera.forward))
-	camera.up = la.normalize(la.cross(camera.forward, camera.right))
+	state.camera.right = la.normalize(la.cross(state.camera.world_up, state.camera.forward))
+	state.camera.up = la.normalize(la.cross(state.camera.forward, state.camera.right))
 }
 
 update :: proc() {
-	view := la.matrix4_look_at_f32(camera.position, camera.position + camera.forward, camera.up)
+	view := la.matrix4_look_at_f32(
+		state.camera.position,
+		state.camera.position + state.camera.forward,
+		state.camera.up,
+	)
 	proj := la.matrix4_perspective_f32(
 		math.to_radians_f32(FOV),
 		ASPECT_RATIO,
-		camera.near_plane,
-		camera.far_plane,
+		state.camera.near_plane,
+		state.camera.far_plane,
 	)
-	view_projection = proj * view
+	state.view_projection = proj * view
 	model := la.matrix4_rotate_f32(ANGLE, la.Vector3f32{0, 1, 0})
-	mvp = view_projection * model
+	state.mvp = state.view_projection * model
 }
 
 handle_input :: proc(dt: f32) {
@@ -2108,10 +2144,10 @@ handle_input :: proc(dt: f32) {
 	if keys[cast(int)sdl.Scancode.LSHIFT] {velocity = MAX_ACCELERATION}
 
 	velocity = velocity * dt
-	if keys[cast(int)sdl.Scancode.W] {camera.position += camera.forward * velocity}
-	if keys[cast(int)sdl.Scancode.S] {camera.position -= camera.forward * velocity}
-	if keys[cast(int)sdl.Scancode.D] {camera.position -= camera.right * velocity}
-	if keys[cast(int)sdl.Scancode.A] {camera.position += camera.right * velocity}
+	if keys[cast(int)sdl.Scancode.W] {state.camera.position += state.camera.forward * velocity}
+	if keys[cast(int)sdl.Scancode.S] {state.camera.position -= state.camera.forward * velocity}
+	if keys[cast(int)sdl.Scancode.D] {state.camera.position -= state.camera.right * velocity}
+	if keys[cast(int)sdl.Scancode.A] {state.camera.position += state.camera.right * velocity}
 }
 
 load_shader :: proc(
@@ -2134,10 +2170,10 @@ load_shader :: proc(
 		log.assertf(false, "Unknown shader type: %s", filename)
 	}
 
-	temp := mem.begin_arena_temp_memory(&transient_arena)
+	temp := mem.begin_arena_temp_memory(&state.transient_arena)
 	defer mem.end_arena_temp_memory(temp)
 
-	code, err := os.read_entire_file_from_path(filename, transient_allocator)
+	code, err := os.read_entire_file_from_path(filename, state.transient_allocator)
 	log.assertf(err == nil, "Failed to read shader: %s", err)
 	log.assertf(len(code) > 0, "Shader file is empty: %s", filename)
 
@@ -2164,7 +2200,7 @@ load_shader :: proc(
 		num_storage_buffers  = storage_buffer_count,
 		num_storage_textures = storage_texture_count,
 	}
-	shader := sdl.CreateGPUShader(device, shader_info)
+	shader := sdl.CreateGPUShader(state.device, shader_info)
 	log.assertf(shader != nil, "Failed to create shader: %s", sdl.GetError())
 
 	log.debugf("Shader %s created: %s", shader_type, filename)
@@ -2180,13 +2216,14 @@ main :: proc() {
 	context.logger = log.create_console_logger(.Debug)
 	defer log.destroy_console_logger(context.logger)
 
-	mem.arena_init(&persistent_arena, persistent_slab[:])
-	mem.arena_init(&transient_arena, transient_slab[:])
+	mem.arena_init(&state.persistent_arena, state.persistent_slab[:])
+	mem.arena_init(&state.transient_arena, state.transient_slab[:])
 
-	transient_allocator = mem.arena_allocator(&transient_arena)
-	persistent_allocator = mem.arena_allocator(&persistent_arena)
+	state.transient_allocator = mem.arena_allocator(&state.transient_arena)
+	state.persistent_allocator = mem.arena_allocator(&state.persistent_arena)
 
-	context.allocator = persistent_allocator
+	context.allocator = state.persistent_allocator
+	context.temp_allocator = state.transient_allocator
 
 	when ODIN_DEBUG {
 		debug_frustum_contract_checks_run()
@@ -2200,7 +2237,7 @@ main :: proc() {
 	defer destroy_resources()
 
 	current_time := sdl.GetTicks()
-	for is_window_open {
+	for state.is_window_open {
 		now := sdl.GetTicks()
 		dt := cast(f32)(now - current_time) / 1000.0
 		current_time = now
