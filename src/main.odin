@@ -39,15 +39,154 @@ ShaderType :: enum {
 }
 
 Camera :: struct {
-	position:   [3]f32,
-	forward:    [3]f32,
-	up:         [3]f32,
-	right:      [3]f32,
-	world_up:   [3]f32,
+	position:   Vec3,
+	forward:    Vec3,
+	up:         Vec3,
+	right:      Vec3,
+	world_up:   Vec3,
 	yaw:        f32,
 	pitch:      f32,
 	near_plane: f32,
 	far_plane:  f32,
+}
+
+///////////////////////////////////////////
+// Math
+///////////////////////////////////////////
+
+UVec2 :: [2]u32
+
+Vec3 :: [3]f32
+Vec4 :: [4]f32
+
+WorldAABB :: struct {
+	min, max: Vec3,
+}
+
+Plane :: struct {
+	normal:   Vec3,
+	distance: f32,
+}
+
+FrustumPlane :: enum u32 {
+	Left,
+	Right,
+	Top,
+	Bottom,
+	Near,
+	Far,
+}
+
+Frustum :: struct {
+	planes: [FrustumPlane]Plane,
+}
+
+frustum_plane_from_point_normal :: proc(point, normal: Vec3) -> Plane {
+	n := la.normalize(normal)
+	return {normal = n, distance = -la.dot(n, point)}
+}
+
+frustum_from_camera :: proc(camera: Camera, vertical_fov_radians, aspect: f32) -> Frustum {
+	position := camera.position
+	forward := la.normalize(camera.forward)
+	up := la.normalize(camera.up)
+	right := la.normalize(camera.right)
+
+	near_center := position + forward * camera.near_plane
+	far_center := position + forward * camera.far_plane
+
+	tan_vertical := math.tan_f32(vertical_fov_radians * 0.5)
+	tan_horizontal := aspect * tan_vertical
+
+	frustum := Frustum{}
+	frustum.planes[.Left] = frustum_plane_from_point_normal(
+		position,
+		forward * tan_horizontal + right,
+	)
+	frustum.planes[.Right] = frustum_plane_from_point_normal(
+		position,
+		forward * tan_horizontal - right,
+	)
+	frustum.planes[.Top] = frustum_plane_from_point_normal(position, forward * tan_vertical - up)
+	frustum.planes[.Bottom] = frustum_plane_from_point_normal(
+		position,
+		forward * tan_vertical + up,
+	)
+	frustum.planes[.Near] = frustum_plane_from_point_normal(near_center, forward)
+	frustum.planes[.Far] = frustum_plane_from_point_normal(far_center, -forward)
+
+	return frustum
+}
+
+frustum_test_aabb :: proc(frustum: Frustum, aabb: WorldAABB) -> bool {
+	center := Vec3 {
+		(aabb.min[0] + aabb.max[0]) * 0.5,
+		(aabb.min[1] + aabb.max[1]) * 0.5,
+		(aabb.min[2] + aabb.max[2]) * 0.5,
+	}
+	extent := Vec3 {
+		(aabb.max[0] - aabb.min[0]) * 0.5,
+		(aabb.max[1] - aabb.min[1]) * 0.5,
+		(aabb.max[2] - aabb.min[2]) * 0.5,
+	}
+
+	for plane in frustum.planes {
+		half_distance :=
+			extent[0] * math.abs(plane.normal[0]) +
+			extent[1] * math.abs(plane.normal[1]) +
+			extent[2] * math.abs(plane.normal[2])
+
+		signed_dist := la.dot(plane.normal, center) + plane.distance
+		if signed_dist + half_distance < 0 {
+			return false
+		}
+	}
+
+	return true
+}
+
+when ODIN_DEBUG {
+	debug_frustum_contract_checks_run :: proc() {
+		test_camera := Camera {
+			position   = {0, 0, 0},
+			forward    = {0, 0, 1},
+			up         = {0, 1, 0},
+			right      = {1, 0, 0},
+			world_up   = {0, 1, 0},
+			near_plane = 1,
+			far_plane  = 10,
+		}
+		frustum := frustum_from_camera(test_camera, math.to_radians_f32(90), 1)
+
+		log.assertf(
+			frustum_test_aabb(frustum, WorldAABB{min = {-0.5, -0.5, 4}, max = {0.5, 0.5, 5}}),
+			"frustum check: expected centered box to be visible",
+		)
+		log.assertf(
+			!frustum_test_aabb(frustum, WorldAABB{min = {-0.5, -0.5, -3}, max = {0.5, 0.5, -2}}),
+			"frustum check: expected box behind camera to be culled",
+		)
+		log.assertf(
+			!frustum_test_aabb(frustum, WorldAABB{min = {-0.5, -0.5, 12}, max = {0.5, 0.5, 13}}),
+			"frustum check: expected box beyond far plane to be culled",
+		)
+		log.assertf(
+			!frustum_test_aabb(frustum, WorldAABB{min = {12, -0.5, 4}, max = {13, 0.5, 5}}),
+			"frustum check: expected right-side box to be culled",
+		)
+
+		aabb := chunk_world_get_aabb(ChunkCoord{1, 0, -1})
+		log.assertf(
+			aabb.min == Vec3{32, 0, -32},
+			"chunk world AABB: min mismatch, got %v",
+			aabb.min,
+		)
+		log.assertf(
+			aabb.max == Vec3{64, 32, 0},
+			"chunk world AABB: max mismatch, got %v",
+			aabb.max,
+		)
+	}
 }
 
 ///////////////////////////////////////////
@@ -115,6 +254,14 @@ chunk_origin_from_coord :: proc(coord: ChunkCoord) -> BlockCoord {
 		y = coord.y * CHUNK_BLOCK_LENGTH,
 		z = coord.z * CHUNK_BLOCK_LENGTH,
 	}
+}
+
+chunk_world_get_aabb :: proc(coord: ChunkCoord) -> WorldAABB {
+	origin := terrain_chunk_origin_world_from_coord(coord)
+	length := f32(CHUNK_BLOCK_LENGTH) * TERRAIN_BLOCK_WORLD_SIZE
+	min := Vec3{origin[0], origin[1], origin[2]}
+
+	return {min = min, max = min + Vec3{length, length, length}}
 }
 
 chunk_bounds_from_coord :: proc(coord: ChunkCoord) -> ChunkBounds {
@@ -824,8 +971,8 @@ TerrainUnpackedVertex :: struct {
 TerrainDrawParams :: struct {
 	vertex_byte_offset:  u32,
 	vertex_stride_bytes: u32,
-	_padding:            [2]u32,
-	chunk_origin:        [4]f32, // xyz used, w = block_world_size
+	_padding:            UVec2,
+	chunk_origin:        Vec4, // xyz used, w = block_world_size
 }
 
 TerrainFaceDesc :: struct {
@@ -833,7 +980,7 @@ TerrainFaceDesc :: struct {
 	normal_id:                             u32,
 }
 
-terrain_chunk_origin_world_from_coord :: proc(coord: ChunkCoord) -> [4]f32 {
+terrain_chunk_origin_world_from_coord :: proc(coord: ChunkCoord) -> Vec4 {
 	origin := chunk_origin_from_coord(coord)
 	return {
 		f32(origin.x) * TERRAIN_BLOCK_WORLD_SIZE,
@@ -843,7 +990,7 @@ terrain_chunk_origin_world_from_coord :: proc(coord: ChunkCoord) -> [4]f32 {
 	}
 }
 
-terrain_chunk_center_world_from_coord :: proc(coord: ChunkCoord) -> [3]f32 {
+terrain_chunk_center_world_from_coord :: proc(coord: ChunkCoord) -> Vec3 {
 	origin := terrain_chunk_origin_world_from_coord(coord)
 	half_length := f32(CHUNK_BLOCK_LENGTH) * TERRAIN_BLOCK_WORLD_SIZE * 0.5
 	return {origin[0] + half_length, origin[1] + half_length, origin[2] + half_length}
@@ -927,8 +1074,8 @@ GeometryLayoutKind :: enum u32 {
 
 // Mesh.vert.hlsl decodes this layout by byte offsets.
 PositionColorVertex :: struct {
-	position: [4]f32,
-	color:    [4]f32,
+	position: Vec4,
+	color:    Vec4,
 }
 #assert(size_of(PositionColorVertex) == 32)
 
@@ -944,7 +1091,7 @@ Geometry :: struct {
 GeometryDrawParams :: struct {
 	vertex_byte_offset:  u32,
 	vertex_stride_bytes: u32,
-	_padding:            [2]u32, // extra padding for alignment
+	_padding:            UVec2, // extra padding for alignment
 }
 
 GeometryPool :: struct {
@@ -1442,6 +1589,20 @@ enable_vsync := true
 is_window_open := true
 use_wireframe_mode := false
 
+// Frame debug stats
+chunks_total: u32 = 0
+chunks_without_geometry: u32 = 0
+chunks_frustum_culled: u32 = 0
+chunks_drawn: u32 = 0
+terrain_faces_drawn: u32 = 0
+terrain_indices_drawn: u32 = 0
+
+prev_chunks_total: u32 = 0
+prev_chunks_without_geometry: u32 = 0
+prev_chunks_frustum_culled: u32 = 0
+prev_chunks_drawn: u32 = 0
+prev_terrain_faces_drawn: u32 = 0
+prev_terrain_indices_drawn: u32 = 0
 
 //////////////////////////////////////
 // Helpers
@@ -1741,6 +1902,8 @@ render :: proc() {
 	)
 
 	if (swapchain_texture != nil) {
+		frustum := frustum_from_camera(camera, math.to_radians_f32(FOV), ASPECT_RATIO)
+
 		colorTargetInfo := sdl.GPUColorTargetInfo{}
 		colorTargetInfo.texture = swapchain_texture
 		colorTargetInfo.clear_color = sdl.FColor{0.05, 0.10, 0.20, 1.0}
@@ -1799,7 +1962,16 @@ render :: proc() {
 
 		// todo: replace this debug chunks draw with iteration over loaded chunks.
 		for chunk in debug_chunks[:debug_chunk_count] {
+			chunks_total += 1
+
 			if chunk.geometry_id == INVALID_GEOMETRY_ID {
+				chunks_without_geometry += 1
+				continue
+			}
+
+			aabb := chunk_world_get_aabb(chunk.coord)
+			if !frustum_test_aabb(frustum, aabb) {
+				chunks_frustum_culled += 1
 				continue
 			}
 
@@ -1839,12 +2011,31 @@ render :: proc() {
 				0,
 				0,
 			)
+
+			terrain_faces_drawn += geometry.index_count / 6
+			terrain_indices_drawn += geometry.index_count
+
+			chunks_drawn += 1
 		}
 
 		sdl.EndGPURenderPass(render_pass)
 	}
 
 	log.assertf(sdl.SubmitGPUCommandBuffer(cmdbuf), "SubmitGPUCommandBuffer: %s", sdl.GetError())
+
+	prev_chunks_total = chunks_total
+	prev_chunks_without_geometry = chunks_without_geometry
+	prev_chunks_frustum_culled = chunks_frustum_culled
+	prev_chunks_drawn = chunks_drawn
+	prev_terrain_faces_drawn = terrain_faces_drawn
+	prev_terrain_indices_drawn = terrain_indices_drawn
+
+	chunks_total = 0
+	chunks_without_geometry = 0
+	chunks_frustum_culled = 0
+	chunks_drawn = 0
+	terrain_faces_drawn = 0
+	terrain_indices_drawn = 0
 }
 
 process_events :: proc() {
@@ -1862,6 +2053,11 @@ process_events :: proc() {
 
 				if event.key.scancode == sdl.Scancode.G && !event.key.repeat {
 					use_wireframe_mode = !use_wireframe_mode
+				}
+
+				if event.key.scancode == sdl.Scancode.I && !event.key.repeat {
+					log.debugf("Debug info: chunks_total=%d, chunks_without_geometry=%d, chunks_frustum_culled=%d, chunks_drawn=%d, terrain_faces_drawn=%d, terrain_indices_drawn=%d",
+						prev_chunks_total, prev_chunks_without_geometry, prev_chunks_frustum_culled, prev_chunks_drawn, prev_terrain_faces_drawn, prev_terrain_indices_drawn)
 				}
 			}
 		case .MOUSE_MOTION:
@@ -1893,7 +2089,12 @@ update_camera_vectors :: proc() {
 
 update :: proc() {
 	view := la.matrix4_look_at_f32(camera.position, camera.position + camera.forward, camera.up)
-	proj := la.matrix4_perspective_f32(math.to_radians_f32(FOV), ASPECT_RATIO, 0.1, 100.0)
+	proj := la.matrix4_perspective_f32(
+		math.to_radians_f32(FOV),
+		ASPECT_RATIO,
+		camera.near_plane,
+		camera.far_plane,
+	)
 	view_projection = proj * view
 	model := la.matrix4_rotate_f32(ANGLE, la.Vector3f32{0, 1, 0})
 	mvp = view_projection * model
@@ -1988,6 +2189,7 @@ main :: proc() {
 	context.allocator = persistent_allocator
 
 	when ODIN_DEBUG {
+		debug_frustum_contract_checks_run()
 		debug_chunk_mesher_contract_checks_run()
 	}
 
