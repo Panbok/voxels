@@ -70,6 +70,11 @@ FrameDebugStats :: struct {
 	prev_terrain_indices_drawn:   u32,
 }
 
+ChunkStore :: struct {
+	chunks:      []Chunk,
+	chunk_count: u32,
+}
+
 state := struct {
 	// Memory
 	using memory:            Memory,
@@ -77,20 +82,20 @@ state := struct {
 	// Geometry
 	geometry_pool:           GeometryPool,
 
+	// Storage
+	using chunk_store:       ChunkStore,
+
 	// Graphics & Window
 	using graphics:          Graphics,
 
-	// Debug
-	// todo: replace this debug chunk array with real chunk storage/iteration.
-	debug_chunks:            [DEBUG_CHUNK_COUNT]Chunk,
-	debug_chunk_count:       u32,
+	// Frame debug stats
+	using frame_debug_stats: FrameDebugStats,
+
+	// State variables
 	debug_mode:              bool,
 	enable_vsync:            bool,
 	is_window_open:          bool,
 	use_wireframe_mode:      bool,
-
-	// Frame debug stats
-	using frame_debug_stats: FrameDebugStats,
 } {
 	camera = {
 		position = {0.0, 0.0, -5.0},
@@ -313,6 +318,17 @@ ChunkCoord :: struct {
 
 BlockCoord :: struct {
 	x, y, z: i32,
+}
+
+ChunkSnapshot :: struct {
+	coord:      ChunkCoord,
+	voxel_view: ChunkVoxelView,
+}
+
+ChunkMeshJob :: struct {
+	snapshot:         ChunkSnapshot,
+	boundary_policy:  ChunkMeshBoundaryPolicy,
+	output_allocator: mem.Allocator,
 }
 
 ChunkBounds :: struct {
@@ -565,6 +581,108 @@ chunk_voxel_view_build_naive_mesh :: proc(
 	log.assertf(index_count == face_count * 6, "chunk mesh index count mismatch")
 
 	return output
+}
+
+chunk_mesh_job_execute_sync :: proc(job: ChunkMeshJob) -> ChunkMeshOutput {
+	log.assertf(
+		len(job.snapshot.voxel_view.blocks) == CHUNK_BLOCK_COUNT,
+		"chunk mesh job snapshot must have %d blocks, got %d",
+		CHUNK_BLOCK_COUNT,
+		len(job.snapshot.voxel_view.blocks),
+	)
+
+	return chunk_voxel_view_build_naive_mesh(
+		job.snapshot.voxel_view,
+		job.boundary_policy,
+		job.output_allocator,
+	)
+}
+
+chunk_store_init :: proc(capacity: u32) {
+	state.chunks = make([]Chunk, int(capacity), state.persistent_allocator)
+	state.chunk_count = 0
+}
+
+chunk_store_clear :: proc() {
+	for i in 0 ..< state.chunk_count {
+		state.chunks[i] = {
+			coord = {x = 0, y = 0, z = 0},
+			geometry_id = INVALID_GEOMETRY_ID,
+		}
+	}
+	state.chunk_count = 0
+}
+
+chunk_store_append :: proc(chunk: Chunk) {
+	log.assertf(
+		state.chunk_count < u32(len(state.chunks)),
+		"chunk store capacity exceeded: count=%d capacity=%d",
+		state.chunk_count,
+		len(state.chunks),
+	)
+
+	state.chunks[state.chunk_count] = chunk
+	state.chunk_count += 1
+}
+
+chunk_store_load_debug_heightfield_grid :: proc(grid_z, grid_x: u32) {
+	chunk_store_clear()
+
+	chunks_attempted: u32
+	chunks_uploaded: u32
+	chunks_empty: u32
+	total_faces: u32
+
+	for gz in 0 ..< grid_z {
+		for gx in 0 ..< grid_x {
+			chunks_attempted += 1
+
+			coord := ChunkCoord{i32(gx) - 1, 0, i32(gz) - 1}
+
+			// todo: use noise functions to properly generate chunk voxels
+			view := ChunkVoxelView{}
+			chunk_voxel_debug_heightfield_view_builder(&view, coord)
+
+			mesh_output := chunk_mesh_job_execute_sync(
+				{
+					snapshot = {coord = coord, voxel_view = view},
+					boundary_policy = .Treat_Out_Of_Chunk_As_Empty,
+					output_allocator = state.transient_allocator,
+				},
+			)
+			total_faces += mesh_output.face_count
+
+			if mesh_output.face_count == 0 {
+				chunks_empty += 1
+			} else {
+				chunks_uploaded += 1
+			}
+
+			chunk := chunk_create(coord)
+			chunk.geometry_id = geometry_append_chunk_mesh_output(
+				&state.geometry_pool,
+				mesh_output,
+			)
+
+			log.debugf(
+				"Chunk mesh: coord=%v faces=%d vertices=%d indices=%d",
+				chunk.coord,
+				mesh_output.face_count,
+				mesh_output.face_count * 4,
+				mesh_output.face_count * 6,
+			)
+
+			chunk_store_append(chunk)
+		}
+	}
+
+	log.debugf(
+		"Debug heightfield chunks loaded: attempted=%d uploaded=%d empty=%d total_faces=%d",
+		chunks_attempted,
+		chunks_uploaded,
+		chunks_empty,
+		total_faces,
+	)
 }
 
 chunk_voxel_debug_heightfield_view_builder :: proc(view: ^ChunkVoxelView, chunk: ChunkCoord) {
@@ -1661,7 +1779,7 @@ ShaderType :: enum {
 	Fragment,
 }
 
-create_pipelines_fill_and_line :: proc(
+gfx_create_pipelines_fill_and_line :: proc(
 	vert_shader: ^sdl.GPUShader,
 	frag_shader: ^sdl.GPUShader,
 	fill_pipeline: ^^sdl.GPUGraphicsPipeline,
@@ -1704,7 +1822,7 @@ create_pipelines_fill_and_line :: proc(
 	log.assertf(line_pipeline^ != nil, "Failed to create line pipeline: %s", sdl.GetError())
 }
 
-render :: proc() {
+gfx_render :: proc() {
 	cmdbuf := sdl.AcquireGPUCommandBuffer(state.device)
 	log.assertf(cmdbuf != nil, "AcquireGPUCommandBuffer failed: %s", sdl.GetError())
 
@@ -1775,8 +1893,7 @@ render :: proc() {
 			)
 		}
 
-		// todo: replace this debug chunks draw with iteration over loaded chunks.
-		for chunk in state.debug_chunks[:state.debug_chunk_count] {
+		for chunk in state.chunks[:state.chunk_count] {
 			state.chunks_total += 1
 
 			if chunk.geometry_id == INVALID_GEOMETRY_ID {
@@ -1934,13 +2051,13 @@ setup_resources :: proc() {
 	terrain_frag_shader, _ := load_shader("assets/shaders/Terrain.frag.dxil", 0, 0, 0, 0)
 
 	// Create the pipelines
-	create_pipelines_fill_and_line(
+	gfx_create_pipelines_fill_and_line(
 		vert_shader,
 		frag_shader,
 		&state.prototype_fill_pipeline,
 		&state.prototype_line_pipeline,
 	)
-	create_pipelines_fill_and_line(
+	gfx_create_pipelines_fill_and_line(
 		terrain_vert_shader,
 		terrain_frag_shader,
 		&state.terrain_fill_pipeline,
@@ -1991,62 +2108,12 @@ setup_resources :: proc() {
 	temp := mem.begin_arena_temp_memory(&state.transient_arena)
 	defer mem.end_arena_temp_memory(temp)
 
-	chunks_attempted: u32
-	chunks_uploaded: u32
-	chunks_empty: u32
-	total_faces: u32
+	chunk_store_init(DEBUG_CHUNK_COUNT)
+	chunk_store_load_debug_heightfield_grid(DEBUG_CHUNK_GRID_Z, DEBUG_CHUNK_GRID_X)
 
-	state.debug_chunk_count = 0
-	for gz in 0 ..< DEBUG_CHUNK_GRID_Z {
-		for gx in 0 ..< DEBUG_CHUNK_GRID_X {
-			chunks_attempted += 1
+	first_chunk := state.chunks[0]
 
-			coord := ChunkCoord{i32(gx) - 1, 0, i32(gz) - 1}
-
-			view := ChunkVoxelView{}
-			chunk_voxel_debug_heightfield_view_builder(&view, coord)
-
-			mesh_output := chunk_voxel_view_build_naive_mesh(
-				view,
-				.Treat_Out_Of_Chunk_As_Empty,
-				state.transient_allocator,
-			)
-			total_faces += mesh_output.face_count
-
-			if mesh_output.face_count == 0 {
-				chunks_empty += 1
-			} else {
-				chunks_uploaded += 1
-			}
-
-			chunk := chunk_create(coord)
-			chunk.geometry_id = geometry_append_chunk_mesh_output(
-				&state.geometry_pool,
-				mesh_output,
-			)
-
-			log.debugf(
-				"Debug chunk mesh: coord=%v faces=%d vertices=%d indices=%d",
-				chunk.coord,
-				mesh_output.face_count,
-				mesh_output.face_count * 4,
-				mesh_output.face_count * 6,
-			)
-
-			state.debug_chunks[state.debug_chunk_count] = chunk
-			state.debug_chunk_count += 1
-		}
-	}
-
-	log.debugf(
-		"Debug chunk grid: attempted=%d uploaded=%d empty=%d total_faces=%d",
-		chunks_attempted,
-		chunks_uploaded,
-		chunks_empty,
-		total_faces,
-	)
-
-	debug_position_camera_for_chunk(state.debug_chunks[0].coord)
+	debug_position_camera_for_chunk(first_chunk.coord)
 
 	log.debug("Resources initialized")
 }
@@ -2246,6 +2313,6 @@ main :: proc() {
 		update_camera_vectors()
 		handle_input(dt)
 		update()
-		render()
+		gfx_render()
 	}
 }
