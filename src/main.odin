@@ -33,15 +33,15 @@ MOUSE_SENSITIVITY :: f32(0.0025)
 
 Memory :: struct {
 	// Main
-	persistent_slab:      [64 * mem.Megabyte]u8,
-	transient_slab:       [16 * mem.Megabyte]u8,
-	persistent_arena:     mem.Arena,
-	transient_arena:      mem.Arena,
-	persistent_allocator: mem.Allocator,
-	transient_allocator:  mem.Allocator,
+	persistent_slab:              [64 * mem.Megabyte]u8,
+	transient_slab:               [16 * mem.Megabyte]u8,
+	persistent_arena:             mem.Arena,
+	transient_arena:              mem.Arena,
+	persistent_allocator:         mem.Allocator,
+	transient_allocator:          mem.Allocator,
 
 	// Workers (Chunk Mesh)
-	chunk_mesh_worker_arena_pool:           ArenaPool,
+	chunk_mesh_worker_arena_pool: ArenaPool,
 }
 
 Graphics :: struct {
@@ -88,7 +88,7 @@ state := struct {
 	geometry_pool:           GeometryPool,
 
 	// Storage
-	using chunk_store:       ChunkStore,
+	chunk_store:             ChunkStore,
 
 	// Graphics & Window
 	using graphics:          Graphics,
@@ -124,9 +124,9 @@ state := struct {
 /////////////////////////////////////
 
 ArenaPoolElement :: struct {
-	arena: mem.Arena,
+	arena:     mem.Arena,
 	allocator: mem.Allocator,
-	buffer: []u8,
+	buffer:    []u8,
 }
 
 ArenaPool :: struct {
@@ -134,15 +134,15 @@ ArenaPool :: struct {
 }
 
 arena_pool_init :: proc(arena_count: u32, buffer_size: u32) -> ArenaPool {
-	pool := ArenaPool{
+	pool := ArenaPool {
 		elements = make([]ArenaPoolElement, arena_count, state.persistent_allocator),
 	}
 
-	for idx in 0..<arena_count {
-		pool.elements[idx] = ArenaPoolElement{
-			arena = mem.Arena{},
+	for idx in 0 ..< arena_count {
+		pool.elements[idx] = ArenaPoolElement {
+			arena     = mem.Arena{},
 			allocator = mem.Allocator{},
-			buffer = make([]u8, buffer_size, state.persistent_allocator),
+			buffer    = make([]u8, buffer_size, state.persistent_allocator),
 		}
 
 		mem.arena_init(&pool.elements[idx].arena, pool.elements[idx].buffer)
@@ -153,7 +153,7 @@ arena_pool_init :: proc(arena_count: u32, buffer_size: u32) -> ArenaPool {
 }
 
 arena_pool_reset :: proc(pool: ArenaPool) {
-	for idx in 0..<len(pool.elements) {
+	for idx in 0 ..< len(pool.elements) {
 		mem.arena_free_all(&pool.elements[idx].arena)
 	}
 }
@@ -369,8 +369,9 @@ BlockCoord :: struct {
 }
 
 ChunkSnapshot :: struct {
-	coord:      ChunkCoord,
-	voxel_view: ChunkVoxelView,
+	coord:         ChunkCoord,
+	voxel_view:    ChunkVoxelView,
+	block_version: u32,
 }
 
 ChunkMeshNeighborSnapshots :: struct {
@@ -382,7 +383,7 @@ ChunkMeshNeighborSnapshots :: struct {
 
 ChunkMeshJob :: struct {
 	snapshot:         ChunkSnapshot,
-	neighbors:       ChunkMeshNeighborSnapshots,
+	neighbors:        ChunkMeshNeighborSnapshots,
 	boundary_policy:  ChunkMeshBoundaryPolicy,
 	output_allocator: mem.Allocator,
 }
@@ -409,13 +410,67 @@ ChunkMeshOutput :: struct {
 	face_count: u32,
 }
 
+ChunkID :: struct {
+	index:      u32,
+	generation: u32,
+}
+
+INVALID_CHUNK_ID :: ChunkID {
+	index      = max(u32),
+	generation = 0,
+}
+
+ChunkGenerationState :: enum {
+	Missing,
+	Generated,
+}
+ChunkMeshState :: enum {
+	Missing,
+	Dirty,
+	Ready,
+}
+
+ChunkDirtyFlag :: enum u8 {
+	Blocks,
+	Boundary,
+}
+ChunkDirtyFlags :: bit_set[ChunkDirtyFlag]
+
+ChunkBlockStorage :: struct {
+	voxel_view: ChunkVoxelView,
+}
+
 Chunk :: struct {
-	coord:       ChunkCoord,
-	geometry_id: GeometryID,
+	block_storage:    ChunkBlockStorage,
+	coord:            ChunkCoord,
+	geometry_id:      GeometryID,
+	generation_state: ChunkGenerationState,
+	mesh_state:       ChunkMeshState,
+	dirty_flags:      ChunkDirtyFlags,
+	slot_generation:  u32,
+	block_version:    u32,
+	mesh_version:     u32,
 }
 
 chunk_create :: proc(coord: ChunkCoord) -> Chunk {
-	return {coord = coord, geometry_id = INVALID_GEOMETRY_ID}
+	return {
+		coord = coord,
+		geometry_id = INVALID_GEOMETRY_ID,
+		generation_state = .Missing,
+		mesh_state = .Missing,
+		dirty_flags = {},
+		slot_generation = 1,
+		block_version = 0,
+		mesh_version = 0,
+	}
+}
+
+chunk_mark_generated :: proc(chunk: ^Chunk, block_storage: ChunkBlockStorage) {
+	chunk.block_storage = block_storage
+	chunk.generation_state = .Generated
+	chunk.mesh_state = .Dirty
+	chunk.dirty_flags = {.Blocks, .Boundary}
+	chunk.block_version += 1
 }
 
 chunk_origin_from_coord :: proc(coord: ChunkCoord) -> BlockCoord {
@@ -467,6 +522,11 @@ chunk_block_coord_is_inside :: proc(x, y, z: i32) -> bool {
 	)
 }
 
+chunk_voxel_view_alloc :: proc(voxel_view: ^ChunkVoxelView, allocator: mem.Allocator) {
+	voxel_view.blocks = make(#soa[]ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, allocator)
+	chunk_voxel_view_fill_empty(voxel_view)
+}
+
 chunk_voxel_view_is_solid_local :: proc(view: ChunkVoxelView, x, y, z: u32) -> bool {
 	return view.blocks.occupancy[chunk_block_index(x, y, z)] == .Solid
 }
@@ -487,7 +547,10 @@ chunk_voxel_view_is_solid_for_meshing :: proc(
 		return false
 	case .Sample_Neighbor_Snapshots:
 		neighbors, ok := neighbor_snapshots.?
-		log.assert(ok, "neighbors must be provided when boundary policy is Sample_Neighbor_Snapshots")
+		log.assert(
+			ok,
+			"neighbors must be provided when boundary policy is Sample_Neighbor_Snapshots",
+		)
 
 		out_of_chunk_axis_count := 0
 		if x < 0 || x >= CHUNK_BLOCK_LENGTH {out_of_chunk_axis_count += 1}
@@ -505,7 +568,7 @@ chunk_voxel_view_is_solid_for_meshing :: proc(
 		if x < 0 {
 			neighbor = neighbors.minus_x
 			neighbor_x = CHUNK_BLOCK_LOCAL_MAX
-		} else if x >= CHUNK_BLOCK_LENGTH  {
+		} else if x >= CHUNK_BLOCK_LENGTH {
 			neighbor = neighbors.plus_x
 			neighbor_x = 0
 		} else if y < 0 {
@@ -558,8 +621,7 @@ chunk_voxel_view_fill_empty :: proc(view: ^ChunkVoxelView) {
 }
 
 chunk_voxel_debug_rect_view_builder :: proc(view: ^ChunkVoxelView) {
-	view.blocks = make(#soa[]ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, state.transient_allocator)
-	chunk_voxel_view_fill_empty(view)
+	chunk_voxel_view_alloc(view, state.transient_allocator)
 
 	for z in DEBUG_CHUNK_SOLID_Z0 ..< DEBUG_CHUNK_SOLID_Z1 {
 		for y in DEBUG_CHUNK_SOLID_Y0 ..< DEBUG_CHUNK_SOLID_Y1 {
@@ -745,14 +807,16 @@ chunk_mesh_worker_proc :: proc(data: rawptr) {
 	pool_element := &state.chunk_mesh_worker_arena_pool.elements[ctx.worker_index]
 	allocator := pool_element.allocator
 
-	for job_index := ctx.worker_index; job_index < u32(len(ctx.jobs)); job_index += ctx.worker_count {
+	for job_index := ctx.worker_index;
+	    job_index < u32(len(ctx.jobs));
+	    job_index += ctx.worker_count {
 		job := ctx.jobs[job_index]
 		job.output_allocator = allocator
 
 		output := chunk_mesh_job_execute_sync(job)
 
 		ctx.results[job_index] = {
-			coord = job.snapshot.coord,
+			coord  = job.snapshot.coord,
 			output = output,
 		}
 	}
@@ -790,7 +854,7 @@ chunk_mesh_jobs_execute_workers :: proc(jobs: []ChunkMeshJob, results: []ChunkMe
 	}
 
 	worker_contexts: [CHUNK_MESH_WORKER_COUNT]ChunkMeshWorkerContext
-	worker_threads:  [CHUNK_MESH_WORKER_COUNT]^thread.Thread
+	worker_threads: [CHUNK_MESH_WORKER_COUNT]^thread.Thread
 
 	for worker_index in 0 ..< worker_count {
 		worker_contexts[worker_index] = {
@@ -813,30 +877,107 @@ chunk_mesh_jobs_execute_workers :: proc(jobs: []ChunkMeshJob, results: []ChunkMe
 }
 
 chunk_store_init :: proc(capacity: u32) {
-	state.chunks = make([]Chunk, int(capacity), state.persistent_allocator)
-	state.chunk_count = 0
+	state.chunk_store.chunks = make([]Chunk, int(capacity), state.persistent_allocator)
+	state.chunk_store.chunk_count = 0
 }
 
 chunk_store_clear :: proc() {
-	for i in 0 ..< state.chunk_count {
-		state.chunks[i] = {
-			coord = {x = 0, y = 0, z = 0},
-			geometry_id = INVALID_GEOMETRY_ID,
-		}
+	for i in 0 ..< state.chunk_store.chunk_count {
+		state.chunk_store.chunks[i] = {}
 	}
-	state.chunk_count = 0
+	state.chunk_store.chunk_count = 0
 }
 
 chunk_store_append :: proc(chunk: Chunk) {
 	log.assertf(
-		state.chunk_count < u32(len(state.chunks)),
+		state.chunk_store.chunk_count < u32(len(state.chunk_store.chunks)),
 		"chunk store capacity exceeded: count=%d capacity=%d",
-		state.chunk_count,
-		len(state.chunks),
+		state.chunk_store.chunk_count,
+		len(state.chunk_store.chunks),
+	)
+	log.assertf(
+		chunk_store_find_index_by_coord(chunk.coord) == nil,
+		"duplicate chunk coordinate: %v",
+		chunk.coord,
 	)
 
-	state.chunks[state.chunk_count] = chunk
-	state.chunk_count += 1
+	state.chunk_store.chunks[state.chunk_store.chunk_count] = chunk
+	state.chunk_store.chunk_count += 1
+}
+
+chunk_store_find_index_by_coord :: proc(coord: ChunkCoord) -> Maybe(u32) {
+	for i in 0 ..< state.chunk_store.chunk_count {
+		if state.chunk_store.chunks[i].coord == coord {
+			return i
+		}
+	}
+
+	return nil
+}
+
+chunk_id_is_valid :: proc(id: ChunkID) -> bool {
+	return id != INVALID_CHUNK_ID
+}
+
+chunk_store_id_from_index :: proc(index: u32) -> ChunkID {
+	log.assertf(index < state.chunk_store.chunk_count, "chunk index out of bounds: %d", index)
+	chunk := &state.chunk_store.chunks[index]
+	return {index = index, generation = chunk.slot_generation}
+}
+
+chunk_store_validate_id :: proc(id: ChunkID) -> bool {
+	if !chunk_id_is_valid(id) || id.index >= state.chunk_store.chunk_count {
+		return false
+	}
+
+	return state.chunk_store.chunks[id.index].slot_generation == id.generation
+}
+
+chunk_store_get_by_id :: proc(id: ChunkID) -> ^Chunk {
+	log.assertf(chunk_store_validate_id(id), "invalid chunk id: %v", id)
+	return &state.chunk_store.chunks[id.index]
+}
+
+chunk_store_get_by_index :: proc(index: u32) -> ^Chunk {
+	log.assertf(index < state.chunk_store.chunk_count, "chunk index out of bounds: %d", index)
+	return &state.chunk_store.chunks[index]
+}
+
+chunk_store_append_reserved :: proc(coord: ChunkCoord) -> ChunkID {
+	chunk := chunk_create(coord)
+	chunk_store_append(chunk)
+
+	return chunk_store_id_from_index(state.chunk_store.chunk_count - 1)
+}
+
+chunk_store_get_or_append_reserved :: proc(coord: ChunkCoord) -> ChunkID {
+	if index, ok := chunk_store_find_index_by_coord(coord).?; ok {
+		return chunk_store_id_from_index(index)
+	}
+
+	return chunk_store_append_reserved(coord)
+}
+
+chunk_store_alloc_block_storage :: proc() -> ChunkBlockStorage {
+	storage := ChunkBlockStorage{}
+	chunk_voxel_view_alloc(&storage.voxel_view, state.persistent_allocator)
+	return storage
+}
+
+chunk_snapshot_from_chunk :: proc(chunk: ^Chunk) -> ChunkSnapshot {
+	log.assertf(
+		chunk.generation_state == .Generated,
+		"chunk must be generated before creating a snapshot",
+	)
+	log.assertf(
+		len(chunk.block_storage.voxel_view.blocks) == CHUNK_BLOCK_COUNT,
+		"chunk must have the correct number of blocks",
+	)
+	return {
+		coord = chunk.coord,
+		voxel_view = chunk.block_storage.voxel_view,
+		block_version = chunk.block_version,
+	}
 }
 
 chunk_snapshot_find_by_coord :: proc(
@@ -856,12 +997,30 @@ chunk_mesh_neighbors_find :: proc(
 	coord: ChunkCoord,
 ) -> ChunkMeshNeighborSnapshots {
 	return {
-		plus_x  = chunk_snapshot_find_by_coord(snapshots, ChunkCoord{coord.x + 1, coord.y, coord.z}),
-		minus_x = chunk_snapshot_find_by_coord(snapshots, ChunkCoord{coord.x - 1, coord.y, coord.z}),
-		plus_y  = chunk_snapshot_find_by_coord(snapshots, ChunkCoord{coord.x, coord.y + 1, coord.z}),
-		minus_y = chunk_snapshot_find_by_coord(snapshots, ChunkCoord{coord.x, coord.y - 1, coord.z}),
-		plus_z  = chunk_snapshot_find_by_coord(snapshots, ChunkCoord{coord.x, coord.y, coord.z + 1}),
-		minus_z = chunk_snapshot_find_by_coord(snapshots, ChunkCoord{coord.x, coord.y, coord.z - 1}),
+		plus_x = chunk_snapshot_find_by_coord(
+			snapshots,
+			ChunkCoord{coord.x + 1, coord.y, coord.z},
+		),
+		minus_x = chunk_snapshot_find_by_coord(
+			snapshots,
+			ChunkCoord{coord.x - 1, coord.y, coord.z},
+		),
+		plus_y = chunk_snapshot_find_by_coord(
+			snapshots,
+			ChunkCoord{coord.x, coord.y + 1, coord.z},
+		),
+		minus_y = chunk_snapshot_find_by_coord(
+			snapshots,
+			ChunkCoord{coord.x, coord.y - 1, coord.z},
+		),
+		plus_z = chunk_snapshot_find_by_coord(
+			snapshots,
+			ChunkCoord{coord.x, coord.y, coord.z + 1},
+		),
+		minus_z = chunk_snapshot_find_by_coord(
+			snapshots,
+			ChunkCoord{coord.x, coord.y, coord.z - 1},
+		),
 	}
 }
 
@@ -1088,11 +1247,11 @@ when ODIN_DEBUG {
 		right_view.blocks.material_id[right_index] = BlockMaterialID(7)
 
 		left_snapshot := ChunkSnapshot {
-			coord = {0, 0, 0},
+			coord      = {0, 0, 0},
 			voxel_view = left_view,
 		}
 		right_snapshot := ChunkSnapshot {
-			coord = {1, 0, 0},
+			coord      = {1, 0, 0},
 			voxel_view = right_view,
 		}
 		neighbor_test_snapshots := [?]ChunkSnapshot{left_snapshot, right_snapshot}
@@ -1100,7 +1259,10 @@ when ODIN_DEBUG {
 		left_neighbor_output := chunk_mesh_job_execute_sync(
 			{
 				snapshot = left_snapshot,
-				neighbors = chunk_mesh_neighbors_find(neighbor_test_snapshots[:], left_snapshot.coord),
+				neighbors = chunk_mesh_neighbors_find(
+					neighbor_test_snapshots[:],
+					left_snapshot.coord,
+				),
 				boundary_policy = .Sample_Neighbor_Snapshots,
 				output_allocator = state.transient_allocator,
 			},
@@ -1114,7 +1276,10 @@ when ODIN_DEBUG {
 		right_neighbor_output := chunk_mesh_job_execute_sync(
 			{
 				snapshot = right_snapshot,
-				neighbors = chunk_mesh_neighbors_find(neighbor_test_snapshots[:], right_snapshot.coord),
+				neighbors = chunk_mesh_neighbors_find(
+					neighbor_test_snapshots[:],
+					right_snapshot.coord,
+				),
 				boundary_policy = .Sample_Neighbor_Snapshots,
 				output_allocator = state.transient_allocator,
 			},
@@ -1214,7 +1379,7 @@ when ODIN_DEBUG {
 			checker_count,
 		)
 
-		terrain_heightfield_voxel_view_build(&view, ChunkCoord{0, 0, 0}, state.transient_allocator)
+		terrain_heightfield_voxel_view_fill(&view, ChunkCoord{0, 0, 0})
 		heightfield_top_y: [CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH]i32
 		for z in 0 ..< CHUNK_BLOCK_LENGTH {
 			for x in 0 ..< CHUNK_BLOCK_LENGTH {
@@ -1443,12 +1608,13 @@ terrain_emit_face :: proc(
 	index_count^ += 6
 }
 
-terrain_heightfield_voxel_view_build :: proc(
-	view: ^ChunkVoxelView,
-	chunk: ChunkCoord,
-	allocator: mem.Allocator,
-) {
-	view.blocks = make(#soa[]ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, allocator)
+terrain_heightfield_voxel_view_fill :: proc(view: ^ChunkVoxelView, chunk: ChunkCoord) {
+	log.assertf(
+		len(view.blocks) == CHUNK_BLOCK_COUNT,
+		"heightfield fill expects %d blocks, got %d",
+		CHUNK_BLOCK_COUNT,
+		len(view.blocks),
+	)
 	chunk_voxel_view_fill_empty(view)
 
 	origin := chunk_origin_from_coord(chunk)
@@ -1500,16 +1666,6 @@ terrain_heightfield_voxel_view_build :: proc(
 			}
 		}
 	}
-}
-
-terrain_generate_heightfield_snapshot :: proc(
-	coord: ChunkCoord,
-	allocator: mem.Allocator,
-) -> ChunkSnapshot {
-	view := ChunkVoxelView{}
-	// todo: use noise functions to properly generate chunk voxels
-	terrain_heightfield_voxel_view_build(&view, coord, allocator)
-	return {coord = coord, voxel_view = view}
 }
 
 ///////////////////////////////////////////
@@ -2153,8 +2309,13 @@ gfx_render :: proc() {
 			)
 		}
 
-		for chunk in state.chunks[:state.chunk_count] {
+		for chunk in state.chunk_store.chunks[:state.chunk_store.chunk_count] {
 			state.chunks_total += 1
+
+			if chunk.mesh_state != .Ready {
+				state.chunks_without_geometry += 1
+				continue
+			}
 
 			if chunk.geometry_id == INVALID_GEOMETRY_ID {
 				state.chunks_without_geometry += 1
@@ -2276,7 +2437,10 @@ init :: proc() {
 	sdl.SetLogOutputFunction(sdl_log_output, nil)
 	sdl.SetLogPriority(.GPU, .DEBUG)
 
-	state.chunk_mesh_worker_arena_pool = arena_pool_init(CHUNK_MESH_WORKER_COUNT, CHUNK_MESH_WORKER_ARENA_BYTES)
+	state.chunk_mesh_worker_arena_pool = arena_pool_init(
+		CHUNK_MESH_WORKER_COUNT,
+		CHUNK_MESH_WORKER_ARENA_BYTES,
+	)
 
 	log.debug("Application initialized")
 }
@@ -2383,12 +2547,24 @@ setup_resources :: proc() {
 	for gz in 0 ..< STARTUP_CHUNK_GRID_Z {
 		for gx in 0 ..< STARTUP_CHUNK_GRID_X {
 			coord := ChunkCoord{i32(gx) - 1, 0, i32(gz) - 1}
-			startup_snapshots[startup_snapshot_count] = terrain_generate_heightfield_snapshot(
-				coord,
-				state.transient_allocator,
-			)
-			startup_snapshot_count += 1
+
+			chunk_id := chunk_store_get_or_append_reserved(coord)
+			chunk := chunk_store_get_by_id(chunk_id)
+
+			block_storage := chunk_store_alloc_block_storage()
+			terrain_heightfield_voxel_view_fill(&block_storage.voxel_view, coord)
+			chunk_mark_generated(chunk, block_storage)
 		}
+	}
+
+	for i in 0 ..< state.chunk_store.chunk_count {
+		chunk := chunk_store_get_by_index(i)
+		if chunk.generation_state != .Generated {
+			continue
+		}
+
+		startup_snapshots[startup_snapshot_count] = chunk_snapshot_from_chunk(chunk)
+		startup_snapshot_count += 1
 	}
 
 	chunk_mesh_jobs: [STARTUP_CHUNK_COUNT]ChunkMeshJob
@@ -2399,10 +2575,10 @@ setup_resources :: proc() {
 		neighbors := chunk_mesh_neighbors_find(startup_snapshot_slice, snapshot.coord)
 
 		chunk_mesh_jobs[i] = {
-			snapshot = snapshot,
-			boundary_policy = .Sample_Neighbor_Snapshots,
+			snapshot         = snapshot,
+			boundary_policy  = .Sample_Neighbor_Snapshots,
 			output_allocator = state.transient_allocator,
-			neighbors = neighbors,
+			neighbors        = neighbors,
 		}
 	}
 
@@ -2444,8 +2620,13 @@ setup_resources :: proc() {
 			chunks_uploaded += 1
 		}
 
-		chunk := chunk_create(result.coord)
+		index, ok := chunk_store_find_index_by_coord(result.coord).?
+		log.assertf(ok, "mesh result has no matching chunk: coord=%v", result.coord)
+		chunk := chunk_store_get_by_index(index)
 		chunk.geometry_id = geometry_append_chunk_mesh_output(&state.geometry_pool, result.output)
+		chunk.mesh_state = .Ready
+		chunk.mesh_version = chunk.block_version
+		chunk.dirty_flags = {}
 
 		log.debugf(
 			"Chunk mesh: coord=%v faces=%d vertices=%d indices=%d",
@@ -2454,8 +2635,6 @@ setup_resources :: proc() {
 			result.output.face_count * 4,
 			result.output.face_count * 6,
 		)
-
-		chunk_store_append(chunk)
 	}
 
 	log.debugf(
@@ -2466,7 +2645,7 @@ setup_resources :: proc() {
 		total_faces,
 	)
 
-	first_chunk := state.chunks[0]
+	first_chunk := state.chunk_store.chunks[0]
 
 	debug_position_camera_for_chunk(first_chunk.coord)
 
