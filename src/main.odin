@@ -10,6 +10,7 @@ import la "core:math/linalg"
 import "core:mem"
 import "core:os"
 import "core:strings"
+import "core:thread"
 
 //////////////////////////////////////
 // Constants
@@ -23,7 +24,7 @@ ANGLE :: f32(0.6)
 FOV :: f32(70.0)
 ASPECT_RATIO :: f32(16.0 / 9.0)
 DEFAULT_ACCELERATION :: f32(1.5)
-MAX_ACCELERATION :: f32(10.0)
+MAX_ACCELERATION :: f32(20.0)
 MOUSE_SENSITIVITY :: f32(0.0025)
 
 //////////////////////////////////////
@@ -31,12 +32,16 @@ MOUSE_SENSITIVITY :: f32(0.0025)
 /////////////////////////////////////
 
 Memory :: struct {
+	// Main
 	persistent_slab:      [64 * mem.Megabyte]u8,
 	transient_slab:       [16 * mem.Megabyte]u8,
 	persistent_arena:     mem.Arena,
 	transient_arena:      mem.Arena,
 	persistent_allocator: mem.Allocator,
 	transient_allocator:  mem.Allocator,
+
+	// Workers (Chunk Mesh)
+	chunk_mesh_worker_arena_pool:           ArenaPool,
 }
 
 Graphics :: struct {
@@ -112,6 +117,45 @@ state := struct {
 	enable_vsync = true,
 	is_window_open = true,
 	use_wireframe_mode = false,
+}
+
+//////////////////////////////////////
+// Memory
+/////////////////////////////////////
+
+ArenaPoolElement :: struct {
+	arena: mem.Arena,
+	allocator: mem.Allocator,
+	buffer: []u8,
+}
+
+ArenaPool :: struct {
+	elements: []ArenaPoolElement,
+}
+
+arena_pool_init :: proc(arena_count: u32, buffer_size: u32) -> ArenaPool {
+	pool := ArenaPool{
+		elements = make([]ArenaPoolElement, arena_count, state.persistent_allocator),
+	}
+
+	for idx in 0..<arena_count {
+		pool.elements[idx] = ArenaPoolElement{
+			arena = mem.Arena{},
+			allocator = mem.Allocator{},
+			buffer = make([]u8, buffer_size, state.persistent_allocator),
+		}
+
+		mem.arena_init(&pool.elements[idx].arena, pool.elements[idx].buffer)
+		pool.elements[idx].allocator = mem.arena_allocator(&pool.elements[idx].arena)
+	}
+
+	return pool
+}
+
+arena_pool_reset :: proc(pool: ArenaPool) {
+	for idx in 0..<len(pool.elements) {
+		mem.arena_free_all(&pool.elements[idx].arena)
+	}
 }
 
 ///////////////////////////////////////////
@@ -287,10 +331,13 @@ DEBUG_CHUNK_SOLID_Z1 :: 24
 #assert(DEBUG_CHUNK_SOLID_Y0 < DEBUG_CHUNK_SOLID_Y1 && DEBUG_CHUNK_SOLID_Y1 <= CHUNK_BLOCK_LENGTH)
 #assert(DEBUG_CHUNK_SOLID_Z0 < DEBUG_CHUNK_SOLID_Z1 && DEBUG_CHUNK_SOLID_Z1 <= CHUNK_BLOCK_LENGTH)
 
-STARTUP_CHUNK_GRID_X :: 3
-STARTUP_CHUNK_GRID_Z :: 3
+STARTUP_CHUNK_GRID_X :: 5
+STARTUP_CHUNK_GRID_Z :: 5
 STARTUP_CHUNK_COUNT :: STARTUP_CHUNK_GRID_X * STARTUP_CHUNK_GRID_Z
 #assert(STARTUP_CHUNK_COUNT > 0)
+
+CHUNK_MESH_WORKER_COUNT :: 4
+CHUNK_MESH_WORKER_ARENA_BYTES :: 8 * mem.Megabyte // or larger if current chunks assert
 
 BlockOccupancy :: enum u8 {
 	Empty,
@@ -338,6 +385,18 @@ ChunkMeshJob :: struct {
 	neighbors:       ChunkMeshNeighborSnapshots,
 	boundary_policy:  ChunkMeshBoundaryPolicy,
 	output_allocator: mem.Allocator,
+}
+
+ChunkMeshJobResult :: struct {
+	coord:  ChunkCoord,
+	output: ChunkMeshOutput,
+}
+
+ChunkMeshWorkerContext :: struct {
+	worker_index: u32,
+	worker_count: u32,
+	jobs:         []ChunkMeshJob,
+	results:      []ChunkMeshJobResult,
 }
 
 ChunkBounds :: struct {
@@ -585,11 +644,28 @@ chunk_voxel_view_build_naive_mesh :: proc(
 		face_count,
 	)
 
+	expected_vertex_count := int(face_count) * 4
+	expected_index_count := int(face_count) * 6
+
 	output := ChunkMeshOutput {
-		vertices   = make([]TerrainPackedVertex, int(face_count) * 4, allocator),
-		indices    = make([]u32, int(face_count) * 6, allocator),
+		vertices   = make([]TerrainPackedVertex, expected_vertex_count, allocator),
+		indices    = make([]u32, expected_index_count, allocator),
 		face_count = face_count,
 	}
+	log.assertf(
+		len(output.vertices) == expected_vertex_count,
+		"chunk mesh vertex allocation failed: expected=%d got=%d faces=%d",
+		expected_vertex_count,
+		len(output.vertices),
+		face_count,
+	)
+	log.assertf(
+		len(output.indices) == expected_index_count,
+		"chunk mesh index allocation failed: expected=%d got=%d faces=%d",
+		expected_index_count,
+		len(output.indices),
+		face_count,
+	)
 
 	vertex_count: u32
 	index_count: u32
@@ -661,6 +737,79 @@ chunk_mesh_job_execute_sync :: proc(job: ChunkMeshJob) -> ChunkMeshOutput {
 		job.output_allocator,
 		job.neighbors,
 	)
+}
+
+chunk_mesh_worker_proc :: proc(data: rawptr) {
+	ctx := (^ChunkMeshWorkerContext)(data)
+
+	pool_element := &state.chunk_mesh_worker_arena_pool.elements[ctx.worker_index]
+	allocator := pool_element.allocator
+
+	for job_index := ctx.worker_index; job_index < u32(len(ctx.jobs)); job_index += ctx.worker_count {
+		job := ctx.jobs[job_index]
+		job.output_allocator = allocator
+
+		output := chunk_mesh_job_execute_sync(job)
+
+		ctx.results[job_index] = {
+			coord = job.snapshot.coord,
+			output = output,
+		}
+	}
+
+}
+
+chunk_mesh_output_matches :: proc(a, b: ChunkMeshOutput) -> bool {
+	if a.face_count != b.face_count {
+		return false
+	}
+
+	if len(a.vertices) != len(b.vertices) || len(a.indices) != len(b.indices) {
+		return false
+	}
+
+	if mem.compare(mem.slice_to_bytes(a.vertices), mem.slice_to_bytes(b.vertices)) != 0 {
+		return false
+	}
+
+	if mem.compare(mem.slice_to_bytes(a.indices), mem.slice_to_bytes(b.indices)) != 0 {
+		return false
+	}
+
+	return true
+}
+
+chunk_mesh_jobs_execute_workers :: proc(jobs: []ChunkMeshJob, results: []ChunkMeshJobResult) {
+	log.assertf(len(results) >= len(jobs), "chunk mesh results slice too small")
+
+	arena_pool_reset(state.chunk_mesh_worker_arena_pool)
+
+	worker_count := math.min(CHUNK_MESH_WORKER_COUNT, len(jobs))
+	if worker_count == 0 {
+		return
+	}
+
+	worker_contexts: [CHUNK_MESH_WORKER_COUNT]ChunkMeshWorkerContext
+	worker_threads:  [CHUNK_MESH_WORKER_COUNT]^thread.Thread
+
+	for worker_index in 0 ..< worker_count {
+		worker_contexts[worker_index] = {
+			worker_index = u32(worker_index),
+			worker_count = u32(worker_count),
+			jobs         = jobs,
+			results      = results,
+		}
+		worker_threads[worker_index] = thread.create_and_start_with_data(
+			rawptr(&worker_contexts[worker_index]),
+			chunk_mesh_worker_proc,
+		)
+		log.assertf(worker_threads[worker_index] != nil, "failed to create chunk mesh worker")
+	}
+
+	for worker_index in 0 ..< worker_count {
+		thread.join(worker_threads[worker_index])
+		thread.destroy(worker_threads[worker_index])
+	}
 }
 
 chunk_store_init :: proc(capacity: u32) {
@@ -1711,12 +1860,14 @@ geometry_append_bytes :: proc(
 	vertex_dst_offset := u32(vertex_dst_offset_wide)
 	index_dst_offset := u32(index_dst_offset_wide)
 
-	mapped_data := sdl.MapGPUTransferBuffer(state.device, pool.vertex_upload_buffer, false)
+	// Upload command buffers execute asynchronously; cycle the reused staging buffer
+	// so a later chunk upload cannot overwrite source bytes still in flight.
+	mapped_data := sdl.MapGPUTransferBuffer(state.device, pool.vertex_upload_buffer, true)
 	log.assertf(mapped_data != nil, "MapGPUTransferBuffer vertex failed: %s", sdl.GetError())
 	mem.copy(mapped_data, vertex_data, int(vertex_bytes))
 	sdl.UnmapGPUTransferBuffer(state.device, pool.vertex_upload_buffer)
 
-	mapped_data = sdl.MapGPUTransferBuffer(state.device, pool.index_upload_buffer, false)
+	mapped_data = sdl.MapGPUTransferBuffer(state.device, pool.index_upload_buffer, true)
 	log.assertf(mapped_data != nil, "MapGPUTransferBuffer index failed: %s", sdl.GetError())
 	mem.copy(mapped_data, raw_data(indices), int(index_bytes))
 	sdl.UnmapGPUTransferBuffer(state.device, pool.index_upload_buffer)
@@ -2125,6 +2276,8 @@ init :: proc() {
 	sdl.SetLogOutputFunction(sdl_log_output, nil)
 	sdl.SetLogPriority(.GPU, .DEBUG)
 
+	state.chunk_mesh_worker_arena_pool = arena_pool_init(CHUNK_MESH_WORKER_COUNT, CHUNK_MESH_WORKER_ARENA_BYTES)
+
 	log.debug("Application initialized")
 }
 
@@ -2238,36 +2391,68 @@ setup_resources :: proc() {
 		}
 	}
 
+	chunk_mesh_jobs: [STARTUP_CHUNK_COUNT]ChunkMeshJob
+	chunk_mesh_results: [STARTUP_CHUNK_COUNT]ChunkMeshJobResult
+
 	startup_snapshot_slice := startup_snapshots[:int(startup_snapshot_count)]
-	for snapshot in startup_snapshot_slice {
+	for snapshot, i in startup_snapshot_slice {
+		neighbors := chunk_mesh_neighbors_find(startup_snapshot_slice, snapshot.coord)
+
+		chunk_mesh_jobs[i] = {
+			snapshot = snapshot,
+			boundary_policy = .Sample_Neighbor_Snapshots,
+			output_allocator = state.transient_allocator,
+			neighbors = neighbors,
+		}
+	}
+
+	job_slice := chunk_mesh_jobs[:len(startup_snapshot_slice)]
+	result_slice := chunk_mesh_results[:len(job_slice)]
+	chunk_mesh_jobs_execute_workers(job_slice, result_slice)
+
+	when ODIN_DEBUG {
+		for job, i in job_slice {
+			sync_temp := mem.begin_arena_temp_memory(&state.transient_arena)
+			sync_output := chunk_mesh_job_execute_sync(job)
+			output_matches := chunk_mesh_output_matches(result_slice[i].output, sync_output)
+			mem.end_arena_temp_memory(sync_temp)
+
+			log.assertf(
+				output_matches,
+				"threaded chunk mesh result mismatch: job_index=%d coord=%v",
+				i,
+				job.snapshot.coord,
+			)
+			log.assertf(
+				result_slice[i].coord == job.snapshot.coord,
+				"threaded chunk mesh coord mismatch: job_index=%d expected=%v got=%v",
+				i,
+				job.snapshot.coord,
+				result_slice[i].coord,
+			)
+		}
+	}
+
+	for result in result_slice {
 		chunks_attempted += 1
 
-		neighbors := chunk_mesh_neighbors_find(startup_snapshot_slice, snapshot.coord)
-		mesh_output := chunk_mesh_job_execute_sync(
-			{
-				snapshot = snapshot,
-				boundary_policy = .Sample_Neighbor_Snapshots,
-				output_allocator = state.transient_allocator,
-				neighbors = neighbors,
-			},
-		)
-		total_faces += mesh_output.face_count
+		total_faces += result.output.face_count
 
-		if mesh_output.face_count == 0 {
+		if result.output.face_count == 0 {
 			chunks_empty += 1
 		} else {
 			chunks_uploaded += 1
 		}
 
-		chunk := chunk_create(snapshot.coord)
-		chunk.geometry_id = geometry_append_chunk_mesh_output(&state.geometry_pool, mesh_output)
+		chunk := chunk_create(result.coord)
+		chunk.geometry_id = geometry_append_chunk_mesh_output(&state.geometry_pool, result.output)
 
 		log.debugf(
 			"Chunk mesh: coord=%v faces=%d vertices=%d indices=%d",
 			chunk.coord,
-			mesh_output.face_count,
-			mesh_output.face_count * 4,
-			mesh_output.face_count * 6,
+			result.output.face_count,
+			result.output.face_count * 4,
+			result.output.face_count * 6,
 		)
 
 		chunk_store_append(chunk)
