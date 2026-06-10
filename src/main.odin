@@ -403,6 +403,14 @@ ChunkMeshJobResult :: struct {
 	output: ChunkMeshOutput,
 }
 
+ChunkMeshBatchStats :: struct {
+	chunks_attempted: u32,
+	chunks_uploaded:  u32,
+	chunks_empty:     u32,
+	chunks_stale:     u32,
+	total_faces:      u32,
+}
+
 ChunkMeshWorkerContext :: struct {
 	worker_index: u32,
 	worker_count: u32,
@@ -926,6 +934,66 @@ chunk_store_find_index_by_coord :: proc(coord: ChunkCoord) -> Maybe(u32) {
 	return nil
 }
 
+chunk_store_commit_mesh_results :: proc(jobs: []ChunkMeshJob, results: []ChunkMeshJobResult) -> ChunkMeshBatchStats {
+	log.assertf(
+		len(jobs) == len(results),
+		"chunk mesh commit requires matching job/result counts: jobs=%d results=%d",
+		len(jobs),
+		len(results),
+	)
+
+	stats := ChunkMeshBatchStats{}
+	for result, i in results {
+		job := jobs[i]
+
+		stats.chunks_attempted += 1
+
+		log.assertf(
+			result.coord == job.snapshot.coord,
+			"mesh result coord mismatch: job=%v result=%v",
+			job.snapshot.coord,
+			result.coord,
+		)
+
+		index, ok := chunk_store_find_index_by_coord(job.snapshot.coord).?
+		log.assertf(ok, "mesh result has no matching chunk: coord=%v", job.snapshot.coord)
+
+		chunk := chunk_store_get_by_index(index)
+		log.assertf(
+			chunk.generation_state == .Generated,
+			"mesh result target chunk must be generated: coord=%v",
+			chunk.coord,
+		)
+
+		if chunk.block_version != job.snapshot.block_version {
+			stats.chunks_stale += 1
+			continue
+		}
+
+		stats.total_faces += result.output.face_count
+		if result.output.face_count == 0 {
+			stats.chunks_empty += 1
+		} else {
+			stats.chunks_uploaded += 1
+		}
+
+		chunk.geometry_id = geometry_append_chunk_mesh_output(&state.geometry_pool, result.output)
+		chunk.mesh_state = .Ready
+		chunk.mesh_version = job.snapshot.block_version
+		chunk.dirty_flags = {}
+
+		log.debugf(
+			"Chunk mesh: coord=%v faces=%d vertices=%d indices=%d",
+			chunk.coord,
+			result.output.face_count,
+			result.output.face_count * 4,
+			result.output.face_count * 6,
+		)
+	}
+
+	return stats
+}
+
 chunk_id_is_valid :: proc(id: ChunkID) -> bool {
 	return id != INVALID_CHUNK_ID
 }
@@ -1004,30 +1072,6 @@ chunk_store_mesh_neighbors_find :: proc(coord: ChunkCoord) -> ChunkMeshNeighborS
 			ChunkCoord{coord.x, coord.y, coord.z - 1},
 		),
 	}
-}
-
-chunk_store_build_generated_snapshots :: proc(snapshots: []ChunkSnapshot) -> u32 {
-	snapshot_count: u32
-	for i in 0 ..< state.chunk_store.chunk_count {
-		chunk := chunk_store_get_by_index(i)
-		if chunk.generation_state != .Generated {
-			continue
-		}
-
-		log.assertf(
-			snapshot_count < u32(len(snapshots)),
-			"chunk snapshot output capacity exceeded: count=%d capacity=%d",
-			snapshot_count,
-			len(snapshots),
-		)
-		snapshots[snapshot_count] = chunk_snapshot_from_chunk(chunk)
-		log.assertf(
-			snapshots[snapshot_count].block_version == chunk.block_version,
-			"chunk snapshot block version mismatch",
-		)
-		snapshot_count += 1
-	}
-	return snapshot_count
 }
 
 chunk_snapshot_find_by_coord :: proc(
@@ -2631,13 +2675,6 @@ setup_resources :: proc() {
 	chunk_store_init(STARTUP_CHUNK_COUNT)
 	chunk_store_clear()
 
-	chunks_attempted: u32
-	chunks_uploaded: u32
-	chunks_empty: u32
-	total_faces: u32
-
-	startup_snapshots: [STARTUP_CHUNK_COUNT]ChunkSnapshot
-	startup_snapshot_count: u32
 	for gz in 0 ..< STARTUP_CHUNK_GRID_Z {
 		for gx in 0 ..< STARTUP_CHUNK_GRID_X {
 			coord := ChunkCoord{i32(gx) - 1, 0, i32(gz) - 1}
@@ -2671,18 +2708,31 @@ setup_resources :: proc() {
 	chunk_mesh_jobs: [STARTUP_CHUNK_COUNT]ChunkMeshJob
 	chunk_mesh_results: [STARTUP_CHUNK_COUNT]ChunkMeshJobResult
 
-	startup_snapshot_count = chunk_store_build_generated_snapshots(startup_snapshots[:])
-	startup_snapshot_slice := startup_snapshots[:int(startup_snapshot_count)]
-	for snapshot, i in startup_snapshot_slice {
-		chunk_mesh_jobs[i] = {
+	mesh_job_count: u32
+	for i in 0 ..< state.chunk_store.chunk_count {
+		chunk := chunk_store_get_by_index(i)
+		if chunk.generation_state != .Generated || chunk.mesh_state != .Dirty {
+			continue
+		}
+
+		log.assertf(
+			mesh_job_count < u32(len(chunk_mesh_jobs)),
+			"chunk mesh job capacity exceeded: count=%d capacity=%d",
+			mesh_job_count,
+			len(chunk_mesh_jobs),
+		)
+
+		snapshot := chunk_snapshot_from_chunk(chunk)
+		chunk_mesh_jobs[mesh_job_count] = {
 			snapshot         = snapshot,
 			boundary_policy  = .Sample_Neighbor_Snapshots,
 			output_allocator = state.transient_allocator,
 			neighbors        = chunk_store_mesh_neighbors_find(snapshot.coord),
 		}
+		mesh_job_count += 1
 	}
 
-	job_slice := chunk_mesh_jobs[:len(startup_snapshot_slice)]
+	job_slice := chunk_mesh_jobs[:int(mesh_job_count)]
 	result_slice := chunk_mesh_results[:len(job_slice)]
 	chunk_mesh_jobs_execute_workers(job_slice, result_slice)
 
@@ -2709,40 +2759,14 @@ setup_resources :: proc() {
 		}
 	}
 
-	for result in result_slice {
-		chunks_attempted += 1
-
-		total_faces += result.output.face_count
-
-		if result.output.face_count == 0 {
-			chunks_empty += 1
-		} else {
-			chunks_uploaded += 1
-		}
-
-		index, ok := chunk_store_find_index_by_coord(result.coord).?
-		log.assertf(ok, "mesh result has no matching chunk: coord=%v", result.coord)
-		chunk := chunk_store_get_by_index(index)
-		chunk.geometry_id = geometry_append_chunk_mesh_output(&state.geometry_pool, result.output)
-		chunk.mesh_state = .Ready
-		chunk.mesh_version = chunk.block_version
-		chunk.dirty_flags = {}
-
-		log.debugf(
-			"Chunk mesh: coord=%v faces=%d vertices=%d indices=%d",
-			chunk.coord,
-			result.output.face_count,
-			result.output.face_count * 4,
-			result.output.face_count * 6,
-		)
-	}
-
+	mesh_stats := chunk_store_commit_mesh_results(job_slice, result_slice)
 	log.debugf(
-		"Startup heightfield chunks loaded: attempted=%d uploaded=%d empty=%d total_faces=%d",
-		chunks_attempted,
-		chunks_uploaded,
-		chunks_empty,
-		total_faces,
+		"Startup heightfield chunks loaded: attempted=%d uploaded=%d empty=%d stale=%d total_faces=%d",
+		mesh_stats.chunks_attempted,
+		mesh_stats.chunks_uploaded,
+		mesh_stats.chunks_empty,
+		mesh_stats.chunks_stale,
+		mesh_stats.total_faces,
 	)
 
 	first_chunk := state.chunk_store.chunks[0]
