@@ -380,6 +380,16 @@ ChunkMeshNeighborSnapshots :: struct {
 	plus_z, minus_z: Maybe(ChunkSnapshot),
 }
 
+ChunkGenerationJob :: struct {
+	coord:            ChunkCoord,
+	seed:             u32,
+	output_allocator: mem.Allocator,
+}
+
+ChunkGenerationJobResult :: struct {
+	coord:         ChunkCoord,
+	block_storage: ChunkBlockStorage,
+}
 
 ChunkMeshJob :: struct {
 	snapshot:         ChunkSnapshot,
@@ -434,6 +444,7 @@ ChunkDirtyFlag :: enum u8 {
 	Blocks,
 	Boundary,
 }
+
 ChunkDirtyFlags :: bit_set[ChunkDirtyFlag]
 
 ChunkBlockStorage :: struct {
@@ -958,10 +969,19 @@ chunk_store_get_or_append_reserved :: proc(coord: ChunkCoord) -> ChunkID {
 	return chunk_store_append_reserved(coord)
 }
 
-chunk_store_alloc_block_storage :: proc() -> ChunkBlockStorage {
+chunk_block_storage_alloc :: proc {
+	chunk_block_storage_alloc_with_allocator,
+	chunk_block_storage_alloc_for_store,
+}
+
+chunk_block_storage_alloc_with_allocator :: proc(allocator: mem.Allocator) -> ChunkBlockStorage {
 	storage := ChunkBlockStorage{}
-	chunk_voxel_view_alloc(&storage.voxel_view, state.persistent_allocator)
+	chunk_voxel_view_alloc(&storage.voxel_view, allocator)
 	return storage
+}
+
+chunk_block_storage_alloc_for_store :: proc() -> ChunkBlockStorage {
+	return chunk_block_storage_alloc(state.persistent_allocator)
 }
 
 chunk_snapshot_from_chunk :: proc(chunk: ^Chunk) -> ChunkSnapshot {
@@ -1021,6 +1041,15 @@ chunk_mesh_neighbors_find :: proc(
 			snapshots,
 			ChunkCoord{coord.x, coord.y, coord.z - 1},
 		),
+	}
+}
+
+chunk_generation_job_execute_sync :: proc(job: ChunkGenerationJob) -> ChunkGenerationJobResult {
+	block_storage := chunk_block_storage_alloc(job.output_allocator)
+	terrain_heightfield_voxel_view_fill(&block_storage.voxel_view, job.coord)
+	return {
+		coord = job.coord,
+		block_storage = block_storage,
 	}
 }
 
@@ -2551,9 +2580,26 @@ setup_resources :: proc() {
 			chunk_id := chunk_store_get_or_append_reserved(coord)
 			chunk := chunk_store_get_by_id(chunk_id)
 
-			block_storage := chunk_store_alloc_block_storage()
-			terrain_heightfield_voxel_view_fill(&block_storage.voxel_view, coord)
-			chunk_mark_generated(chunk, block_storage)
+			generation_job := ChunkGenerationJob{
+				coord            = coord,
+				seed             = 0,
+				output_allocator = state.persistent_allocator,
+			}
+
+			generation_result := chunk_generation_job_execute_sync(generation_job)
+			log.assertf(
+				generation_result.coord == coord,
+				"Chunk generation job result coord mismatch",
+			)
+			log.assertf(
+				len(generation_result.block_storage.voxel_view.blocks) == CHUNK_BLOCK_COUNT,
+				"generated chunk storage has wrong block count",
+			)
+
+			chunk_mark_generated(chunk, generation_result.block_storage)
+			log.assertf(chunk.generation_state == .Generated, "chunk was not marked generated")
+			log.assertf(chunk.mesh_state == .Dirty, "generated chunk should be dirty for meshing")
+			log.assertf(chunk.block_version > 0, "generated chunk should have a block version")
 		}
 	}
 
@@ -2564,6 +2610,10 @@ setup_resources :: proc() {
 		}
 
 		startup_snapshots[startup_snapshot_count] = chunk_snapshot_from_chunk(chunk)
+		log.assertf(
+			startup_snapshots[startup_snapshot_count].block_version == chunk.block_version,
+			"chunk snapshot block version mismatch",
+		)
 		startup_snapshot_count += 1
 	}
 
