@@ -969,35 +969,65 @@ chunk_store_get_or_append_reserved :: proc(coord: ChunkCoord) -> ChunkID {
 	return chunk_store_append_reserved(coord)
 }
 
-chunk_block_storage_alloc :: proc {
-	chunk_block_storage_alloc_with_allocator,
-	chunk_block_storage_alloc_for_store,
-}
-
-chunk_block_storage_alloc_with_allocator :: proc(allocator: mem.Allocator) -> ChunkBlockStorage {
-	storage := ChunkBlockStorage{}
-	chunk_voxel_view_alloc(&storage.voxel_view, allocator)
-	return storage
-}
-
-chunk_block_storage_alloc_for_store :: proc() -> ChunkBlockStorage {
-	return chunk_block_storage_alloc(state.persistent_allocator)
-}
-
-chunk_snapshot_from_chunk :: proc(chunk: ^Chunk) -> ChunkSnapshot {
-	log.assertf(
-		chunk.generation_state == .Generated,
-		"chunk must be generated before creating a snapshot",
-	)
-	log.assertf(
-		len(chunk.block_storage.voxel_view.blocks) == CHUNK_BLOCK_COUNT,
-		"chunk must have the correct number of blocks",
-	)
-	return {
-		coord = chunk.coord,
-		voxel_view = chunk.block_storage.voxel_view,
-		block_version = chunk.block_version,
+chunk_store_snapshot_find_by_coord :: proc(coord: ChunkCoord) -> Maybe(ChunkSnapshot) {
+	index, ok := chunk_store_find_index_by_coord(coord).?
+	if !ok {
+		return nil
 	}
+
+	chunk := chunk_store_get_by_index(index)
+	if chunk.generation_state != .Generated {
+		return nil
+	}
+
+	return chunk_snapshot_from_chunk(chunk)
+}
+
+chunk_store_mesh_neighbors_find :: proc(coord: ChunkCoord) -> ChunkMeshNeighborSnapshots {
+	return {
+		plus_x = chunk_store_snapshot_find_by_coord(
+			ChunkCoord{coord.x + 1, coord.y, coord.z},
+		),
+		minus_x = chunk_store_snapshot_find_by_coord(
+			ChunkCoord{coord.x - 1, coord.y, coord.z},
+		),
+		plus_y = chunk_store_snapshot_find_by_coord(
+			ChunkCoord{coord.x, coord.y + 1, coord.z},
+		),
+		minus_y = chunk_store_snapshot_find_by_coord(
+			ChunkCoord{coord.x, coord.y - 1, coord.z},
+		),
+		plus_z = chunk_store_snapshot_find_by_coord(
+			ChunkCoord{coord.x, coord.y, coord.z + 1},
+		),
+		minus_z = chunk_store_snapshot_find_by_coord(
+			ChunkCoord{coord.x, coord.y, coord.z - 1},
+		),
+	}
+}
+
+chunk_store_build_generated_snapshots :: proc(snapshots: []ChunkSnapshot) -> u32 {
+	snapshot_count: u32
+	for i in 0 ..< state.chunk_store.chunk_count {
+		chunk := chunk_store_get_by_index(i)
+		if chunk.generation_state != .Generated {
+			continue
+		}
+
+		log.assertf(
+			snapshot_count < u32(len(snapshots)),
+			"chunk snapshot output capacity exceeded: count=%d capacity=%d",
+			snapshot_count,
+			len(snapshots),
+		)
+		snapshots[snapshot_count] = chunk_snapshot_from_chunk(chunk)
+		log.assertf(
+			snapshots[snapshot_count].block_version == chunk.block_version,
+			"chunk snapshot block version mismatch",
+		)
+		snapshot_count += 1
+	}
+	return snapshot_count
 }
 
 chunk_snapshot_find_by_coord :: proc(
@@ -1041,6 +1071,41 @@ chunk_mesh_neighbors_find :: proc(
 			snapshots,
 			ChunkCoord{coord.x, coord.y, coord.z - 1},
 		),
+	}
+}
+
+chunk_block_storage_alloc :: proc {
+	chunk_block_storage_alloc_with_allocator,
+	chunk_block_storage_alloc_for_store,
+}
+
+chunk_block_storage_alloc_with_allocator :: proc(allocator: mem.Allocator) -> ChunkBlockStorage {
+	storage := ChunkBlockStorage{}
+	chunk_voxel_view_alloc(&storage.voxel_view, allocator)
+	return storage
+}
+
+chunk_block_storage_alloc_for_store :: proc() -> ChunkBlockStorage {
+	return chunk_block_storage_alloc(state.persistent_allocator)
+}
+
+chunk_snapshot_from_chunk :: proc(chunk: ^Chunk) -> ChunkSnapshot {
+	log.assertf(
+		chunk.generation_state == .Generated,
+		"chunk must be generated before creating a snapshot",
+	)
+	log.assertf(
+		len(chunk.block_storage.voxel_view.blocks) == CHUNK_BLOCK_COUNT,
+		"chunk must have the correct number of blocks",
+	)
+	log.assertf(
+		chunk.block_version > 0,
+		"chunk block version must be greater than 0",
+	)
+	return {
+		coord = chunk.coord,
+		voxel_view = chunk.block_storage.voxel_view,
+		block_version = chunk.block_version,
 	}
 }
 
@@ -2603,32 +2668,17 @@ setup_resources :: proc() {
 		}
 	}
 
-	for i in 0 ..< state.chunk_store.chunk_count {
-		chunk := chunk_store_get_by_index(i)
-		if chunk.generation_state != .Generated {
-			continue
-		}
-
-		startup_snapshots[startup_snapshot_count] = chunk_snapshot_from_chunk(chunk)
-		log.assertf(
-			startup_snapshots[startup_snapshot_count].block_version == chunk.block_version,
-			"chunk snapshot block version mismatch",
-		)
-		startup_snapshot_count += 1
-	}
-
 	chunk_mesh_jobs: [STARTUP_CHUNK_COUNT]ChunkMeshJob
 	chunk_mesh_results: [STARTUP_CHUNK_COUNT]ChunkMeshJobResult
 
+	startup_snapshot_count = chunk_store_build_generated_snapshots(startup_snapshots[:])
 	startup_snapshot_slice := startup_snapshots[:int(startup_snapshot_count)]
 	for snapshot, i in startup_snapshot_slice {
-		neighbors := chunk_mesh_neighbors_find(startup_snapshot_slice, snapshot.coord)
-
 		chunk_mesh_jobs[i] = {
 			snapshot         = snapshot,
 			boundary_policy  = .Sample_Neighbor_Snapshots,
 			output_allocator = state.transient_allocator,
-			neighbors        = neighbors,
+			neighbors        = chunk_store_mesh_neighbors_find(snapshot.coord),
 		}
 	}
 
