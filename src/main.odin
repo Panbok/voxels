@@ -614,21 +614,6 @@ chunk_world_get_aabb :: proc(coord: ChunkCoord) -> WorldAABB {
 	return {min = min, max = min + Vec3{length, length, length}}
 }
 
-chunk_bounds_from_coord :: proc(coord: ChunkCoord) -> ChunkBounds {
-	return {
-		min = {
-			x = coord.x * CHUNK_BLOCK_LENGTH,
-			y = coord.y * CHUNK_BLOCK_LENGTH,
-			z = coord.z * CHUNK_BLOCK_LENGTH,
-		},
-		max = {
-			x = (coord.x + 1) * CHUNK_BLOCK_LENGTH,
-			y = (coord.y + 1) * CHUNK_BLOCK_LENGTH,
-			z = (coord.z + 1) * CHUNK_BLOCK_LENGTH,
-		},
-	}
-}
-
 block_coord_local_from_chunk_coord :: proc(block: BlockCoord, chunk_coord: ChunkCoord) -> BlockCoord {
 	origin := chunk_origin_from_coord(chunk_coord)
 	return {
@@ -975,26 +960,6 @@ chunk_mesh_worker_proc :: proc(data: rawptr) {
 		}
 	}
 
-}
-
-chunk_mesh_output_matches :: proc(a, b: ChunkMeshOutput) -> bool {
-	if a.face_count != b.face_count {
-		return false
-	}
-
-	if len(a.vertices) != len(b.vertices) || len(a.indices) != len(b.indices) {
-		return false
-	}
-
-	if mem.compare(mem.slice_to_bytes(a.vertices), mem.slice_to_bytes(b.vertices)) != 0 {
-		return false
-	}
-
-	if mem.compare(mem.slice_to_bytes(a.indices), mem.slice_to_bytes(b.indices)) != 0 {
-		return false
-	}
-
-	return true
 }
 
 chunk_mesh_jobs_execute_workers :: proc(jobs: []ChunkMeshJob, results: []ChunkMeshJobResult) {
@@ -1497,6 +1462,26 @@ chunk_work_mesh_and_commit_budgeted :: proc() -> ChunkMeshBatchStats {
 	chunk_mesh_jobs_execute_workers(job_slice, result_slice)
 
 	when ODIN_DEBUG && VERIFY_CHUNK_MESH_WORKER_OUTPUTS {
+		chunk_mesh_output_matches :: proc(a, b: ChunkMeshOutput) -> bool {
+			if a.face_count != b.face_count {
+				return false
+			}
+
+			if len(a.vertices) != len(b.vertices) || len(a.indices) != len(b.indices) {
+				return false
+			}
+
+			if mem.compare(mem.slice_to_bytes(a.vertices), mem.slice_to_bytes(b.vertices)) != 0 {
+				return false
+			}
+
+			if mem.compare(mem.slice_to_bytes(a.indices), mem.slice_to_bytes(b.indices)) != 0 {
+				return false
+			}
+
+			return true
+		}
+
 		for job, i in job_slice {
 			sync_temp := mem.begin_arena_temp_memory(&state.transient_arena)
 			sync_output := chunk_mesh_job_execute_sync(job)
@@ -2213,12 +2198,6 @@ terrain_chunk_origin_world_from_coord :: proc(coord: ChunkCoord) -> Vec4 {
 	}
 }
 
-terrain_chunk_center_world_from_coord :: proc(coord: ChunkCoord) -> Vec3 {
-	origin := terrain_chunk_origin_world_from_coord(coord)
-	half_length := f32(CHUNK_BLOCK_LENGTH) * TERRAIN_BLOCK_WORLD_SIZE * 0.5
-	return {origin[0] + half_length, origin[1] + half_length, origin[2] + half_length}
-}
-
 terrain_pack_vertex :: proc(
 	block_x, block_y, block_z: u32,
 	normal_id, material_id, corner_id: u32,
@@ -2917,35 +2896,6 @@ geometry_append_bytes :: proc(
 	return id
 }
 
-geometry_append :: proc(
-	pool: ^GeometryPool,
-	vertices: []PositionColorVertex,
-	indices: []u32,
-) -> GeometryID {
-	log.assertf(len(vertices) > 0, "vertices must not be empty")
-	log.assertf(u64(len(vertices)) <= u64(max(u32)), "vertex count exceeds u32: %d", len(vertices))
-
-	vertex_count := u32(len(vertices))
-	vertex_stride_bytes := geometry_layout_stride_bytes(.Position_Color_F32x4)
-	vertex_byte_count_wide := u64(vertex_count) * u64(vertex_stride_bytes)
-	log.assertf(
-		vertex_byte_count_wide <= u64(max(u32)),
-		"vertex append size exceeds u32: %d",
-		vertex_byte_count_wide,
-	)
-	vertex_byte_count := u32(vertex_byte_count_wide)
-
-	return geometry_append_bytes(
-		pool,
-		.Position_Color_F32x4,
-		raw_data(vertices),
-		vertex_byte_count,
-		vertex_count,
-		vertex_stride_bytes,
-		indices,
-	)
-}
-
 geometry_append_chunk_mesh_output :: proc(
 	pool: ^GeometryPool,
 	output: ChunkMeshOutput,
@@ -3030,23 +2980,6 @@ sdl_log_output :: proc "c" (
 	}
 
 	log.logf(level, "[SDL:%s] %s", category, cast(string)message)
-}
-
-// todo: remove once the camera is controlled by normal scene/debug tooling.
-debug_position_camera_for_chunk :: proc(coord: ChunkCoord) {
-	center := terrain_chunk_center_world_from_coord(coord)
-	chunk_world_length := f32(CHUNK_BLOCK_LENGTH) * TERRAIN_BLOCK_WORLD_SIZE
-
-	state.camera.position = {center[0], center[1], center[2] - chunk_world_length * 1.5}
-	state.camera.yaw = 0
-	state.camera.pitch = 0
-}
-
-startup_chunk_coord_from_index :: proc(index: u32) -> ChunkCoord {
-	log.assertf(index < STARTUP_CHUNK_COUNT, "index out of bounds")
-	gx := index % STARTUP_CHUNK_GRID_X
-	gz := index / STARTUP_CHUNK_GRID_X
-	return {i32(gx) - 1, 0, i32(gz) - 1}
 }
 
 //////////////////////////////////////
@@ -3413,115 +3346,6 @@ setup_resources :: proc() {
 	state.next_streaming_target_index = 0
 	state.next_mesh_scan_index = 0
 	chunk_streaming_update_for_observer(state.camera.position)
-
-	when EAGER_STARTUP_GRID {
-		state.startup_target_count = STARTUP_CHUNK_COUNT
-		state.next_startup_target_index = 0
-		state.next_mesh_scan_index = 0
-
-		for gz in 0 ..< STARTUP_CHUNK_GRID_Z {
-			for gx in 0 ..< STARTUP_CHUNK_GRID_X {
-				coord := ChunkCoord{i32(gx) - 1, 0, i32(gz) - 1}
-
-				chunk_id := chunk_store_get_or_append_reserved(coord)
-				chunk := chunk_store_get_by_id(chunk_id)
-
-				generation_job := ChunkGenerationJob {
-					coord            = coord,
-					seed             = 0,
-					output_allocator = state.chunk_block_storage_allocator,
-				}
-
-				generation_result := chunk_generation_job_execute_sync(generation_job)
-				log.assertf(
-					generation_result.coord == coord,
-					"Chunk generation job result coord mismatch",
-				)
-				log.assertf(
-					len(generation_result.block_storage.voxel_view.blocks) == CHUNK_BLOCK_COUNT,
-					"generated chunk storage has wrong block count",
-				)
-
-				chunk_mark_generated(chunk, generation_result.block_storage)
-				log.assertf(chunk.generation_state == .Generated, "chunk was not marked generated")
-				log.assertf(
-					chunk.mesh_state == .Dirty,
-					"generated chunk should be dirty for meshing",
-				)
-				log.assertf(chunk.block_version > 0, "generated chunk should have a block version")
-			}
-		}
-		state.next_startup_target_index = state.startup_target_count
-
-		chunk_mesh_jobs: [STARTUP_CHUNK_COUNT]ChunkMeshJob
-		chunk_mesh_results: [STARTUP_CHUNK_COUNT]ChunkMeshJobResult
-
-		mesh_job_count: u32
-		for i in 0 ..< state.chunk_store.chunk_count {
-			chunk := chunk_store_get_by_index(i)
-			if chunk.generation_state != .Generated || chunk.mesh_state != .Dirty {
-				continue
-			}
-
-			log.assertf(
-				mesh_job_count < u32(len(chunk_mesh_jobs)),
-				"chunk mesh job capacity exceeded: count=%d capacity=%d",
-				mesh_job_count,
-				len(chunk_mesh_jobs),
-			)
-
-			snapshot := chunk_snapshot_from_chunk(chunk)
-			chunk_mesh_jobs[mesh_job_count] = {
-				snapshot         = snapshot,
-				boundary_policy  = .Sample_Neighbor_Snapshots,
-				output_allocator = state.transient_allocator,
-				neighbors        = chunk_store_mesh_neighbors_find(snapshot.coord),
-			}
-			mesh_job_count += 1
-		}
-
-		job_slice := chunk_mesh_jobs[:int(mesh_job_count)]
-		result_slice := chunk_mesh_results[:len(job_slice)]
-		chunk_mesh_jobs_execute_workers(job_slice, result_slice)
-
-		when ODIN_DEBUG && VERIFY_CHUNK_MESH_WORKER_OUTPUTS {
-			for job, i in job_slice {
-				sync_temp := mem.begin_arena_temp_memory(&state.transient_arena)
-				sync_output := chunk_mesh_job_execute_sync(job)
-				output_matches := chunk_mesh_output_matches(result_slice[i].output, sync_output)
-				mem.end_arena_temp_memory(sync_temp)
-
-				log.assertf(
-					output_matches,
-					"threaded chunk mesh result mismatch: job_index=%d coord=%v",
-					i,
-					job.snapshot.coord,
-				)
-				log.assertf(
-					result_slice[i].coord == job.snapshot.coord,
-					"threaded chunk mesh coord mismatch: job_index=%d expected=%v got=%v",
-					i,
-					job.snapshot.coord,
-					result_slice[i].coord,
-				)
-			}
-		}
-
-		mesh_stats := chunk_store_commit_mesh_results(job_slice, result_slice)
-		log.debugf(
-			"Startup heightfield chunks loaded: attempted=%d committed=%d uploaded=%d empty=%d stale=%d total_faces=%d",
-			mesh_stats.chunks_attempted,
-			mesh_stats.chunks_committed,
-			mesh_stats.chunks_uploaded,
-			mesh_stats.chunks_empty,
-			mesh_stats.chunks_stale,
-			mesh_stats.total_faces,
-		)
-
-		first_chunk := state.chunk_store.chunks[0]
-
-		debug_position_camera_for_chunk(first_chunk.coord)
-	}
 
 	log.debug("Resources initialized")
 }
