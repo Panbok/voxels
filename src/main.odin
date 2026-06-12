@@ -26,6 +26,7 @@ ASPECT_RATIO :: f32(16.0 / 9.0)
 DEFAULT_ACCELERATION :: f32(1.5)
 MAX_ACCELERATION :: f32(20.0)
 MOUSE_SENSITIVITY :: f32(0.0025)
+CAMERA_TERRAIN_CLEARANCE :: f32(18.05)
 
 //////////////////////////////////////
 // State
@@ -33,7 +34,7 @@ MOUSE_SENSITIVITY :: f32(0.0025)
 
 Memory :: struct {
 	// Main
-	persistent_slab:              [64 * mem.Megabyte]u8,
+	persistent_slab:              [128 * mem.Megabyte]u8,
 	transient_slab:               [16 * mem.Megabyte]u8,
 	persistent_arena:             mem.Arena,
 	transient_arena:              mem.Arena,
@@ -85,6 +86,14 @@ Metrics :: struct {
 	prev_chunks_dirty_remaining:       u32,
 }
 
+Streaming :: struct {
+	streaming_center_coord:      ChunkCoord,
+	streaming_targets:           [CHUNK_STREAMING_TARGET_CAPACITY]ChunkCoord,
+	streaming_target_count:      u32,
+	next_streaming_target_index: u32,
+	next_mesh_scan_index:        u32,
+}
+
 ChunkStore :: struct {
 	chunks:      []Chunk,
 	chunk_count: u32,
@@ -106,10 +115,16 @@ state := struct {
 	// Metrics & Frame debug stats
 	using metrics:             Metrics,
 
+	// Streaming
+	using streaming:           Streaming,
+
 	// Startup data
 	startup_target_count:      u32,
 	next_startup_target_index: u32,
-	next_mesh_scan_index:      u32,
+
+	// Player
+	auto_move_on:              bool,
+	sprint_on:                 bool,
 
 	// State variables
 	debug_mode:                bool,
@@ -131,6 +146,8 @@ state := struct {
 	startup_target_count = STARTUP_CHUNK_COUNT,
 	next_startup_target_index = 0,
 	next_mesh_scan_index = 0,
+	auto_move_on = false,
+	sprint_on = false,
 	debug_mode = true,
 	enable_vsync = true,
 	is_window_open = true,
@@ -283,6 +300,28 @@ frustum_test_aabb :: proc(frustum: Frustum, aabb: WorldAABB) -> bool {
 	return true
 }
 
+camera_move_above_block :: proc(camera: ^Camera, block: BlockCoord) {
+	camera.position[1] = world_y_from_block_top(block.y) + CAMERA_TERRAIN_CLEARANCE
+}
+
+camera_resolve_terrain_intersection :: proc(camera: ^Camera) -> bool {
+	moved := false
+
+	for push_count := 0; push_count < CHUNK_BLOCK_LENGTH + 1; push_count += 1 {
+		block, intersects := chunk_store_solid_block_at_world_position(camera.position).?
+		if !intersects {
+			return moved
+		}
+
+		camera_move_above_block(camera, block)
+		moved = true
+	}
+
+	log.assertf(false, "camera remained inside solid terrain after repeated upward pushes")
+	return moved
+}
+
+
 when ODIN_DEBUG {
 	debug_frustum_contract_checks_run :: proc() {
 		test_camera := Camera {
@@ -360,6 +399,17 @@ CHUNK_MESH_WORKER_ARENA_BYTES :: 8 * mem.Megabyte // or larger if current chunks
 
 CHUNK_GENERATION_BUDGET_PER_FRAME :: 1
 CHUNK_MESH_BUDGET_PER_FRAME :: 2
+
+CHUNK_STREAMING_RADIUS_XZ :: 2
+CHUNK_STREAMING_TARGET_CAPACITY ::
+	(CHUNK_STREAMING_RADIUS_XZ * 2 + 1) * (CHUNK_STREAMING_RADIUS_XZ * 2 + 1)
+// Until chunk/geometry eviction exists, store capacity must stay within the fixed arenas.
+CHUNK_STORE_CAPACITY :: 128
+#assert(CHUNK_STREAMING_TARGET_CAPACITY > 0)
+#assert(CHUNK_STORE_CAPACITY >= CHUNK_STREAMING_TARGET_CAPACITY)
+
+VERIFY_CHUNK_MESH_WORKER_OUTPUTS :: #config(VERIFY_CHUNK_MESH_WORKER_OUTPUTS, false)
+LOG_CHUNK_MESH_COMMITS :: #config(LOG_CHUNK_MESH_COMMITS, false)
 
 BlockOccupancy :: enum u8 {
 	Empty,
@@ -543,6 +593,35 @@ chunk_bounds_from_coord :: proc(coord: ChunkCoord) -> ChunkBounds {
 			y = (coord.y + 1) * CHUNK_BLOCK_LENGTH,
 			z = (coord.z + 1) * CHUNK_BLOCK_LENGTH,
 		},
+	}
+}
+
+block_coord_local_from_chunk_coord :: proc(block: BlockCoord, chunk_coord: ChunkCoord) -> BlockCoord {
+	origin := chunk_origin_from_coord(chunk_coord)
+	return {
+		x = block.x - origin.x,
+		y = block.y - origin.y,
+		z = block.z - origin.z,
+	}
+}
+
+block_coord_from_world_position :: proc(position: Vec3) -> BlockCoord {
+	return {
+		x = i32(math.floor_f32(position[0] / TERRAIN_BLOCK_WORLD_SIZE)),
+		y = i32(math.floor_f32(position[1] / TERRAIN_BLOCK_WORLD_SIZE)),
+		z = i32(math.floor_f32(position[2] / TERRAIN_BLOCK_WORLD_SIZE)),
+	}
+}
+
+world_y_from_block_top :: proc(block_y: i32) -> f32 {
+	return f32(block_y + 1) * TERRAIN_BLOCK_WORLD_SIZE
+}
+
+chunk_coord_from_block_coord :: proc(coord: BlockCoord) -> ChunkCoord {
+	return {
+		x = math.floor_div(coord.x, i32(CHUNK_BLOCK_LENGTH)),
+		y = math.floor_div(coord.y, i32(CHUNK_BLOCK_LENGTH)),
+		z = math.floor_div(coord.z, i32(CHUNK_BLOCK_LENGTH)),
 	}
 }
 
@@ -1009,13 +1088,15 @@ chunk_store_commit_mesh_results :: proc(
 		chunk.mesh_version = job.snapshot.block_version
 		chunk.dirty_flags = {}
 
-		log.debugf(
-			"Chunk mesh: coord=%v faces=%d vertices=%d indices=%d",
-			chunk.coord,
-			result.output.face_count,
-			result.output.face_count * 4,
-			result.output.face_count * 6,
-		)
+		when LOG_CHUNK_MESH_COMMITS {
+			log.debugf(
+				"Chunk mesh: coord=%v faces=%d vertices=%d indices=%d",
+				chunk.coord,
+				result.output.face_count,
+				result.output.face_count * 4,
+				result.output.face_count * 6,
+			)
+		}
 	}
 
 	return stats
@@ -1205,22 +1286,71 @@ chunk_store_count_dirty_generated :: proc() -> u32 {
 	return count
 }
 
+chunk_solid_block_at_world_block :: proc(chunk: ^Chunk, block: BlockCoord) -> Maybe(BlockCoord) {
+	if chunk.generation_state != .Generated {
+		return nil
+	}
+	log.assertf(
+		len(chunk.block_storage.voxel_view.blocks) == CHUNK_BLOCK_COUNT,
+		"generated chunk must have %d blocks, got %d",
+		CHUNK_BLOCK_COUNT,
+		len(chunk.block_storage.voxel_view.blocks),
+	)
+
+	local := block_coord_local_from_chunk_coord(block, chunk.coord)
+	if !chunk_block_coord_is_inside(local.x, local.y, local.z) {
+		return nil
+	}
+
+	if !chunk_voxel_view_is_solid_local(
+		chunk.block_storage.voxel_view,
+		u32(local.x),
+		u32(local.y),
+		u32(local.z),
+	) {
+		return nil
+	}
+
+	return block
+}
+
+chunk_store_solid_block_at_world_position :: proc(position: Vec3) -> Maybe(BlockCoord) {
+	block := block_coord_from_world_position(position)
+	chunk_coord := chunk_coord_from_block_coord(block)
+	index, ok := chunk_store_find_index_by_coord(chunk_coord).?
+	if !ok {
+		return nil
+	}
+
+	chunk := chunk_store_get_by_index(index)
+	return chunk_solid_block_at_world_block(chunk, block)
+}
+
 chunk_work_generate_budgeted :: proc() -> u32 {
 	generated_count: u32
-	for generated_count < CHUNK_GENERATION_BUDGET_PER_FRAME &&
-	    state.next_startup_target_index < state.startup_target_count {
-		coord := startup_chunk_coord_from_index(state.next_startup_target_index)
-		state.next_startup_target_index += 1
+	if state.streaming_target_count == 0 {
+		return 0
+	}
 
+	scanned_count: u32
+	for generated_count < CHUNK_GENERATION_BUDGET_PER_FRAME &&
+	    scanned_count < state.streaming_target_count {
+		target_index := state.next_streaming_target_index
+		state.next_streaming_target_index =
+			(state.next_streaming_target_index + 1) % state.streaming_target_count
+		scanned_count += 1
+
+		coord := state.streaming_targets[target_index]
 		chunk_id := chunk_store_get_or_append_reserved(coord)
 		chunk := chunk_store_get_by_id(chunk_id)
+
 		if chunk.generation_state == .Generated {
 			continue
 		}
 
 		log.assertf(
 			chunk.generation_state == .Missing,
-			"startup target chunk has unexpected generation state: coord=%v state=%v",
+			"streaming target chunk has unexpected generation state: coord=%v state=%v",
 			coord,
 			chunk.generation_state,
 		)
@@ -1270,6 +1400,9 @@ chunk_work_mesh_and_commit_budgeted :: proc() -> ChunkMeshBatchStats {
 		if chunk.generation_state != .Generated || chunk.mesh_state != .Dirty {
 			continue
 		}
+		if !chunk_streaming_mesh_dependencies_ready(chunk.coord) {
+			continue
+		}
 
 		snapshot := chunk_snapshot_from_chunk(chunk)
 		chunk_mesh_jobs[mesh_job_count] = {
@@ -1289,7 +1422,7 @@ chunk_work_mesh_and_commit_budgeted :: proc() -> ChunkMeshBatchStats {
 	result_slice := chunk_mesh_results[:len(job_slice)]
 	chunk_mesh_jobs_execute_workers(job_slice, result_slice)
 
-	when ODIN_DEBUG {
+	when ODIN_DEBUG && VERIFY_CHUNK_MESH_WORKER_OUTPUTS {
 		for job, i in job_slice {
 			sync_temp := mem.begin_arena_temp_memory(&state.transient_arena)
 			sync_output := chunk_mesh_job_execute_sync(job)
@@ -1316,8 +1449,9 @@ chunk_work_mesh_and_commit_budgeted :: proc() -> ChunkMeshBatchStats {
 }
 
 chunk_work_update_budgeted :: proc() {
-	state.chunks_generated = chunk_work_generate_budgeted()
+	chunk_streaming_update_for_observer(state.camera.position)
 
+	state.chunks_generated = chunk_work_generate_budgeted()
 	mesh_stats := chunk_work_mesh_and_commit_budgeted()
 	state.chunk_mesh_jobs_submitted = mesh_stats.chunks_attempted
 	state.chunk_mesh_results_committed = mesh_stats.chunks_committed
@@ -1325,7 +1459,156 @@ chunk_work_update_budgeted :: proc() {
 	state.chunks_dirty_remaining = chunk_store_count_dirty_generated()
 }
 
+chunk_streaming_update_for_observer :: proc(observer_world_position: Vec3) {
+	center := chunk_streaming_center_from_observer(observer_world_position)
+	if state.streaming_target_count == 0 || center != state.streaming_center_coord {
+		chunk_streaming_window_rebuild_targets(center)
+	}
+}
+
+chunk_streaming_center_from_observer :: proc(observer_world_position: Vec3) -> ChunkCoord {
+	center := chunk_coord_from_block_coord(
+		block_coord_from_world_position(observer_world_position),
+	)
+	center.y = 0
+	return center
+}
+
+chunk_streaming_target_less :: proc(center, a, b: ChunkCoord) -> bool {
+	adx := a.x - center.x
+	adz := a.z - center.z
+	bdx := b.x - center.x
+	bdz := b.z - center.z
+
+	ad := adx * adx + adz * adz
+	bd := bdx * bdx + bdz * bdz
+	if ad != bd {return ad < bd}
+	if a.z != b.z {return a.z < b.z}
+	return a.x < b.x
+}
+
+chunk_streaming_target_contains :: proc(coord: ChunkCoord) -> bool {
+	for target in state.streaming_targets[:state.streaming_target_count] {
+		if target == coord {
+			return true
+		}
+	}
+	return false
+}
+
+chunk_store_coord_is_generated :: proc(coord: ChunkCoord) -> bool {
+	index, ok := chunk_store_find_index_by_coord(coord).?
+	if !ok {
+		return false
+	}
+
+	chunk := chunk_store_get_by_index(index)
+	return chunk.generation_state == .Generated
+}
+
+chunk_streaming_mesh_dependency_ready :: proc(coord: ChunkCoord) -> bool {
+	if !chunk_streaming_target_contains(coord) {
+		return true
+	}
+	return chunk_store_coord_is_generated(coord)
+}
+
+chunk_streaming_mesh_dependencies_ready :: proc(coord: ChunkCoord) -> bool {
+	return (
+		chunk_streaming_mesh_dependency_ready(ChunkCoord{coord.x + 1, coord.y, coord.z}) &&
+		chunk_streaming_mesh_dependency_ready(ChunkCoord{coord.x - 1, coord.y, coord.z}) &&
+		chunk_streaming_mesh_dependency_ready(ChunkCoord{coord.x, coord.y, coord.z + 1}) &&
+		chunk_streaming_mesh_dependency_ready(ChunkCoord{coord.x, coord.y, coord.z - 1})
+	)
+}
+
+chunk_streaming_window_rebuild_targets :: proc(center: ChunkCoord) {
+	state.streaming_center_coord = center
+	state.streaming_target_count = 0
+
+	radius := i32(CHUNK_STREAMING_RADIUS_XZ)
+	for dz := -radius; dz <= radius; dz += 1 {
+		for dx := -radius; dx <= radius; dx += 1 {
+			state.streaming_targets[state.streaming_target_count] = {
+				center.x + dx,
+				0,
+				center.z + dz,
+			}
+			state.streaming_target_count += 1
+		}
+	}
+
+	for i := u32(0); i < state.streaming_target_count; i += 1 {
+		best := i
+		for j := i + 1; j < state.streaming_target_count; j += 1 {
+			if chunk_streaming_target_less(
+				center,
+				state.streaming_targets[j],
+				state.streaming_targets[best],
+			) {
+				best = j
+			}
+		}
+		if best != i {
+			state.streaming_targets[i], state.streaming_targets[best] = state.streaming_targets[best], state.streaming_targets[i]
+		}
+	}
+
+	state.next_streaming_target_index = 0
+}
+
 when ODIN_DEBUG {
+	debug_camera_terrain_collision_checks_run :: proc() {
+		temp := mem.begin_arena_temp_memory(&state.transient_arena)
+		defer mem.end_arena_temp_memory(temp)
+
+		chunk := chunk_create(ChunkCoord{0, 0, 0})
+		storage := chunk_block_storage_alloc(state.transient_allocator)
+		index := chunk_block_index(0, 0, 0)
+		storage.voxel_view.blocks.occupancy[index] = .Solid
+		storage.voxel_view.blocks.material_id[index] = BlockMaterialID(1)
+		chunk_mark_generated(&chunk, storage)
+
+		hit_block, hit := chunk_solid_block_at_world_block(&chunk, BlockCoord{0, 0, 0}).?
+		log.assert(hit, "camera terrain collision check: expected solid block hit")
+		log.assertf(
+			hit_block == BlockCoord{0, 0, 0},
+			"camera terrain collision check: wrong hit block %v",
+			hit_block,
+		)
+
+		test_camera := Camera{position = {0.25, 0.25, 0.25}}
+		camera_move_above_block(&test_camera, hit_block)
+		log.assertf(
+			test_camera.position[1] > world_y_from_block_top(hit_block.y),
+			"camera terrain collision check: camera was not lifted above block",
+		)
+
+		lifted_block := block_coord_from_world_position(test_camera.position)
+		_, lifted_hit := chunk_solid_block_at_world_block(&chunk, lifted_block).?
+		log.assert(!lifted_hit, "camera terrain collision check: lifted camera still intersects")
+
+		negative_chunk := chunk_create(ChunkCoord{-1, 0, -1})
+		negative_storage := chunk_block_storage_alloc(state.transient_allocator)
+		negative_index := chunk_block_index(CHUNK_BLOCK_LOCAL_MAX, 0, CHUNK_BLOCK_LOCAL_MAX)
+		negative_storage.voxel_view.blocks.occupancy[negative_index] = .Solid
+		negative_storage.voxel_view.blocks.material_id[negative_index] = BlockMaterialID(1)
+		chunk_mark_generated(&negative_chunk, negative_storage)
+
+		negative_hit_block, negative_hit := chunk_solid_block_at_world_block(
+			&negative_chunk,
+			BlockCoord{-1, 0, -1},
+		).?
+		log.assert(negative_hit, "camera terrain collision check: expected negative block hit")
+		log.assertf(
+			negative_hit_block == BlockCoord{-1, 0, -1},
+			"camera terrain collision check: wrong negative hit block %v",
+			negative_hit_block,
+		)
+
+		log.debug("Camera terrain collision checks passed")
+	}
+
 	debug_chunk_mesher_contract_checks_run :: proc() {
 		temp := mem.begin_arena_temp_memory(&state.transient_arena)
 		defer mem.end_arena_temp_memory(temp)
@@ -1975,9 +2258,9 @@ terrain_heightfield_voxel_view_fill :: proc(view: ^ChunkVoxelView, chunk: ChunkC
 
 INVALID_GEOMETRY_ID :: GeometryID(0)
 GEOMETRY_MAX_GEOMETRIES :: 1024
-GEOMETRY_MAX_POSITION_COLOR_VERTICES :: 1_000_000
+GEOMETRY_MAX_POSITION_COLOR_VERTICES :: 2_000_000
 GEOMETRY_MAX_VERTEX_BYTES :: GEOMETRY_MAX_POSITION_COLOR_VERTICES * size_of(PositionColorVertex)
-GEOMETRY_MAX_INDEX_ELEMENTS :: 8_000_000
+GEOMETRY_MAX_INDEX_ELEMENTS :: 24_000_000
 GEOMETRY_MAX_UPLOAD_POSITION_COLOR_VERTICES :: 65_536
 GEOMETRY_MAX_VERTEX_UPLOAD_BYTES ::
 	GEOMETRY_MAX_UPLOAD_POSITION_COLOR_VERTICES * size_of(PositionColorVertex)
@@ -2847,13 +3130,19 @@ setup_resources :: proc() {
 	temp := mem.begin_arena_temp_memory(&state.transient_arena)
 	defer mem.end_arena_temp_memory(temp)
 
-	chunk_store_init(STARTUP_CHUNK_COUNT)
+	chunk_store_init(CHUNK_STORE_CAPACITY)
 	chunk_store_clear()
-	state.startup_target_count = STARTUP_CHUNK_COUNT
-	state.next_startup_target_index = 0
+
+	state.streaming_target_count = 0
+	state.next_streaming_target_index = 0
 	state.next_mesh_scan_index = 0
+	chunk_streaming_update_for_observer(state.camera.position)
 
 	when EAGER_STARTUP_GRID {
+		state.startup_target_count = STARTUP_CHUNK_COUNT
+		state.next_startup_target_index = 0
+		state.next_mesh_scan_index = 0
+
 		for gz in 0 ..< STARTUP_CHUNK_GRID_Z {
 			for gx in 0 ..< STARTUP_CHUNK_GRID_X {
 				coord := ChunkCoord{i32(gx) - 1, 0, i32(gz) - 1}
@@ -2919,7 +3208,7 @@ setup_resources :: proc() {
 		result_slice := chunk_mesh_results[:len(job_slice)]
 		chunk_mesh_jobs_execute_workers(job_slice, result_slice)
 
-		when ODIN_DEBUG {
+		when ODIN_DEBUG && VERIFY_CHUNK_MESH_WORKER_OUTPUTS {
 			for job, i in job_slice {
 				sync_temp := mem.begin_arena_temp_memory(&state.transient_arena)
 				sync_output := chunk_mesh_job_execute_sync(job)
@@ -2990,6 +3279,14 @@ process_events :: proc() {
 					state.use_wireframe_mode = !state.use_wireframe_mode
 				}
 
+				if event.key.scancode == sdl.Scancode.L && !event.key.repeat {
+					state.auto_move_on = !state.auto_move_on
+				}
+
+				if event.key.scancode == sdl.Scancode.LCTRL && !event.key.repeat {
+					state.sprint_on = !state.sprint_on
+				}
+
 				if event.key.scancode == sdl.Scancode.I && !event.key.repeat {
 					log.debugf(
 						"Debug info: chunks_total=%d, chunks_without_geometry=%d, chunks_frustum_culled=%d, chunks_drawn=%d, terrain_faces_drawn=%d, terrain_indices_drawn=%d, chunks_generated=%d, chunk_mesh_jobs_submitted=%d, chunk_mesh_results_committed=%d, chunk_mesh_results_uploaded=%d, chunks_dirty_remaining=%d",
@@ -3035,6 +3332,9 @@ update_camera_vectors :: proc() {
 }
 
 update :: proc() {
+	chunk_work_update_budgeted()
+	camera_resolve_terrain_intersection(&state.camera)
+
 	view := la.matrix4_look_at_f32(
 		state.camera.position,
 		state.camera.position + state.camera.forward,
@@ -3049,8 +3349,6 @@ update :: proc() {
 	state.view_projection = proj * view
 	model := la.matrix4_rotate_f32(ANGLE, la.Vector3f32{0, 1, 0})
 	state.mvp = state.view_projection * model
-
-	chunk_work_update_budgeted()
 }
 
 handle_input :: proc(dt: f32) {
@@ -3058,13 +3356,17 @@ handle_input :: proc(dt: f32) {
 	keys := sdl.GetKeyboardState(&key_count)
 
 	velocity := DEFAULT_ACCELERATION
-	if keys[cast(int)sdl.Scancode.LSHIFT] {velocity = MAX_ACCELERATION}
+	if keys[cast(int)sdl.Scancode.LSHIFT] || state.sprint_on {velocity = MAX_ACCELERATION}
 
 	velocity = velocity * dt
 	if keys[cast(int)sdl.Scancode.W] {state.camera.position += state.camera.forward * velocity}
 	if keys[cast(int)sdl.Scancode.S] {state.camera.position -= state.camera.forward * velocity}
 	if keys[cast(int)sdl.Scancode.D] {state.camera.position -= state.camera.right * velocity}
 	if keys[cast(int)sdl.Scancode.A] {state.camera.position += state.camera.right * velocity}
+
+	if state.auto_move_on {
+		state.camera.position += state.camera.forward * velocity
+	}
 }
 
 load_shader :: proc(
@@ -3144,6 +3446,7 @@ main :: proc() {
 
 	when ODIN_DEBUG {
 		debug_frustum_contract_checks_run()
+		debug_camera_terrain_collision_checks_run()
 		debug_chunk_mesher_contract_checks_run()
 	}
 
