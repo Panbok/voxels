@@ -91,6 +91,8 @@ Metrics :: struct {
 	prev_chunk_mesh_results_committed: u32,
 	prev_chunk_mesh_results_uploaded:  u32,
 	prev_chunks_dirty_remaining:       u32,
+	prev_chunks_evicted:               u32,
+	chunks_evicted:                    u32,
 }
 
 Streaming :: struct {
@@ -434,12 +436,17 @@ CHUNK_GENERATION_BUDGET_PER_FRAME :: 1
 CHUNK_MESH_BUDGET_PER_FRAME :: 2
 
 CHUNK_STREAMING_RADIUS_XZ :: 2
+CHUNK_UNLOAD_RADIUS_XZ :: CHUNK_STREAMING_RADIUS_XZ + 1
 CHUNK_STREAMING_TARGET_CAPACITY ::
 	(CHUNK_STREAMING_RADIUS_XZ * 2 + 1) * (CHUNK_STREAMING_RADIUS_XZ * 2 + 1)
+CHUNK_UNLOAD_CAPACITY ::
+	(CHUNK_UNLOAD_RADIUS_XZ * 2 + 1) * (CHUNK_UNLOAD_RADIUS_XZ * 2 + 1)
+#assert(CHUNK_UNLOAD_RADIUS_XZ >= CHUNK_STREAMING_RADIUS_XZ)
+
 // Until chunk/geometry eviction exists, store capacity must stay within the fixed arenas.
 CHUNK_STORE_CAPACITY :: 128
 #assert(CHUNK_STREAMING_TARGET_CAPACITY > 0)
-#assert(CHUNK_STORE_CAPACITY >= CHUNK_STREAMING_TARGET_CAPACITY)
+#assert(CHUNK_STORE_CAPACITY >= CHUNK_UNLOAD_CAPACITY)
 
 VERIFY_CHUNK_MESH_WORKER_OUTPUTS :: #config(VERIFY_CHUNK_MESH_WORKER_OUTPUTS, false)
 LOG_CHUNK_MESH_COMMITS :: #config(LOG_CHUNK_MESH_COMMITS, false)
@@ -1365,6 +1372,16 @@ chunk_store_solid_block_at_world_position :: proc(position: Vec3) -> Maybe(Block
 	return chunk_solid_block_at_world_block(chunk, block)
 }
 
+chunk_store_coord_is_generated :: proc(coord: ChunkCoord) -> bool {
+	index, ok := chunk_store_find_index_by_coord(coord).?
+	if !ok {
+		return false
+	}
+
+	chunk := chunk_store_get_by_index(index)
+	return chunk.generation_state == .Generated
+}
+
 chunk_work_generate_budgeted :: proc() -> u32 {
 	generated_count: u32
 	if state.streaming_target_count == 0 {
@@ -1508,7 +1525,7 @@ chunk_work_mesh_and_commit_budgeted :: proc() -> ChunkMeshBatchStats {
 }
 
 chunk_work_update_budgeted :: proc() {
-	chunk_streaming_update_for_observer(state.camera.position)
+	state.chunks_evicted = chunk_streaming_update_for_observer(state.camera.position)
 
 	state.chunks_generated = chunk_work_generate_budgeted()
 	mesh_stats := chunk_work_mesh_and_commit_budgeted()
@@ -1518,11 +1535,12 @@ chunk_work_update_budgeted :: proc() {
 	state.chunks_dirty_remaining = chunk_store_count_dirty_generated()
 }
 
-chunk_streaming_update_for_observer :: proc(observer_world_position: Vec3) {
+chunk_streaming_update_for_observer :: proc(observer_world_position: Vec3) -> u32 {
 	center := chunk_streaming_center_from_observer(observer_world_position)
 	if state.streaming_target_count == 0 || center != state.streaming_center_coord {
 		chunk_streaming_window_rebuild_targets(center)
 	}
+	return chunk_streaming_evict_outside_unload_radius()
 }
 
 chunk_streaming_center_from_observer :: proc(observer_world_position: Vec3) -> ChunkCoord {
@@ -1531,6 +1549,16 @@ chunk_streaming_center_from_observer :: proc(observer_world_position: Vec3) -> C
 	)
 	center.y = 0
 	return center
+}
+
+chunk_streaming_coord_inside_square_radius :: proc(center, coord: ChunkCoord, radius: u32) -> bool {
+	dx := coord.x - center.x
+	dz := coord.z - center.z
+	r := i32(radius)
+
+	return coord.y == center.y &&
+	       dx >= -r && dx <= r &&
+	       dz >= -r && dz <= r
 }
 
 chunk_streaming_target_less :: proc(center, a, b: ChunkCoord) -> bool {
@@ -1546,20 +1574,15 @@ chunk_streaming_target_less :: proc(center, a, b: ChunkCoord) -> bool {
 	return a.x < b.x
 }
 
-chunk_streaming_target_contains :: proc(coord: ChunkCoord) -> bool {
-	for target in state.streaming_targets[:state.streaming_target_count] {
-		if target == coord {
-			return true
-		}
-	}
-	return false
-}
-
-chunk_streaming_evict_outside_targets :: proc() -> u32 {
+chunk_streaming_evict_outside_unload_radius :: proc() -> u32 {
 	evicted_count: u32
 	for i := u32(0); i < state.chunk_store.chunk_count; {
 		chunk := chunk_store_get_by_index(i)
-		if chunk_streaming_target_contains(chunk.coord) {
+		if chunk_streaming_coord_inside_square_radius(
+			state.streaming_center_coord,
+			chunk.coord,
+			CHUNK_UNLOAD_RADIUS_XZ,
+		) {
 			i += 1
 			continue
 		}
@@ -1571,18 +1594,12 @@ chunk_streaming_evict_outside_targets :: proc() -> u32 {
 	return evicted_count
 }
 
-chunk_store_coord_is_generated :: proc(coord: ChunkCoord) -> bool {
-	index, ok := chunk_store_find_index_by_coord(coord).?
-	if !ok {
-		return false
-	}
-
-	chunk := chunk_store_get_by_index(index)
-	return chunk.generation_state == .Generated
-}
-
 chunk_streaming_mesh_dependency_ready :: proc(coord: ChunkCoord) -> bool {
-	if !chunk_streaming_target_contains(coord) {
+	if !chunk_streaming_coord_inside_square_radius(
+		state.streaming_center_coord,
+		coord,
+		CHUNK_STREAMING_RADIUS_XZ,
+	) {
 		return true
 	}
 	return chunk_store_coord_is_generated(coord)
@@ -1630,7 +1647,6 @@ chunk_streaming_window_rebuild_targets :: proc(center: ChunkCoord) {
 	}
 
 	state.next_streaming_target_index = 0
-	chunk_streaming_evict_outside_targets()
 }
 
 when ODIN_DEBUG {
@@ -2991,6 +3007,64 @@ ShaderType :: enum {
 	Fragment,
 }
 
+gfx_load_shader :: proc(
+	filename: string,
+	sampler_count: u32,
+	uniform_buffer_count: u32,
+	storage_buffer_count: u32,
+	storage_texture_count: u32,
+) -> (
+	^sdl.GPUShader,
+	ShaderType,
+) {
+	log.debugf("Loading shader: %s", filename)
+
+	shader_type: ShaderType
+	if strings.contains(
+		filename,
+		".vert.dxil",
+	) {shader_type = ShaderType.Vertex} else if strings.contains(filename, ".frag.dxil") {shader_type = ShaderType.Fragment} else {
+		log.assertf(false, "Unknown shader type: %s", filename)
+	}
+
+	temp := mem.begin_arena_temp_memory(&state.transient_arena)
+	defer mem.end_arena_temp_memory(temp)
+
+	code, err := os.read_entire_file_from_path(filename, state.transient_allocator)
+	log.assertf(err == nil, "Failed to read shader: %s", err)
+	log.assertf(len(code) > 0, "Shader file is empty: %s", filename)
+
+	code_size: uint = len(code)
+	code_data := ([^]sdl.Uint8)(raw_data(code))
+
+	stage: sdl.GPUShaderStage
+	if shader_type == ShaderType.Fragment {
+		stage = sdl.GPUShaderStage.FRAGMENT
+	} else if shader_type == ShaderType.Vertex {
+		stage = sdl.GPUShaderStage.VERTEX
+	} else {
+		log.assertf(false, "Unknown shader type: %s", filename)
+	}
+
+	shader_info := sdl.GPUShaderCreateInfo {
+		code                 = code_data,
+		code_size            = code_size,
+		entrypoint           = "main",
+		format               = {.DXIL},
+		stage                = stage,
+		num_samplers         = sampler_count,
+		num_uniform_buffers  = uniform_buffer_count,
+		num_storage_buffers  = storage_buffer_count,
+		num_storage_textures = storage_texture_count,
+	}
+	shader := sdl.CreateGPUShader(state.device, shader_info)
+	log.assertf(shader != nil, "Failed to create shader: %s", sdl.GetError())
+
+	log.debugf("Shader %s created: %s", shader_type, filename)
+
+	return shader, shader_type
+}
+
 gfx_create_pipelines_fill_and_line :: proc(
 	vert_shader: ^sdl.GPUShader,
 	frag_shader: ^sdl.GPUShader,
@@ -3183,6 +3257,7 @@ gfx_render :: proc() {
 	state.prev_chunk_mesh_results_committed = state.chunk_mesh_results_committed
 	state.prev_chunk_mesh_results_uploaded = state.chunk_mesh_results_uploaded
 	state.prev_chunks_dirty_remaining = state.chunks_dirty_remaining
+	state.prev_chunks_evicted = state.chunks_evicted
 
 	state.chunks_total = 0
 	state.chunks_without_geometry = 0
@@ -3195,6 +3270,7 @@ gfx_render :: proc() {
 	state.chunk_mesh_results_committed = 0
 	state.chunk_mesh_results_uploaded = 0
 	state.chunks_dirty_remaining = 0
+	state.chunks_evicted = 0
 }
 
 //////////////////////////////////////
@@ -3274,12 +3350,12 @@ setup_resources :: proc() {
 	// todo: this should be removed later after testing is done
 	// Mesh.vert uses one vertex storage buffer for PVP geometry bytes.
 	// Indices are bound through SDL's hardware index-buffer path, not as shader storage.
-	vert_shader, _ := load_shader("assets/shaders/Mesh.vert.dxil", 0, 2, 1, 0)
-	frag_shader, _ := load_shader("assets/shaders/SolidColor.frag.dxil", 0, 0, 0, 0)
+	vert_shader, _ := gfx_load_shader("assets/shaders/Mesh.vert.dxil", 0, 2, 1, 0)
+	frag_shader, _ := gfx_load_shader("assets/shaders/SolidColor.frag.dxil", 0, 0, 0, 0)
 
 	// new shaders for terrain rendering, will be the primary rendering pipeline for terrain geometry
-	terrain_vert_shader, _ := load_shader("assets/shaders/Terrain.vert.dxil", 0, 2, 1, 0)
-	terrain_frag_shader, _ := load_shader("assets/shaders/Terrain.frag.dxil", 0, 0, 0, 0)
+	terrain_vert_shader, _ := gfx_load_shader("assets/shaders/Terrain.vert.dxil", 0, 2, 1, 0)
+	terrain_frag_shader, _ := gfx_load_shader("assets/shaders/Terrain.frag.dxil", 0, 0, 0, 0)
 
 	// Create the pipelines
 	gfx_create_pipelines_fill_and_line(
@@ -3389,7 +3465,11 @@ process_events :: proc() {
 
 				if event.key.scancode == sdl.Scancode.I && !event.key.repeat {
 					log.debugf(
-						"Debug info: chunks_total=%d, chunks_without_geometry=%d, chunks_frustum_culled=%d, chunks_drawn=%d, terrain_faces_drawn=%d, terrain_indices_drawn=%d, chunks_generated=%d, chunk_mesh_jobs_submitted=%d, chunk_mesh_results_committed=%d, chunk_mesh_results_uploaded=%d, chunks_dirty_remaining=%d",
+						"Debug info: streaming_center=(%d,%d,%d), streaming_targets=%d, chunks_total=%d, chunks_without_geometry=%d, chunks_frustum_culled=%d, chunks_drawn=%d, terrain_faces_drawn=%d, terrain_indices_drawn=%d, chunks_generated=%d, chunks_evicted=%d, chunk_mesh_jobs_submitted=%d, chunk_mesh_results_committed=%d, chunk_mesh_results_uploaded=%d, chunks_dirty_remaining=%d",
+						state.streaming_center_coord.x,
+						state.streaming_center_coord.y,
+						state.streaming_center_coord.z,
+						state.streaming_target_count,
 						state.prev_chunks_total,
 						state.prev_chunks_without_geometry,
 						state.prev_chunks_frustum_culled,
@@ -3397,6 +3477,7 @@ process_events :: proc() {
 						state.prev_terrain_faces_drawn,
 						state.prev_terrain_indices_drawn,
 						state.prev_chunks_generated,
+						state.prev_chunks_evicted,
 						state.prev_chunk_mesh_jobs_submitted,
 						state.prev_chunk_mesh_results_committed,
 						state.prev_chunk_mesh_results_uploaded,
@@ -3467,64 +3548,6 @@ handle_input :: proc(dt: f32) {
 	if state.auto_move_on {
 		state.camera.position += state.camera.forward * velocity
 	}
-}
-
-load_shader :: proc(
-	filename: string,
-	sampler_count: u32,
-	uniform_buffer_count: u32,
-	storage_buffer_count: u32,
-	storage_texture_count: u32,
-) -> (
-	^sdl.GPUShader,
-	ShaderType,
-) {
-	log.debugf("Loading shader: %s", filename)
-
-	shader_type: ShaderType
-	if strings.contains(
-		filename,
-		".vert.dxil",
-	) {shader_type = ShaderType.Vertex} else if strings.contains(filename, ".frag.dxil") {shader_type = ShaderType.Fragment} else {
-		log.assertf(false, "Unknown shader type: %s", filename)
-	}
-
-	temp := mem.begin_arena_temp_memory(&state.transient_arena)
-	defer mem.end_arena_temp_memory(temp)
-
-	code, err := os.read_entire_file_from_path(filename, state.transient_allocator)
-	log.assertf(err == nil, "Failed to read shader: %s", err)
-	log.assertf(len(code) > 0, "Shader file is empty: %s", filename)
-
-	code_size: uint = len(code)
-	code_data := ([^]sdl.Uint8)(raw_data(code))
-
-	stage: sdl.GPUShaderStage
-	if shader_type == ShaderType.Fragment {
-		stage = sdl.GPUShaderStage.FRAGMENT
-	} else if shader_type == ShaderType.Vertex {
-		stage = sdl.GPUShaderStage.VERTEX
-	} else {
-		log.assertf(false, "Unknown shader type: %s", filename)
-	}
-
-	shader_info := sdl.GPUShaderCreateInfo {
-		code                 = code_data,
-		code_size            = code_size,
-		entrypoint           = "main",
-		format               = {.DXIL},
-		stage                = stage,
-		num_samplers         = sampler_count,
-		num_uniform_buffers  = uniform_buffer_count,
-		num_storage_buffers  = storage_buffer_count,
-		num_storage_textures = storage_texture_count,
-	}
-	shader := sdl.CreateGPUShader(state.device, shader_info)
-	log.assertf(shader != nil, "Failed to create shader: %s", sdl.GetError())
-
-	log.debugf("Shader %s created: %s", shader_type, filename)
-
-	return shader, shader_type
 }
 
 //////////////////////////////////////
