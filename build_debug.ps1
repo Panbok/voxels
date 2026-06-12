@@ -60,7 +60,7 @@ if (Test-Path $ShaderSourceDir) {
 		}
 }
 
-odin build $SourceDir -out:$ExePath -pdb-name:$PdbPath -debug -vet -warnings-as-errors
+odin build $SourceDir -out:$ExePath -pdb-name:$PdbPath -debug -vet -warnings-as-errors -define:EAGER_STARTUP_GRID=false
 if ($LASTEXITCODE -ne 0) {
 	exit $LASTEXITCODE
 }
