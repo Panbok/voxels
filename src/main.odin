@@ -8,6 +8,7 @@ import "core:log"
 import math "core:math"
 import la "core:math/linalg"
 import "core:mem"
+import mem_tlsf "core:mem/tlsf"
 import "core:os"
 import "core:strings"
 import "core:thread"
@@ -27,6 +28,7 @@ DEFAULT_ACCELERATION :: f32(1.5)
 MAX_ACCELERATION :: f32(20.0)
 MOUSE_SENSITIVITY :: f32(0.0025)
 CAMERA_TERRAIN_CLEARANCE :: f32(18.05)
+AUTO_MOVE_STRESS_TEST :: #config(AUTO_MOVE_STRESS_TEST, false)
 
 //////////////////////////////////////
 // State
@@ -34,12 +36,17 @@ CAMERA_TERRAIN_CLEARANCE :: f32(18.05)
 
 Memory :: struct {
 	// Main
-	persistent_slab:              [128 * mem.Megabyte]u8,
+	persistent_slab:              [64 * mem.Megabyte]u8,
 	transient_slab:               [16 * mem.Megabyte]u8,
 	persistent_arena:             mem.Arena,
 	transient_arena:              mem.Arena,
 	persistent_allocator:         mem.Allocator,
 	transient_allocator:          mem.Allocator,
+
+	// Chunk Block Storage Memory
+	chunk_block_storage_buffer:   []u8,
+	chunk_block_storage_tlsf:     mem_tlsf.Allocator,
+	chunk_block_storage_allocator: mem.Allocator,
 
 	// Workers (Chunk Mesh)
 	chunk_mesh_worker_arena_pool: ArenaPool,
@@ -146,8 +153,8 @@ state := struct {
 	startup_target_count = STARTUP_CHUNK_COUNT,
 	next_startup_target_index = 0,
 	next_mesh_scan_index = 0,
-	auto_move_on = false,
-	sprint_on = false,
+	auto_move_on = AUTO_MOVE_STRESS_TEST,
+	sprint_on = AUTO_MOVE_STRESS_TEST,
 	debug_mode = true,
 	enable_vsync = true,
 	is_window_open = true,
@@ -191,6 +198,31 @@ arena_pool_reset :: proc(pool: ArenaPool) {
 	for idx in 0 ..< len(pool.elements) {
 		mem.arena_free_all(&pool.elements[idx].arena)
 	}
+}
+
+memory_init :: proc() {
+	mem.arena_init(&state.persistent_arena, state.persistent_slab[:])
+	mem.arena_init(&state.transient_arena, state.transient_slab[:])
+
+	state.transient_allocator = mem.arena_allocator(&state.transient_arena)
+	state.persistent_allocator = mem.arena_allocator(&state.persistent_arena)
+
+	buffer, buffer_err := mem.make_aligned(
+		[]u8,
+		CHUNK_BLOCK_STORAGE_POOL_BYTES,
+		mem_tlsf.ALIGN_SIZE,
+		state.persistent_allocator,
+	)
+	log.assertf(buffer_err == nil, "chunk block storage backing allocation failed: %v", buffer_err)
+	state.chunk_block_storage_buffer = buffer
+
+	tlsf_err := mem_tlsf.init(&state.chunk_block_storage_tlsf, state.chunk_block_storage_buffer)
+	log.assertf(
+		tlsf_err == .None,
+		"chunk block storage TLSF init failed: %v",
+		tlsf_err,
+	)
+	state.chunk_block_storage_allocator = mem_tlsf.allocator(&state.chunk_block_storage_tlsf)
 }
 
 ///////////////////////////////////////////
@@ -396,6 +428,7 @@ EAGER_STARTUP_GRID :: #config(EAGER_STARTUP_GRID, false)
 
 CHUNK_MESH_WORKER_COUNT :: 4
 CHUNK_MESH_WORKER_ARENA_BYTES :: 8 * mem.Megabyte // or larger if current chunks assert
+CHUNK_BLOCK_STORAGE_POOL_BYTES :: 24 * mem.Megabyte
 
 CHUNK_GENERATION_BUDGET_PER_FRAME :: 1
 CHUNK_MESH_BUDGET_PER_FRAME :: 2
@@ -1004,6 +1037,7 @@ chunk_store_init :: proc(capacity: u32) {
 
 chunk_store_clear :: proc() {
 	for i in 0 ..< state.chunk_store.chunk_count {
+		chunk_store_release_chunk_resources(&state.chunk_store.chunks[i])
 		state.chunk_store.chunks[i] = {}
 	}
 	state.chunk_store.chunk_count = 0
@@ -1024,6 +1058,36 @@ chunk_store_append :: proc(chunk: Chunk) {
 
 	state.chunk_store.chunks[state.chunk_store.chunk_count] = chunk
 	state.chunk_store.chunk_count += 1
+}
+
+chunk_store_release_chunk_resources :: proc(chunk: ^Chunk) {
+	if chunk.geometry_id != INVALID_GEOMETRY_ID {
+		geometry_release(&state.geometry_pool, chunk.geometry_id)
+		chunk.geometry_id = INVALID_GEOMETRY_ID
+	}
+
+	chunk_block_storage_release(&chunk.block_storage)
+	chunk.generation_state = .Missing
+	chunk.mesh_state = .Missing
+	chunk.dirty_flags = {}
+}
+
+chunk_store_remove_at :: proc(index: u32) {
+	log.assertf(index < state.chunk_store.chunk_count, "chunk remove index out of bounds: %d", index)
+
+	chunk_store_release_chunk_resources(&state.chunk_store.chunks[index])
+
+	last_index := state.chunk_store.chunk_count - 1
+	if index != last_index {
+		state.chunk_store.chunks[index] = state.chunk_store.chunks[last_index]
+	}
+
+	state.chunk_store.chunks[last_index] = {}
+	state.chunk_store.chunk_count -= 1
+
+	if state.chunk_store.chunk_count == 0 || state.next_mesh_scan_index >= state.chunk_store.chunk_count {
+		state.next_mesh_scan_index = 0
+	}
 }
 
 chunk_store_find_index_by_coord :: proc(coord: ChunkCoord) -> Maybe(u32) {
@@ -1083,7 +1147,7 @@ chunk_store_commit_mesh_results :: proc(
 			stats.chunks_uploaded += 1
 		}
 
-		chunk.geometry_id = geometry_append_chunk_mesh_output(&state.geometry_pool, result.output)
+		chunk.geometry_id = geometry_replace(&state.geometry_pool, chunk.geometry_id, result.output)
 		chunk.mesh_state = .Ready
 		chunk.mesh_version = job.snapshot.block_version
 		chunk.dirty_flags = {}
@@ -1226,7 +1290,17 @@ chunk_block_storage_alloc_with_allocator :: proc(allocator: mem.Allocator) -> Ch
 }
 
 chunk_block_storage_alloc_for_store :: proc() -> ChunkBlockStorage {
-	return chunk_block_storage_alloc(state.persistent_allocator)
+	return chunk_block_storage_alloc(state.chunk_block_storage_allocator)
+}
+
+chunk_block_storage_release :: proc(storage: ^ChunkBlockStorage) {
+	if len(storage.voxel_view.blocks) == 0 {
+		return
+	}
+
+	err := delete(storage.voxel_view.blocks, state.chunk_block_storage_allocator)
+	log.assertf(err == nil, "chunk block storage release failed: %v", err)
+	storage^ = {}
 }
 
 chunk_snapshot_from_chunk :: proc(chunk: ^Chunk) -> ChunkSnapshot {
@@ -1358,7 +1432,7 @@ chunk_work_generate_budgeted :: proc() -> u32 {
 		generation_job := ChunkGenerationJob {
 			coord            = coord,
 			seed             = 0,
-			output_allocator = state.persistent_allocator,
+			output_allocator = state.chunk_block_storage_allocator,
 		}
 		generation_result := chunk_generation_job_execute_sync(generation_job)
 		log.assertf(generation_result.coord == coord, "Chunk generation job result coord mismatch")
@@ -1496,6 +1570,22 @@ chunk_streaming_target_contains :: proc(coord: ChunkCoord) -> bool {
 	return false
 }
 
+chunk_streaming_evict_outside_targets :: proc() -> u32 {
+	evicted_count: u32
+	for i := u32(0); i < state.chunk_store.chunk_count; {
+		chunk := chunk_store_get_by_index(i)
+		if chunk_streaming_target_contains(chunk.coord) {
+			i += 1
+			continue
+		}
+
+		chunk_store_mark_generated_neighbors_boundary_dirty(chunk.coord)
+		chunk_store_remove_at(i)
+		evicted_count += 1
+	}
+	return evicted_count
+}
+
 chunk_store_coord_is_generated :: proc(coord: ChunkCoord) -> bool {
 	index, ok := chunk_store_find_index_by_coord(coord).?
 	if !ok {
@@ -1555,6 +1645,7 @@ chunk_streaming_window_rebuild_targets :: proc(center: ChunkCoord) {
 	}
 
 	state.next_streaming_target_index = 0
+	chunk_streaming_evict_outside_targets()
 }
 
 when ODIN_DEBUG {
@@ -2266,6 +2357,10 @@ GEOMETRY_MAX_VERTEX_UPLOAD_BYTES ::
 	GEOMETRY_MAX_UPLOAD_POSITION_COLOR_VERTICES * size_of(PositionColorVertex)
 GEOMETRY_MAX_UPLOAD_INDEX_ELEMENTS :: 196_608
 GEOMETRY_VERTEX_BYTE_ALIGNMENT :: 4
+GEOMETRY_ID_SLOT_BITS :: 16
+GEOMETRY_ID_SLOT_MASK :: u32((1 << GEOMETRY_ID_SLOT_BITS) - 1)
+GEOMETRY_ID_GENERATION_MASK :: u32(0xFFFF)
+#assert(GEOMETRY_MAX_GEOMETRIES < 65535)
 
 GeometryID :: distinct u32
 
@@ -2284,11 +2379,19 @@ PositionColorVertex :: struct {
 
 Geometry :: struct {
 	layout_kind:         GeometryLayoutKind,
+	vertex_allocation:   []byte,
+	index_allocation:    []byte,
 	vertex_byte_offset:  u32,
 	vertex_stride_bytes: u32,
 	vertex_count:        u32,
 	first_index:         u32,
 	index_count:         u32,
+}
+
+GeometrySlot :: struct {
+	geometry:   Geometry,
+	generation: u32,
+	occupied:   bool,
 }
 
 GeometryDrawParams :: struct {
@@ -2298,8 +2401,12 @@ GeometryDrawParams :: struct {
 }
 
 GeometryPool :: struct {
-	geometries:                  []Geometry,
+	geometry_slots:              []GeometrySlot,
 	geometry_count:              u32,
+	vertex_range_tlsf:           mem_tlsf.Allocator,
+	index_range_tlsf:            mem_tlsf.Allocator,
+	vertex_range_allocator:      mem.Allocator,
+	index_range_allocator:       mem.Allocator,
 	vertex_buffer:               ^sdl.GPUBuffer,
 	index_buffer:                ^sdl.GPUBuffer,
 	vertex_upload_buffer:        ^sdl.GPUTransferBuffer,
@@ -2322,11 +2429,6 @@ geometry_layout_stride_bytes :: proc(layout_kind: GeometryLayoutKind) -> u32 {
 		log.assertf(false, "unknown layout kind: %v", layout_kind)
 	}
 	return 0
-}
-
-geometry_align_vertex_byte_offset :: proc(offset: u64) -> u64 {
-	alignment := u64(GEOMETRY_VERTEX_BYTE_ALIGNMENT)
-	return (offset + alignment - 1) & ~(alignment - 1)
 }
 
 geometry_init :: proc(
@@ -2378,13 +2480,13 @@ geometry_init :: proc(
 		"max_upload_index_elements must fit inside max_index_elements",
 	)
 
-	index_buffer_size_wide := u64(max_indices_elements) * u64(size_of(u32))
 	index_upload_size_wide := u64(max_upload_indices_elements) * u64(size_of(u32))
+	index_range_size_wide := u64(max_indices_elements) * u64(size_of(u32))
 
 	log.assertf(
-		index_buffer_size_wide <= u64(max(u32)),
+		index_range_size_wide <= u64(max(int)),
 		"index buffer size exceeds u32: %d",
-		index_buffer_size_wide,
+		index_range_size_wide,
 	)
 	log.assertf(
 		index_upload_size_wide <= u64(max(u32)),
@@ -2392,15 +2494,50 @@ geometry_init :: proc(
 		index_upload_size_wide,
 	)
 
-	vertex_buffer_size := max_vertices_bytes
+	pool^ = GeometryPool{}
+	pool.geometry_slots = make([]GeometrySlot, max_geometries)
+	for idx in 0 ..< len(pool.geometry_slots) {
+		pool.geometry_slots[idx].generation = 1
+	}
+
+	tlsf_err := mem_tlsf.init(
+		&pool.vertex_range_tlsf,
+		runtime.default_allocator(),
+		int(max_vertices_bytes),
+		0,
+	)
+	log.assertf(tlsf_err == .None, "vertex range TLSF init failed: %v", tlsf_err)
+	tlsf_err = mem_tlsf.init(
+		&pool.index_range_tlsf,
+		runtime.default_allocator(),
+		int(index_range_size_wide),
+		0,
+	)
+	log.assertf(tlsf_err == .None, "index range TLSF init failed: %v", tlsf_err)
+
+	pool.vertex_range_allocator = mem_tlsf.allocator(&pool.vertex_range_tlsf)
+	pool.index_range_allocator = mem_tlsf.allocator(&pool.index_range_tlsf)
+
+	vertex_buffer_size_wide := u64(len(pool.vertex_range_tlsf.pool.data))
+	index_buffer_size_wide := u64(len(pool.index_range_tlsf.pool.data))
+	log.assertf(
+		vertex_buffer_size_wide <= u64(max(u32)),
+		"vertex buffer size exceeds u32: %d",
+		vertex_buffer_size_wide,
+	)
+	log.assertf(
+		index_buffer_size_wide <= u64(max(u32)),
+		"index buffer size exceeds u32: %d",
+		index_buffer_size_wide,
+	)
+
+	vertex_buffer_size := u32(vertex_buffer_size_wide)
 	index_buffer_size := u32(index_buffer_size_wide)
 	vertex_upload_size := max_upload_vertices_bytes
 	index_upload_size := u32(index_upload_size_wide)
 
-	pool^ = GeometryPool{}
-	pool.geometries = make([]Geometry, max_geometries)
-	pool.vertex_byte_capacity = max_vertices_bytes
-	pool.index_element_capacity = max_indices_elements
+	pool.vertex_byte_capacity = vertex_buffer_size
+	pool.index_element_capacity = index_buffer_size / u32(size_of(u32))
 	pool.vertex_upload_byte_capacity = vertex_upload_size
 	pool.index_upload_byte_capacity = index_upload_size
 
@@ -2477,6 +2614,10 @@ geometry_destroy :: proc(pool: ^GeometryPool) {
 		sdl.ReleaseGPUBuffer(state.device, pool.index_buffer)
 	}
 
+	mem_tlsf.destroy(&pool.vertex_range_tlsf)
+	mem_tlsf.destroy(&pool.index_range_tlsf)
+
+	pool.geometry_slots = nil
 	pool.geometry_count = 0
 	pool.vertex_byte_capacity = 0
 	pool.vertex_byte_count = 0
@@ -2486,125 +2627,205 @@ geometry_destroy :: proc(pool: ^GeometryPool) {
 	pool.index_upload_byte_capacity = 0
 }
 
-geometry_append_bytes :: proc(
+geometry_id_from_slot :: proc(slot_index, generation: u32) -> GeometryID {
+	log.assertf(slot_index < GEOMETRY_ID_SLOT_MASK, "geometry slot index exceeds ID range: %d", slot_index)
+	log.assertf(generation > 0 && generation <= GEOMETRY_ID_GENERATION_MASK, "invalid geometry generation: %d", generation)
+	return GeometryID((generation << GEOMETRY_ID_SLOT_BITS) | (slot_index + 1))
+}
+
+geometry_id_slot_index :: proc(id: GeometryID) -> u32 {
+	slot_number := u32(id) & GEOMETRY_ID_SLOT_MASK
+	log.assertf(slot_number > 0, "Invalid geometry ID: %d", u32(id))
+	return slot_number - 1
+}
+
+geometry_id_generation :: proc(id: GeometryID) -> u32 {
+	return u32(id) >> GEOMETRY_ID_SLOT_BITS
+}
+
+geometry_slot_generation_advance :: proc(slot: ^GeometrySlot) {
+	slot.generation = (slot.generation + 1) & GEOMETRY_ID_GENERATION_MASK
+	if slot.generation == 0 {
+		slot.generation = 1
+	}
+}
+
+geometry_slot_get :: proc(pool: ^GeometryPool, id: GeometryID) -> ^GeometrySlot {
+	log.assertf(id != INVALID_GEOMETRY_ID, "Invalid geometry ID: %d", u32(id))
+
+	slot_index := geometry_id_slot_index(id)
+	log.assertf(slot_index < u32(len(pool.geometry_slots)), "Geometry ID out of bounds: %d", u32(id))
+
+	slot := &pool.geometry_slots[slot_index]
+	log.assertf(slot.occupied, "Geometry ID refers to a free slot: %d", u32(id))
+	log.assertf(
+		slot.generation == geometry_id_generation(id),
+		"Geometry ID generation mismatch: id=%d slot_generation=%d",
+		geometry_id_generation(id),
+		slot.generation,
+	)
+	return slot
+}
+
+geometry_find_free_slot :: proc(pool: ^GeometryPool) -> (slot_index: u32, ok: bool) {
+	for idx in 0 ..< len(pool.geometry_slots) {
+		if !pool.geometry_slots[idx].occupied {
+			return u32(idx), true
+		}
+	}
+	return 0, false
+}
+
+geometry_range_byte_offset :: proc(range, backing: []byte) -> u32 {
+	log.assertf(len(range) > 0, "geometry range must not be empty")
+	range_start := uintptr(raw_data(range))
+	backing_start := uintptr(raw_data(backing))
+	log.assertf(range_start >= backing_start, "geometry range starts before backing storage")
+
+	offset_wide := u64(range_start - backing_start)
+	end_wide := offset_wide + u64(len(range))
+	log.assertf(end_wide <= u64(len(backing)), "geometry range exceeds backing storage")
+	log.assertf(offset_wide <= u64(max(u32)), "geometry range offset exceeds u32: %d", offset_wide)
+	return u32(offset_wide)
+}
+
+geometry_alloc :: proc(
 	pool: ^GeometryPool,
 	layout_kind: GeometryLayoutKind,
-	vertex_data: rawptr,
 	vertex_byte_count: u32,
 	vertex_count: u32,
 	vertex_stride_bytes: u32,
-	indices: []u32,
+	index_count: u32,
 ) -> GeometryID {
-	log.assertf(vertex_data != nil, "vertex_data must not be nil")
+	log.assertf(pool != nil, "pool is nil")
 	log.assertf(layout_kind != .Invalid, "layout_kind must be valid")
+	log.assertf(vertex_byte_count > 0, "vertex_byte_count must not be zero")
 	log.assertf(vertex_count > 0, "vertex_count must not be zero")
 	log.assertf(vertex_stride_bytes > 0, "vertex_stride_bytes must not be zero")
+	log.assertf(index_count > 0, "index_count must not be zero")
 	log.assertf(
 		vertex_stride_bytes % GEOMETRY_VERTEX_BYTE_ALIGNMENT == 0,
 		"vertex_stride_bytes must be aligned to %d bytes",
 		GEOMETRY_VERTEX_BYTE_ALIGNMENT,
 	)
-	log.assertf(len(indices) > 0, "indices must not be empty")
-	log.assertf(u64(len(indices)) <= u64(max(u32)), "index count exceeds u32: %d", len(indices))
-	log.assertf(u64(pool.geometry_count) < u64(len(pool.geometries)), "geometry pool is full")
 	log.assertf(
 		geometry_layout_stride_bytes(layout_kind) == vertex_stride_bytes,
 		"vertex_stride_bytes must match layout kind",
 	)
 
-	index_count := u32(len(indices))
+	index_bytes_wide := u64(index_count) * u64(size_of(u32))
+	log.assertf(index_bytes_wide <= u64(max(int)), "index allocation size exceeds int: %d", index_bytes_wide)
 
-	when ODIN_DEBUG {
-		for vertex_index, index_index in indices {
-			log.assertf(
-				vertex_index < vertex_count,
-				"geometry index out of range: indices[%d]=%d vertex_count=%d",
-				index_index,
-				vertex_index,
-				vertex_count,
-			)
-		}
+	vertex_allocation, vertex_err := mem.alloc_bytes_non_zeroed(
+		int(vertex_byte_count),
+		GEOMETRY_VERTEX_BYTE_ALIGNMENT,
+		pool.vertex_range_allocator,
+	)
+	log.assertf(vertex_err == nil, "geometry vertex range allocation failed: %v", vertex_err)
+
+	index_allocation, index_err := mem.alloc_bytes_non_zeroed(
+		int(index_bytes_wide),
+		align_of(u32),
+		pool.index_range_allocator,
+	)
+	if index_err != nil {
+		free_err := mem.free_bytes(vertex_allocation, pool.vertex_range_allocator)
+		log.assertf(free_err == nil, "geometry vertex range rollback failed: %v", free_err)
+		log.assertf(false, "geometry index range allocation failed: %v", index_err)
 	}
 
-	vertex_bytes_wide := u64(vertex_count) * u64(vertex_stride_bytes)
-	index_bytes_wide := u64(index_count) * u64(size_of(u32))
-	log.assertf(
-		vertex_bytes_wide <= u64(max(u32)),
-		"vertex append size exceeds u32: %d",
-		vertex_bytes_wide,
-	)
-	log.assertf(
-		index_bytes_wide <= u64(max(u32)),
-		"index append size exceeds u32: %d",
-		index_bytes_wide,
-	)
-	log.assertf(
-		vertex_bytes_wide == u64(vertex_byte_count),
-		"vertex_byte_count must match vertex_count and vertex_stride_bytes",
-	)
+	slot_index, slot_ok := geometry_find_free_slot(pool)
+	if !slot_ok {
+		vertex_free_err := mem.free_bytes(vertex_allocation, pool.vertex_range_allocator)
+		index_free_err := mem.free_bytes(index_allocation, pool.index_range_allocator)
+		log.assertf(vertex_free_err == nil, "geometry vertex range rollback failed: %v", vertex_free_err)
+		log.assertf(index_free_err == nil, "geometry index range rollback failed: %v", index_free_err)
+		log.assertf(false, "geometry pool is full")
+	}
 
-	vertex_bytes := u32(vertex_bytes_wide)
+	vertex_byte_offset := geometry_range_byte_offset(vertex_allocation, pool.vertex_range_tlsf.pool.data)
+	index_byte_offset := geometry_range_byte_offset(index_allocation, pool.index_range_tlsf.pool.data)
+	log.assertf(index_byte_offset % u32(size_of(u32)) == 0, "index range offset must be u32-aligned")
+
+	slot := &pool.geometry_slots[slot_index]
+	id := geometry_id_from_slot(slot_index, slot.generation)
+	slot.geometry = Geometry {
+		layout_kind         = layout_kind,
+		vertex_allocation   = vertex_allocation,
+		index_allocation    = index_allocation,
+		vertex_byte_offset  = vertex_byte_offset,
+		vertex_stride_bytes = vertex_stride_bytes,
+		vertex_count        = vertex_count,
+		first_index         = index_byte_offset / u32(size_of(u32)),
+		index_count         = index_count,
+	}
+	slot.occupied = true
+
+	pool.geometry_count += 1
+	pool.vertex_byte_count += vertex_byte_count
+	pool.index_element_count += index_count
+
+	return id
+}
+
+geometry_release :: proc(pool: ^GeometryPool, id: GeometryID) {
+	if id == INVALID_GEOMETRY_ID {
+		return
+	}
+
+	slot := geometry_slot_get(pool, id)
+	geometry := slot.geometry
+
+	if state.device != nil {
+		log.assertf(sdl.WaitForGPUIdle(state.device), "WaitForGPUIdle before geometry release failed: %s", sdl.GetError())
+	}
+
+	vertex_free_err := mem.free_bytes(geometry.vertex_allocation, pool.vertex_range_allocator)
+	index_free_err := mem.free_bytes(geometry.index_allocation, pool.index_range_allocator)
+	log.assertf(vertex_free_err == nil, "geometry vertex range release failed: %v", vertex_free_err)
+	log.assertf(index_free_err == nil, "geometry index range release failed: %v", index_free_err)
+	log.assertf(pool.vertex_byte_count >= u32(len(geometry.vertex_allocation)), "geometry vertex byte count underflow")
+	log.assertf(pool.index_element_count >= geometry.index_count, "geometry index count underflow")
+	log.assertf(pool.geometry_count > 0, "geometry count underflow")
+
+	pool.vertex_byte_count -= u32(len(geometry.vertex_allocation))
+	pool.index_element_count -= geometry.index_count
+	pool.geometry_count -= 1
+
+	slot.geometry = {}
+	slot.occupied = false
+	geometry_slot_generation_advance(slot)
+}
+
+geometry_upload_bytes :: proc(
+	pool: ^GeometryPool,
+	id: GeometryID,
+	vertex_data: rawptr,
+	vertex_byte_count: u32,
+	indices: []u32,
+) {
+	geometry := geometry_get(pool, id)
+
+	index_count := u32(len(indices))
+	index_bytes_wide := u64(index_count) * u64(size_of(u32))
+	log.assertf(index_bytes_wide <= u64(max(u32)), "index upload size exceeds u32: %d", index_bytes_wide)
 	index_bytes := u32(index_bytes_wide)
 
-	vertex_byte_offset_wide := geometry_align_vertex_byte_offset(u64(pool.vertex_byte_count))
-	vertex_byte_end_wide := vertex_byte_offset_wide + u64(vertex_byte_count)
-	index_element_end_wide := u64(pool.index_element_count) + u64(index_count)
+	log.assertf(vertex_byte_count == u32(len(geometry.vertex_allocation)), "vertex upload size mismatch")
+	log.assertf(index_bytes == u32(len(geometry.index_allocation)), "index upload size mismatch")
+	log.assertf(vertex_byte_count <= pool.vertex_upload_byte_capacity, "geometry vertex append exceeds upload buffer capacity")
+	log.assertf(index_bytes <= pool.index_upload_byte_capacity, "geometry index append exceeds upload buffer capacity")
 
-	log.assertf(
-		vertex_byte_offset_wide <= u64(max(u32)),
-		"vertex destination offset exceeds u32: %d",
-		vertex_byte_offset_wide,
-	)
-	log.assertf(
-		vertex_byte_end_wide <= u64(pool.vertex_byte_capacity),
-		"geometry vertex capacity exceeded",
-	)
-	log.assertf(
-		index_element_end_wide <= u64(pool.index_element_capacity),
-		"geometry index capacity exceeded",
-	)
-	log.assertf(
-		vertex_bytes <= pool.vertex_upload_byte_capacity,
-		"geometry vertex append exceeds upload buffer capacity",
-	)
-	log.assertf(
-		index_bytes <= pool.index_upload_byte_capacity,
-		"geometry index append exceeds upload buffer capacity",
-	)
-
-	geometry := Geometry {
-		layout_kind         = layout_kind,
-		vertex_count        = vertex_count,
-		index_count         = index_count,
-		vertex_byte_offset  = u32(vertex_byte_offset_wide),
-		vertex_stride_bytes = vertex_stride_bytes,
-		first_index         = pool.index_element_count,
-	}
-
-	geometry_index := pool.geometry_count
-	id := GeometryID(geometry_index + 1)
-
-	vertex_dst_offset_wide := u64(geometry.vertex_byte_offset)
+	vertex_dst_offset := geometry.vertex_byte_offset
 	index_dst_offset_wide := u64(geometry.first_index) * u64(size_of(u32))
-	log.assertf(
-		vertex_dst_offset_wide <= u64(max(u32)),
-		"vertex destination offset exceeds u32: %d",
-		vertex_dst_offset_wide,
-	)
-	log.assertf(
-		index_dst_offset_wide <= u64(max(u32)),
-		"index destination offset exceeds u32: %d",
-		index_dst_offset_wide,
-	)
-
-	vertex_dst_offset := u32(vertex_dst_offset_wide)
+	log.assertf(index_dst_offset_wide <= u64(max(u32)), "index destination offset exceeds u32: %d", index_dst_offset_wide)
 	index_dst_offset := u32(index_dst_offset_wide)
 
 	// Upload command buffers execute asynchronously; cycle the reused staging buffer
 	// so a later chunk upload cannot overwrite source bytes still in flight.
 	mapped_data := sdl.MapGPUTransferBuffer(state.device, pool.vertex_upload_buffer, true)
 	log.assertf(mapped_data != nil, "MapGPUTransferBuffer vertex failed: %s", sdl.GetError())
-	mem.copy(mapped_data, vertex_data, int(vertex_bytes))
+	mem.copy(mapped_data, vertex_data, int(vertex_byte_count))
 	sdl.UnmapGPUTransferBuffer(state.device, pool.vertex_upload_buffer)
 
 	mapped_data = sdl.MapGPUTransferBuffer(state.device, pool.index_upload_buffer, true)
@@ -2622,7 +2843,7 @@ geometry_append_bytes :: proc(
 		sdl.GPUBufferRegion {
 			buffer = pool.vertex_buffer,
 			offset = vertex_dst_offset,
-			size = vertex_bytes,
+			size = vertex_byte_count,
 		},
 		false,
 	)
@@ -2644,11 +2865,54 @@ geometry_append_bytes :: proc(
 		"SubmitGPUCommandBuffer failed: %s",
 		sdl.GetError(),
 	)
+}
 
-	pool.geometries[geometry_index] = geometry
-	pool.geometry_count += 1
-	pool.vertex_byte_count = geometry.vertex_byte_offset + vertex_byte_count
-	pool.index_element_count += index_count
+geometry_append_bytes :: proc(
+	pool: ^GeometryPool,
+	layout_kind: GeometryLayoutKind,
+	vertex_data: rawptr,
+	vertex_byte_count: u32,
+	vertex_count: u32,
+	vertex_stride_bytes: u32,
+	indices: []u32,
+) -> GeometryID {
+	log.assertf(vertex_data != nil, "vertex_data must not be nil")
+	log.assertf(len(indices) > 0, "indices must not be empty")
+	log.assertf(u64(len(indices)) <= u64(max(u32)), "index count exceeds u32: %d", len(indices))
+
+	index_count := u32(len(indices))
+	when ODIN_DEBUG {
+		for vertex_index, index_index in indices {
+			log.assertf(
+				vertex_index < vertex_count,
+				"geometry index out of range: indices[%d]=%d vertex_count=%d",
+				index_index,
+				vertex_index,
+				vertex_count,
+			)
+		}
+	}
+
+	vertex_bytes_wide := u64(vertex_count) * u64(vertex_stride_bytes)
+	log.assertf(
+		vertex_bytes_wide <= u64(max(u32)),
+		"vertex append size exceeds u32: %d",
+		vertex_bytes_wide,
+	)
+	log.assertf(
+		vertex_bytes_wide == u64(vertex_byte_count),
+		"vertex_byte_count must match vertex_count and vertex_stride_bytes",
+	)
+
+	id := geometry_alloc(
+		pool,
+		layout_kind,
+		vertex_byte_count,
+		vertex_count,
+		vertex_stride_bytes,
+		index_count,
+	)
+	geometry_upload_bytes(pool, id, vertex_data, vertex_byte_count, indices)
 
 	return id
 }
@@ -2726,11 +2990,19 @@ geometry_append_chunk_mesh_output :: proc(
 	)
 }
 
+geometry_replace :: proc(pool: ^GeometryPool, old_id: GeometryID, output: ChunkMeshOutput) -> GeometryID {
+	if output.face_count == 0 {
+		geometry_release(pool, old_id)
+		return INVALID_GEOMETRY_ID
+	}
+
+	new_id := geometry_append_chunk_mesh_output(pool, output)
+	geometry_release(pool, old_id)
+	return new_id
+}
+
 geometry_get :: proc(pool: ^GeometryPool, id: GeometryID) -> Geometry {
-	log.assertf(id != INVALID_GEOMETRY_ID, "Invalid geometry ID: %d", u32(id))
-	geometry_index := u32(id) - 1
-	log.assertf(geometry_index < pool.geometry_count, "Geometry ID out of bounds: %d", u32(id))
-	return pool.geometries[geometry_index]
+	return geometry_slot_get(pool, id).geometry
 }
 
 //////////////////////////////////////
@@ -2869,8 +3141,12 @@ gfx_render :: proc() {
 			sdl.GPUIndexElementSize._32BIT,
 		)
 
-		// todo: replace this prototype geometry scan with explicit debug/prototype draw ownership.
-		for geometry in state.geometry_pool.geometries[:int(state.geometry_pool.geometry_count)] {
+		for slot in state.geometry_pool.geometry_slots {
+			if !slot.occupied {
+				continue
+			}
+
+			geometry := slot.geometry
 			if geometry.layout_kind != .Position_Color_F32x4 {
 				continue
 			}
@@ -3153,7 +3429,7 @@ setup_resources :: proc() {
 				generation_job := ChunkGenerationJob {
 					coord            = coord,
 					seed             = 0,
-					output_allocator = state.persistent_allocator,
+					output_allocator = state.chunk_block_storage_allocator,
 				}
 
 				generation_result := chunk_generation_job_execute_sync(generation_job)
@@ -3435,11 +3711,7 @@ main :: proc() {
 	context.logger = log.create_console_logger(.Debug)
 	defer log.destroy_console_logger(context.logger)
 
-	mem.arena_init(&state.persistent_arena, state.persistent_slab[:])
-	mem.arena_init(&state.transient_arena, state.transient_slab[:])
-
-	state.transient_allocator = mem.arena_allocator(&state.transient_arena)
-	state.persistent_allocator = mem.arena_allocator(&state.persistent_arena)
+	memory_init()
 
 	context.allocator = state.persistent_allocator
 	context.temp_allocator = state.transient_allocator
