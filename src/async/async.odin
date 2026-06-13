@@ -30,7 +30,7 @@ MESH_RESULT_QUEUE_CAPACITY :: MESH_WORKER_COUNT
 // Types
 /////////////////////////////////////
 
-State :: struct {
+state := struct {
 	// Memory
 	allocator:          mem.Allocator,
 	generation_execute: GenerationExecuteProc,
@@ -72,9 +72,7 @@ State :: struct {
 	mesh_result_head:      u32,
 	mesh_result_tail:      u32,
 	mesh_result_count:     u32,
-}
-
-state: State
+}{}
 
 GenerationExecuteProc :: #type proc(job: ChunkGenerationJob) -> ChunkGenerationJobResult
 MeshExecuteProc :: #type proc(job: ChunkMeshJob, output_allocator: mem.Allocator) -> world.ChunkMeshOutput
