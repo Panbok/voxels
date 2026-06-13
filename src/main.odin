@@ -1,6 +1,8 @@
 package main
 
+import async "async"
 import sdl "vendor:sdl3"
+import world "world"
 
 import "base:runtime"
 import "core:c"
@@ -11,7 +13,6 @@ import "core:mem"
 import mem_tlsf "core:mem/tlsf"
 import "core:os"
 import "core:strings"
-import "core:thread"
 
 //////////////////////////////////////
 // Constants
@@ -29,6 +30,11 @@ MAX_ACCELERATION :: f32(20.0)
 MOUSE_SENSITIVITY :: f32(0.0025)
 CAMERA_TERRAIN_CLEARANCE :: f32(18.05)
 AUTO_MOVE_STRESS_TEST :: #config(AUTO_MOVE_STRESS_TEST, false)
+AUTO_TEST_FRAME_LIMIT :: #config(AUTO_TEST_FRAME_LIMIT, 0)
+AUTO_TEST_DURATION_MS :: #config(AUTO_TEST_DURATION_MS, 0)
+LOG_FRAME_METRICS :: #config(LOG_FRAME_METRICS, false)
+FRAME_METRICS_LOG_INTERVAL_MS :: #config(FRAME_METRICS_LOG_INTERVAL_MS, 1000)
+AUTO_TEST_DISABLE_VSYNC :: #config(AUTO_TEST_DISABLE_VSYNC, false)
 
 //////////////////////////////////////
 // State
@@ -36,20 +42,17 @@ AUTO_MOVE_STRESS_TEST :: #config(AUTO_MOVE_STRESS_TEST, false)
 
 Memory :: struct {
 	// Main
-	persistent_slab:              [64 * mem.Megabyte]u8,
-	transient_slab:               [16 * mem.Megabyte]u8,
-	persistent_arena:             mem.Arena,
-	transient_arena:              mem.Arena,
-	persistent_allocator:         mem.Allocator,
-	transient_allocator:          mem.Allocator,
+	persistent_slab:               [128 * mem.Megabyte]u8,
+	transient_slab:                [16 * mem.Megabyte]u8,
+	persistent_arena:              mem.Arena,
+	transient_arena:               mem.Arena,
+	persistent_allocator:          mem.Allocator,
+	transient_allocator:           mem.Allocator,
 
 	// Chunk Block Storage Memory
-	chunk_block_storage_buffer:   []u8,
-	chunk_block_storage_tlsf:     mem_tlsf.Allocator,
+	chunk_block_storage_buffer:    []u8,
+	chunk_block_storage_tlsf:      mem_tlsf.Allocator,
 	chunk_block_storage_allocator: mem.Allocator,
-
-	// Workers (Chunk Mesh)
-	chunk_mesh_worker_arena_pool: ArenaPool,
 }
 
 Graphics :: struct {
@@ -66,7 +69,24 @@ Graphics :: struct {
 }
 
 Metrics :: struct {
-	// Current frame stats
+	// General frame stats
+	frame_count:                       u64,
+	current_frame_ms:                  f32,
+	current_fps:                       f32,
+	auto_test_elapsed_ms:              f32,
+	frame_metrics_accum_ms:            f32,
+	frame_metrics_elapsed_ms:          f32,
+	frame_metrics_min_ms:              f32,
+	frame_metrics_max_ms:              f32,
+	frame_metrics_sample_count:        u32,
+	frame_metrics_chunks_generated:    u32,
+	frame_metrics_chunks_evicted:      u32,
+	frame_metrics_mesh_submitted:      u32,
+	frame_metrics_mesh_committed:      u32,
+	frame_metrics_mesh_uploaded:       u32,
+	frame_metrics_dirty_remaining_max: u32,
+
+	// World frame stats
 	chunks_total:                      u32,
 	chunks_without_geometry:           u32,
 	chunks_frustum_culled:             u32,
@@ -96,8 +116,8 @@ Metrics :: struct {
 }
 
 Streaming :: struct {
-	streaming_center_coord:      ChunkCoord,
-	streaming_targets:           [CHUNK_STREAMING_TARGET_CAPACITY]ChunkCoord,
+	streaming_center_coord:      world.ChunkCoord,
+	streaming_targets:           [CHUNK_STREAMING_TARGET_CAPACITY]world.ChunkCoord,
 	streaming_target_count:      u32,
 	next_streaming_target_index: u32,
 	next_mesh_scan_index:        u32,
@@ -158,7 +178,7 @@ state := struct {
 	auto_move_on = AUTO_MOVE_STRESS_TEST,
 	sprint_on = AUTO_MOVE_STRESS_TEST,
 	debug_mode = true,
-	enable_vsync = true,
+	enable_vsync = !AUTO_TEST_DISABLE_VSYNC,
 	is_window_open = true,
 	use_wireframe_mode = false,
 }
@@ -166,41 +186,6 @@ state := struct {
 //////////////////////////////////////
 // Memory
 /////////////////////////////////////
-
-ArenaPoolElement :: struct {
-	arena:     mem.Arena,
-	allocator: mem.Allocator,
-	buffer:    []u8,
-}
-
-ArenaPool :: struct {
-	elements: []ArenaPoolElement,
-}
-
-arena_pool_init :: proc(arena_count: u32, buffer_size: u32) -> ArenaPool {
-	pool := ArenaPool {
-		elements = make([]ArenaPoolElement, arena_count, state.persistent_allocator),
-	}
-
-	for idx in 0 ..< arena_count {
-		pool.elements[idx] = ArenaPoolElement {
-			arena     = mem.Arena{},
-			allocator = mem.Allocator{},
-			buffer    = make([]u8, buffer_size, state.persistent_allocator),
-		}
-
-		mem.arena_init(&pool.elements[idx].arena, pool.elements[idx].buffer)
-		pool.elements[idx].allocator = mem.arena_allocator(&pool.elements[idx].arena)
-	}
-
-	return pool
-}
-
-arena_pool_reset :: proc(pool: ArenaPool) {
-	for idx in 0 ..< len(pool.elements) {
-		mem.arena_free_all(&pool.elements[idx].arena)
-	}
-}
 
 memory_init :: proc() {
 	mem.arena_init(&state.persistent_arena, state.persistent_slab[:])
@@ -219,11 +204,7 @@ memory_init :: proc() {
 	state.chunk_block_storage_buffer = buffer
 
 	tlsf_err := mem_tlsf.init(&state.chunk_block_storage_tlsf, state.chunk_block_storage_buffer)
-	log.assertf(
-		tlsf_err == .None,
-		"chunk block storage TLSF init failed: %v",
-		tlsf_err,
-	)
+	log.assertf(tlsf_err == .None, "chunk block storage TLSF init failed: %v", tlsf_err)
 	state.chunk_block_storage_allocator = mem_tlsf.allocator(&state.chunk_block_storage_tlsf)
 }
 
@@ -334,7 +315,7 @@ frustum_test_aabb :: proc(frustum: Frustum, aabb: WorldAABB) -> bool {
 	return true
 }
 
-camera_move_above_block :: proc(camera: ^Camera, block: BlockCoord) {
+camera_move_above_block :: proc(camera: ^Camera, block: world.BlockCoord) {
 	camera.position[1] = world_y_from_block_top(block.y) + CAMERA_TERRAIN_CLEARANCE
 }
 
@@ -386,7 +367,7 @@ when ODIN_DEBUG {
 			"frustum check: expected right-side box to be culled",
 		)
 
-		aabb := chunk_world_get_aabb(ChunkCoord{1, 0, -1})
+		aabb := chunk_world_get_aabb(world.ChunkCoord{1, 0, -1})
 		log.assertf(
 			aabb.min == Vec3{32, 0, -32},
 			"chunk world AABB: min mismatch, got %v",
@@ -422,25 +403,22 @@ DEBUG_CHUNK_SOLID_Z1 :: 24
 #assert(DEBUG_CHUNK_SOLID_Y0 < DEBUG_CHUNK_SOLID_Y1 && DEBUG_CHUNK_SOLID_Y1 <= CHUNK_BLOCK_LENGTH)
 #assert(DEBUG_CHUNK_SOLID_Z0 < DEBUG_CHUNK_SOLID_Z1 && DEBUG_CHUNK_SOLID_Z1 <= CHUNK_BLOCK_LENGTH)
 
-STARTUP_CHUNK_GRID_X :: 5
-STARTUP_CHUNK_GRID_Z :: 5
+STARTUP_CHUNK_GRID_X :: 7
+STARTUP_CHUNK_GRID_Z :: 7
 STARTUP_CHUNK_COUNT :: STARTUP_CHUNK_GRID_X * STARTUP_CHUNK_GRID_Z
 EAGER_STARTUP_GRID :: #config(EAGER_STARTUP_GRID, false)
 #assert(STARTUP_CHUNK_COUNT > 0)
 
-CHUNK_MESH_WORKER_COUNT :: 4
-CHUNK_MESH_WORKER_ARENA_BYTES :: 8 * mem.Megabyte // or larger if current chunks assert
-CHUNK_BLOCK_STORAGE_POOL_BYTES :: 24 * mem.Megabyte
+CHUNK_BLOCK_STORAGE_POOL_BYTES :: 48 * mem.Megabyte
 
 CHUNK_GENERATION_BUDGET_PER_FRAME :: 1
 CHUNK_MESH_BUDGET_PER_FRAME :: 2
 
-CHUNK_STREAMING_RADIUS_XZ :: 2
+CHUNK_STREAMING_RADIUS_XZ :: 3
 CHUNK_UNLOAD_RADIUS_XZ :: CHUNK_STREAMING_RADIUS_XZ + 1
 CHUNK_STREAMING_TARGET_CAPACITY ::
 	(CHUNK_STREAMING_RADIUS_XZ * 2 + 1) * (CHUNK_STREAMING_RADIUS_XZ * 2 + 1)
-CHUNK_UNLOAD_CAPACITY ::
-	(CHUNK_UNLOAD_RADIUS_XZ * 2 + 1) * (CHUNK_UNLOAD_RADIUS_XZ * 2 + 1)
+CHUNK_UNLOAD_CAPACITY :: (CHUNK_UNLOAD_RADIUS_XZ * 2 + 1) * (CHUNK_UNLOAD_RADIUS_XZ * 2 + 1)
 #assert(CHUNK_UNLOAD_RADIUS_XZ >= CHUNK_STREAMING_RADIUS_XZ)
 
 // Until chunk/geometry eviction exists, store capacity must stay within the fixed arenas.
@@ -448,72 +426,8 @@ CHUNK_STORE_CAPACITY :: 128
 #assert(CHUNK_STREAMING_TARGET_CAPACITY > 0)
 #assert(CHUNK_STORE_CAPACITY >= CHUNK_UNLOAD_CAPACITY)
 
-VERIFY_CHUNK_MESH_WORKER_OUTPUTS :: #config(VERIFY_CHUNK_MESH_WORKER_OUTPUTS, false)
 LOG_CHUNK_MESH_COMMITS :: #config(LOG_CHUNK_MESH_COMMITS, false)
 
-BlockOccupancy :: enum u8 {
-	Empty,
-	Solid,
-}
-
-BlockMaterialID :: distinct u8
-
-ChunkMeshBoundaryPolicy :: enum {
-	Treat_Out_Of_Chunk_As_Empty,
-	Sample_Neighbor_Snapshots,
-}
-
-ChunkVoxelViewElement :: struct {
-	occupancy:   BlockOccupancy,
-	material_id: BlockMaterialID,
-}
-
-ChunkVoxelView :: struct {
-	blocks: #soa[]ChunkVoxelViewElement,
-}
-
-ChunkCoord :: struct {
-	x, y, z: i32,
-}
-
-BlockCoord :: struct {
-	x, y, z: i32,
-}
-
-ChunkSnapshot :: struct {
-	coord:         ChunkCoord,
-	voxel_view:    ChunkVoxelView,
-	block_version: u32,
-}
-
-ChunkMeshNeighborSnapshots :: struct {
-	plus_x, minus_x: Maybe(ChunkSnapshot),
-	plus_y, minus_y: Maybe(ChunkSnapshot),
-	plus_z, minus_z: Maybe(ChunkSnapshot),
-}
-
-ChunkGenerationJob :: struct {
-	coord:            ChunkCoord,
-	seed:             u32,
-	output_allocator: mem.Allocator,
-}
-
-ChunkGenerationJobResult :: struct {
-	coord:         ChunkCoord,
-	block_storage: ChunkBlockStorage,
-}
-
-ChunkMeshJob :: struct {
-	snapshot:         ChunkSnapshot,
-	neighbors:        ChunkMeshNeighborSnapshots,
-	boundary_policy:  ChunkMeshBoundaryPolicy,
-	output_allocator: mem.Allocator,
-}
-
-ChunkMeshJobResult :: struct {
-	coord:  ChunkCoord,
-	output: ChunkMeshOutput,
-}
 
 ChunkMeshBatchStats :: struct {
 	chunks_attempted: u32,
@@ -524,21 +438,19 @@ ChunkMeshBatchStats :: struct {
 	total_faces:      u32,
 }
 
-ChunkMeshWorkerContext :: struct {
-	worker_index: u32,
-	worker_count: u32,
-	jobs:         []ChunkMeshJob,
-	results:      []ChunkMeshJobResult,
+ChunkMeshFacePlan :: struct {
+	face_masks:   []u8,
+	face_offsets: []u32,
+	face_count:   u32,
+}
+
+ChunkMeshSnapshotRefSet :: struct {
+	coords: [7]world.ChunkCoord,
+	count:  u32,
 }
 
 ChunkBounds :: struct {
-	min, max: BlockCoord,
-}
-
-ChunkMeshOutput :: struct {
-	vertices:   []TerrainPackedVertex,
-	indices:    []u32,
-	face_count: u32,
+	min, max: world.BlockCoord,
 }
 
 ChunkID :: struct {
@@ -553,11 +465,13 @@ INVALID_CHUNK_ID :: ChunkID {
 
 ChunkGenerationState :: enum {
 	Missing,
+	Queued,
 	Generated,
 }
 ChunkMeshState :: enum {
 	Missing,
 	Dirty,
+	Queued,
 	Ready,
 }
 
@@ -568,23 +482,21 @@ ChunkDirtyFlag :: enum u8 {
 
 ChunkDirtyFlags :: bit_set[ChunkDirtyFlag]
 
-ChunkBlockStorage :: struct {
-	voxel_view: ChunkVoxelView,
-}
-
 Chunk :: struct {
-	block_storage:    ChunkBlockStorage,
-	coord:            ChunkCoord,
-	geometry_id:      GeometryID,
-	generation_state: ChunkGenerationState,
-	mesh_state:       ChunkMeshState,
-	dirty_flags:      ChunkDirtyFlags,
-	slot_generation:  u32,
-	block_version:    u32,
-	mesh_version:     u32,
+	block_storage:             world.ChunkBlockStorage,
+	coord:                     world.ChunkCoord,
+	geometry_id:               GeometryID,
+	generation_state:          ChunkGenerationState,
+	mesh_state:                ChunkMeshState,
+	dirty_flags:               ChunkDirtyFlags,
+	mesh_snapshot_ref_count:   u32,
+	queued_mesh_snapshot_refs: ChunkMeshSnapshotRefSet,
+	slot_generation:           u32,
+	block_version:             u32,
+	mesh_version:              u32,
 }
 
-chunk_create :: proc(coord: ChunkCoord) -> Chunk {
+chunk_create :: proc(coord: world.ChunkCoord) -> Chunk {
 	return {
 		coord = coord,
 		geometry_id = INVALID_GEOMETRY_ID,
@@ -597,7 +509,7 @@ chunk_create :: proc(coord: ChunkCoord) -> Chunk {
 	}
 }
 
-chunk_mark_generated :: proc(chunk: ^Chunk, block_storage: ChunkBlockStorage) {
+chunk_mark_generated :: proc(chunk: ^Chunk, block_storage: world.ChunkBlockStorage) {
 	chunk.block_storage = block_storage
 	chunk.generation_state = .Generated
 	chunk.mesh_state = .Dirty
@@ -605,7 +517,7 @@ chunk_mark_generated :: proc(chunk: ^Chunk, block_storage: ChunkBlockStorage) {
 	chunk.block_version += 1
 }
 
-chunk_origin_from_coord :: proc(coord: ChunkCoord) -> BlockCoord {
+chunk_origin_from_coord :: proc(coord: world.ChunkCoord) -> world.BlockCoord {
 	return {
 		x = coord.x * CHUNK_BLOCK_LENGTH,
 		y = coord.y * CHUNK_BLOCK_LENGTH,
@@ -613,7 +525,7 @@ chunk_origin_from_coord :: proc(coord: ChunkCoord) -> BlockCoord {
 	}
 }
 
-chunk_world_get_aabb :: proc(coord: ChunkCoord) -> WorldAABB {
+chunk_world_get_aabb :: proc(coord: world.ChunkCoord) -> WorldAABB {
 	origin := terrain_chunk_origin_world_from_coord(coord)
 	length := f32(CHUNK_BLOCK_LENGTH) * TERRAIN_BLOCK_WORLD_SIZE
 	min := Vec3{origin[0], origin[1], origin[2]}
@@ -621,16 +533,15 @@ chunk_world_get_aabb :: proc(coord: ChunkCoord) -> WorldAABB {
 	return {min = min, max = min + Vec3{length, length, length}}
 }
 
-block_coord_local_from_chunk_coord :: proc(block: BlockCoord, chunk_coord: ChunkCoord) -> BlockCoord {
+block_coord_local_from_chunk_coord :: proc(
+	block: world.BlockCoord,
+	chunk_coord: world.ChunkCoord,
+) -> world.BlockCoord {
 	origin := chunk_origin_from_coord(chunk_coord)
-	return {
-		x = block.x - origin.x,
-		y = block.y - origin.y,
-		z = block.z - origin.z,
-	}
+	return {x = block.x - origin.x, y = block.y - origin.y, z = block.z - origin.z}
 }
 
-block_coord_from_world_position :: proc(position: Vec3) -> BlockCoord {
+block_coord_from_world_position :: proc(position: Vec3) -> world.BlockCoord {
 	return {
 		x = i32(math.floor_f32(position[0] / TERRAIN_BLOCK_WORLD_SIZE)),
 		y = i32(math.floor_f32(position[1] / TERRAIN_BLOCK_WORLD_SIZE)),
@@ -642,7 +553,7 @@ world_y_from_block_top :: proc(block_y: i32) -> f32 {
 	return f32(block_y + 1) * TERRAIN_BLOCK_WORLD_SIZE
 }
 
-chunk_coord_from_block_coord :: proc(coord: BlockCoord) -> ChunkCoord {
+chunk_coord_from_block_coord :: proc(coord: world.BlockCoord) -> world.ChunkCoord {
 	return {
 		x = math.floor_div(coord.x, i32(CHUNK_BLOCK_LENGTH)),
 		y = math.floor_div(coord.y, i32(CHUNK_BLOCK_LENGTH)),
@@ -668,21 +579,21 @@ chunk_block_coord_is_inside :: proc(x, y, z: i32) -> bool {
 	)
 }
 
-chunk_voxel_view_alloc :: proc(voxel_view: ^ChunkVoxelView, allocator: mem.Allocator) {
-	voxel_view.blocks = make(#soa[]ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, allocator)
+chunk_voxel_view_alloc :: proc(voxel_view: ^world.ChunkVoxelView, allocator: mem.Allocator) {
+	voxel_view.blocks = make(#soa[]world.ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, allocator)
 	chunk_voxel_view_fill_empty(voxel_view)
 }
 
-chunk_voxel_view_is_solid_local :: proc(view: ChunkVoxelView, x, y, z: u32) -> bool {
+chunk_voxel_view_is_solid_local :: proc(view: world.ChunkVoxelView, x, y, z: u32) -> bool {
 	return view.blocks.occupancy[chunk_block_index(x, y, z)] == .Solid
 }
 
 
 chunk_voxel_view_is_solid_for_meshing :: proc(
-	view: ChunkVoxelView,
+	view: world.ChunkVoxelView,
 	x, y, z: i32,
-	boundary_policy: ChunkMeshBoundaryPolicy,
-	neighbor_snapshots: Maybe(ChunkMeshNeighborSnapshots) = nil,
+	boundary_policy: world.ChunkMeshBoundaryPolicy,
+	neighbor_snapshots: Maybe(world.ChunkMeshNeighborSnapshots) = nil,
 ) -> bool {
 	if chunk_block_coord_is_inside(x, y, z) {
 		return chunk_voxel_view_is_solid_local(view, u32(x), u32(y), u32(z))
@@ -708,7 +619,7 @@ chunk_voxel_view_is_solid_for_meshing :: proc(
 			out_of_chunk_axis_count,
 		)
 
-		neighbor: Maybe(ChunkSnapshot)
+		neighbor: Maybe(world.ChunkSnapshot)
 		neighbor_x, neighbor_y, neighbor_z := x, y, z
 
 		if x < 0 {
@@ -748,11 +659,61 @@ chunk_voxel_view_is_solid_for_meshing :: proc(
 	return false
 }
 
-chunk_voxel_view_material_id :: proc(view: ChunkVoxelView, x, y, z: u32) -> BlockMaterialID {
+chunk_voxel_view_material_id :: proc(
+	view: world.ChunkVoxelView,
+	x, y, z: u32,
+) -> world.BlockMaterialID {
 	return view.blocks.material_id[chunk_block_index(x, y, z)]
 }
 
-chunk_voxel_view_fill_empty :: proc(view: ^ChunkVoxelView) {
+terrain_face_mask_count :: proc(mask: u8) -> u32 {
+	count: u32
+	for face_mask in TERRAIN_FACE_MASKS {
+		if (mask & face_mask) != 0 {
+			count += 1
+		}
+	}
+	return count
+}
+
+chunk_voxel_view_exposed_face_mask :: proc(
+	view: world.ChunkVoxelView,
+	x, y, z: u32,
+	boundary_policy: world.ChunkMeshBoundaryPolicy,
+	neighbor_snapshots: Maybe(world.ChunkMeshNeighborSnapshots) = nil,
+) -> u8 {
+	if !chunk_voxel_view_is_solid_for_meshing(
+		view,
+		i32(x),
+		i32(y),
+		i32(z),
+		boundary_policy,
+		neighbor_snapshots,
+	) {
+		return 0
+	}
+
+	mask: u8
+	for face, face_index in TERRAIN_FACE_DESCS {
+		neighbor_x := i32(x) + face.neighbor_dx
+		neighbor_y := i32(y) + face.neighbor_dy
+		neighbor_z := i32(z) + face.neighbor_dz
+
+		if !chunk_voxel_view_is_solid_for_meshing(
+			view,
+			neighbor_x,
+			neighbor_y,
+			neighbor_z,
+			boundary_policy,
+			neighbor_snapshots,
+		) {
+			mask |= TERRAIN_FACE_MASKS[face_index]
+		}
+	}
+	return mask
+}
+
+chunk_voxel_view_fill_empty :: proc(view: ^world.ChunkVoxelView) {
 	log.assertf(
 		len(view.blocks) == CHUNK_BLOCK_COUNT,
 		"chunk voxel view must have %d blocks, got %d",
@@ -762,11 +723,11 @@ chunk_voxel_view_fill_empty :: proc(view: ^ChunkVoxelView) {
 
 	for _, i in view.blocks {
 		view.blocks.occupancy[i] = .Empty
-		view.blocks.material_id[i] = BlockMaterialID(0)
+		view.blocks.material_id[i] = world.BlockMaterialID(0)
 	}
 }
 
-chunk_voxel_debug_rect_view_builder :: proc(view: ^ChunkVoxelView) {
+chunk_voxel_debug_rect_view_builder :: proc(view: ^world.ChunkVoxelView) {
 	chunk_voxel_view_alloc(view, state.transient_allocator)
 
 	for z in DEBUG_CHUNK_SOLID_Z0 ..< DEBUG_CHUNK_SOLID_Z1 {
@@ -774,16 +735,16 @@ chunk_voxel_debug_rect_view_builder :: proc(view: ^ChunkVoxelView) {
 			for x in DEBUG_CHUNK_SOLID_X0 ..< DEBUG_CHUNK_SOLID_X1 {
 				index := chunk_block_index(u32(x), u32(y), u32(z))
 				view.blocks.occupancy[index] = .Solid
-				view.blocks.material_id[index] = BlockMaterialID(0)
+				view.blocks.material_id[index] = world.BlockMaterialID(0)
 			}
 		}
 	}
 }
 
 chunk_voxel_view_count_exposed_faces :: proc(
-	view: ChunkVoxelView,
-	boundary_policy: ChunkMeshBoundaryPolicy,
-	neighbor_snapshots: Maybe(ChunkMeshNeighborSnapshots) = nil,
+	view: world.ChunkVoxelView,
+	boundary_policy: world.ChunkMeshBoundaryPolicy,
+	neighbor_snapshots: Maybe(world.ChunkMeshNeighborSnapshots) = nil,
 ) -> u32 {
 	log.assertf(
 		len(view.blocks) == CHUNK_BLOCK_COUNT,
@@ -795,33 +756,15 @@ chunk_voxel_view_count_exposed_faces :: proc(
 	for z in 0 ..< CHUNK_BLOCK_LENGTH {
 		for y in 0 ..< CHUNK_BLOCK_LENGTH {
 			for x in 0 ..< CHUNK_BLOCK_LENGTH {
-				if !chunk_voxel_view_is_solid_for_meshing(
+				mask := chunk_voxel_view_exposed_face_mask(
 					view,
-					i32(x),
-					i32(y),
-					i32(z),
+					u32(x),
+					u32(y),
+					u32(z),
 					boundary_policy,
 					neighbor_snapshots,
-				) {
-					continue
-				}
-
-				for face in TERRAIN_FACE_DESCS {
-					neighbor_x := i32(x) + face.neighbor_dx
-					neighbor_y := i32(y) + face.neighbor_dy
-					neighbor_z := i32(z) + face.neighbor_dz
-
-					if !chunk_voxel_view_is_solid_for_meshing(
-						view,
-						neighbor_x,
-						neighbor_y,
-						neighbor_z,
-						boundary_policy,
-						neighbor_snapshots,
-					) {
-						face_count += 1
-					}
-				}
+				)
+				face_count += terrain_face_mask_count(mask)
 			}
 		}
 	}
@@ -829,13 +772,67 @@ chunk_voxel_view_count_exposed_faces :: proc(
 	return face_count
 }
 
-chunk_voxel_view_build_naive_mesh :: proc(
-	view: ChunkVoxelView,
-	boundary_policy: ChunkMeshBoundaryPolicy,
+chunk_voxel_view_build_face_plan :: proc(
+	view: world.ChunkVoxelView,
+	boundary_policy: world.ChunkMeshBoundaryPolicy,
 	allocator: mem.Allocator,
-	neighbor_snapshots: Maybe(ChunkMeshNeighborSnapshots) = nil,
-) -> ChunkMeshOutput {
-	face_count := chunk_voxel_view_count_exposed_faces(view, boundary_policy, neighbor_snapshots)
+	neighbor_snapshots: Maybe(world.ChunkMeshNeighborSnapshots) = nil,
+) -> ChunkMeshFacePlan {
+	log.assertf(
+		len(view.blocks) == CHUNK_BLOCK_COUNT,
+		"chunk voxel view must have %d blocks",
+		CHUNK_BLOCK_COUNT,
+	)
+
+	plan := ChunkMeshFacePlan {
+		face_masks   = make([]u8, CHUNK_BLOCK_COUNT, allocator),
+		face_offsets = make([]u32, CHUNK_BLOCK_COUNT + 1, allocator),
+	}
+	log.assertf(len(plan.face_masks) == CHUNK_BLOCK_COUNT, "chunk face mask allocation failed")
+	log.assertf(
+		len(plan.face_offsets) == CHUNK_BLOCK_COUNT + 1,
+		"chunk face offset allocation failed",
+	)
+
+	face_count: u32
+	for z in 0 ..< CHUNK_BLOCK_LENGTH {
+		for y in 0 ..< CHUNK_BLOCK_LENGTH {
+			for x in 0 ..< CHUNK_BLOCK_LENGTH {
+				block_index := chunk_block_index(u32(x), u32(y), u32(z))
+				plan.face_offsets[block_index] = face_count
+
+				mask := chunk_voxel_view_exposed_face_mask(
+					view,
+					u32(x),
+					u32(y),
+					u32(z),
+					boundary_policy,
+					neighbor_snapshots,
+				)
+				plan.face_masks[block_index] = mask
+				face_count += terrain_face_mask_count(mask)
+			}
+		}
+	}
+
+	plan.face_offsets[CHUNK_BLOCK_COUNT] = face_count
+	plan.face_count = face_count
+	return plan
+}
+
+chunk_voxel_view_build_naive_mesh :: proc(
+	view: world.ChunkVoxelView,
+	boundary_policy: world.ChunkMeshBoundaryPolicy,
+	allocator: mem.Allocator,
+	neighbor_snapshots: Maybe(world.ChunkMeshNeighborSnapshots) = nil,
+) -> world.ChunkMeshOutput {
+	face_plan := chunk_voxel_view_build_face_plan(
+		view,
+		boundary_policy,
+		allocator,
+		neighbor_snapshots,
+	)
+	face_count := face_plan.face_count
 
 	if face_count == 0 {
 		return {}
@@ -855,8 +852,8 @@ chunk_voxel_view_build_naive_mesh :: proc(
 	expected_vertex_count := int(face_count) * 4
 	expected_index_count := int(face_count) * 6
 
-	output := ChunkMeshOutput {
-		vertices   = make([]TerrainPackedVertex, expected_vertex_count, allocator),
+	output := world.ChunkMeshOutput {
+		vertices   = make([]world.TerrainPackedVertex, expected_vertex_count, allocator),
 		indices    = make([]u32, expected_index_count, allocator),
 		face_count = face_count,
 	}
@@ -875,63 +872,51 @@ chunk_voxel_view_build_naive_mesh :: proc(
 		face_count,
 	)
 
-	vertex_count: u32
-	index_count: u32
 	for z in 0 ..< CHUNK_BLOCK_LENGTH {
 		for y in 0 ..< CHUNK_BLOCK_LENGTH {
 			for x in 0 ..< CHUNK_BLOCK_LENGTH {
-				if !chunk_voxel_view_is_solid_for_meshing(
-					view,
-					i32(x),
-					i32(y),
-					i32(z),
-					boundary_policy,
-					neighbor_snapshots,
-				) {
+				block_index := chunk_block_index(u32(x), u32(y), u32(z))
+				mask := face_plan.face_masks[block_index]
+				if mask == 0 {
 					continue
 				}
 
 				material_id := u32(u8(chunk_voxel_view_material_id(view, u32(x), u32(y), u32(z))))
+				face_cursor := face_plan.face_offsets[block_index]
 
-				for face in TERRAIN_FACE_DESCS {
-					neighbor_x := i32(x) + face.neighbor_dx
-					neighbor_y := i32(y) + face.neighbor_dy
-					neighbor_z := i32(z) + face.neighbor_dz
-
-					if chunk_voxel_view_is_solid_for_meshing(
-						view,
-						neighbor_x,
-						neighbor_y,
-						neighbor_z,
-						boundary_policy,
-						neighbor_snapshots,
-					) {
+				for face, face_index in TERRAIN_FACE_DESCS {
+					if (mask & TERRAIN_FACE_MASKS[face_index]) == 0 {
 						continue
 					}
 
 					terrain_emit_face(
 						output.vertices,
 						output.indices,
+						face_cursor,
 						u32(x),
 						u32(y),
 						u32(z),
 						face.normal_id,
 						material_id,
-						&vertex_count,
-						&index_count,
 					)
+					face_cursor += 1
 				}
+				log.assertf(
+					face_cursor == face_plan.face_offsets[block_index + 1],
+					"chunk face plan offset mismatch: block_index=%d",
+					block_index,
+				)
 			}
 		}
 	}
 
-	log.assertf(vertex_count == face_count * 4, "chunk mesh vertex count mismatch")
-	log.assertf(index_count == face_count * 6, "chunk mesh index count mismatch")
-
 	return output
 }
 
-chunk_mesh_job_execute_sync :: proc(job: ChunkMeshJob) -> ChunkMeshOutput {
+chunk_mesh_job_execute_sync :: proc(
+	job: async.ChunkMeshJob,
+	output_allocator: mem.Allocator,
+) -> world.ChunkMeshOutput {
 	log.assertf(
 		len(job.snapshot.voxel_view.blocks) == CHUNK_BLOCK_COUNT,
 		"chunk mesh job snapshot must have %d blocks, got %d",
@@ -942,64 +927,9 @@ chunk_mesh_job_execute_sync :: proc(job: ChunkMeshJob) -> ChunkMeshOutput {
 	return chunk_voxel_view_build_naive_mesh(
 		job.snapshot.voxel_view,
 		job.boundary_policy,
-		job.output_allocator,
+		output_allocator,
 		job.neighbors,
 	)
-}
-
-chunk_mesh_worker_proc :: proc(data: rawptr) {
-	ctx := (^ChunkMeshWorkerContext)(data)
-
-	pool_element := &state.chunk_mesh_worker_arena_pool.elements[ctx.worker_index]
-	allocator := pool_element.allocator
-
-	for job_index := ctx.worker_index;
-	    job_index < u32(len(ctx.jobs));
-	    job_index += ctx.worker_count {
-		job := ctx.jobs[job_index]
-		job.output_allocator = allocator
-
-		output := chunk_mesh_job_execute_sync(job)
-
-		ctx.results[job_index] = {
-			coord  = job.snapshot.coord,
-			output = output,
-		}
-	}
-
-}
-
-chunk_mesh_jobs_execute_workers :: proc(jobs: []ChunkMeshJob, results: []ChunkMeshJobResult) {
-	log.assertf(len(results) >= len(jobs), "chunk mesh results slice too small")
-
-	arena_pool_reset(state.chunk_mesh_worker_arena_pool)
-
-	worker_count := math.min(CHUNK_MESH_WORKER_COUNT, len(jobs))
-	if worker_count == 0 {
-		return
-	}
-
-	worker_contexts: [CHUNK_MESH_WORKER_COUNT]ChunkMeshWorkerContext
-	worker_threads: [CHUNK_MESH_WORKER_COUNT]^thread.Thread
-
-	for worker_index in 0 ..< worker_count {
-		worker_contexts[worker_index] = {
-			worker_index = u32(worker_index),
-			worker_count = u32(worker_count),
-			jobs         = jobs,
-			results      = results,
-		}
-		worker_threads[worker_index] = thread.create_and_start_with_data(
-			rawptr(&worker_contexts[worker_index]),
-			chunk_mesh_worker_proc,
-		)
-		log.assertf(worker_threads[worker_index] != nil, "failed to create chunk mesh worker")
-	}
-
-	for worker_index in 0 ..< worker_count {
-		thread.join(worker_threads[worker_index])
-		thread.destroy(worker_threads[worker_index])
-	}
 }
 
 chunk_store_init :: proc(capacity: u32) {
@@ -1033,6 +963,13 @@ chunk_store_append :: proc(chunk: Chunk) {
 }
 
 chunk_store_release_chunk_resources :: proc(chunk: ^Chunk) {
+	log.assertf(
+		chunk.mesh_snapshot_ref_count == 0,
+		"cannot release chunk while mesh snapshots still reference it: coord=%v refs=%d",
+		chunk.coord,
+		chunk.mesh_snapshot_ref_count,
+	)
+
 	if chunk.geometry_id != INVALID_GEOMETRY_ID {
 		geometry_release(&state.geometry_pool, chunk.geometry_id)
 		chunk.geometry_id = INVALID_GEOMETRY_ID
@@ -1042,10 +979,15 @@ chunk_store_release_chunk_resources :: proc(chunk: ^Chunk) {
 	chunk.generation_state = .Missing
 	chunk.mesh_state = .Missing
 	chunk.dirty_flags = {}
+	chunk.queued_mesh_snapshot_refs = {}
 }
 
 chunk_store_remove_at :: proc(index: u32) {
-	log.assertf(index < state.chunk_store.chunk_count, "chunk remove index out of bounds: %d", index)
+	log.assertf(
+		index < state.chunk_store.chunk_count,
+		"chunk remove index out of bounds: %d",
+		index,
+	)
 
 	chunk_store_release_chunk_resources(&state.chunk_store.chunks[index])
 
@@ -1057,12 +999,13 @@ chunk_store_remove_at :: proc(index: u32) {
 	state.chunk_store.chunks[last_index] = {}
 	state.chunk_store.chunk_count -= 1
 
-	if state.chunk_store.chunk_count == 0 || state.next_mesh_scan_index >= state.chunk_store.chunk_count {
+	if state.chunk_store.chunk_count == 0 ||
+	   state.next_mesh_scan_index >= state.chunk_store.chunk_count {
 		state.next_mesh_scan_index = 0
 	}
 }
 
-chunk_store_find_index_by_coord :: proc(coord: ChunkCoord) -> Maybe(u32) {
+chunk_store_find_index_by_coord :: proc(coord: world.ChunkCoord) -> Maybe(u32) {
 	for i in 0 ..< state.chunk_store.chunk_count {
 		if state.chunk_store.chunks[i].coord == coord {
 			return i
@@ -1073,41 +1016,37 @@ chunk_store_find_index_by_coord :: proc(coord: ChunkCoord) -> Maybe(u32) {
 }
 
 chunk_store_commit_mesh_results :: proc(
-	jobs: []ChunkMeshJob,
-	results: []ChunkMeshJobResult,
+	results: []async.ChunkMeshJobResult,
 ) -> ChunkMeshBatchStats {
-	log.assertf(
-		len(jobs) == len(results),
-		"chunk mesh commit requires matching job/result counts: jobs=%d results=%d",
-		len(jobs),
-		len(results),
-	)
-
 	stats := ChunkMeshBatchStats{}
-	for result, i in results {
-		job := jobs[i]
-
+	for result in results {
 		stats.chunks_attempted += 1
 
-		log.assertf(
-			result.coord == job.snapshot.coord,
-			"mesh result coord mismatch: job=%v result=%v",
-			job.snapshot.coord,
-			result.coord,
-		)
-
-		index, ok := chunk_store_find_index_by_coord(job.snapshot.coord).?
-		log.assertf(ok, "mesh result has no matching chunk: coord=%v", job.snapshot.coord)
+		index, ok := chunk_store_find_index_by_coord(result.coord).?
+		if !ok {
+			stats.chunks_stale += 1
+			async.release_mesh_result(result)
+			continue
+		}
 
 		chunk := chunk_store_get_by_index(index)
-		log.assertf(
-			chunk.generation_state == .Generated,
-			"mesh result target chunk must be generated: coord=%v",
-			chunk.coord,
-		)
+		chunk_store_queued_mesh_snapshot_refs_release(chunk)
 
-		if chunk.block_version != job.snapshot.block_version {
+		result_is_stale :=
+			chunk.generation_state != .Generated ||
+			chunk.mesh_state != .Queued ||
+			chunk.block_version != result.block_version ||
+			chunk.dirty_flags != {}
+		if result_is_stale {
 			stats.chunks_stale += 1
+			chunk_was_generated := chunk.generation_state == .Generated
+			if chunk_was_generated {
+				chunk.mesh_state = .Dirty
+			}
+			if chunk_was_generated && chunk.dirty_flags == {} {
+				chunk.dirty_flags += {.Blocks}
+			}
+			async.release_mesh_result(result)
 			continue
 		}
 
@@ -1119,10 +1058,15 @@ chunk_store_commit_mesh_results :: proc(
 			stats.chunks_uploaded += 1
 		}
 
-		chunk.geometry_id = geometry_replace(&state.geometry_pool, chunk.geometry_id, result.output)
+		chunk.geometry_id = geometry_replace(
+			&state.geometry_pool,
+			chunk.geometry_id,
+			result.output,
+		)
 		chunk.mesh_state = .Ready
-		chunk.mesh_version = job.snapshot.block_version
+		chunk.mesh_version = result.block_version
 		chunk.dirty_flags = {}
+		async.release_mesh_result(result)
 
 		when LOG_CHUNK_MESH_COMMITS {
 			log.debugf(
@@ -1166,14 +1110,14 @@ chunk_store_get_by_index :: proc(index: u32) -> ^Chunk {
 	return &state.chunk_store.chunks[index]
 }
 
-chunk_store_append_reserved :: proc(coord: ChunkCoord) -> ChunkID {
+chunk_store_append_reserved :: proc(coord: world.ChunkCoord) -> ChunkID {
 	chunk := chunk_create(coord)
 	chunk_store_append(chunk)
 
 	return chunk_store_id_from_index(state.chunk_store.chunk_count - 1)
 }
 
-chunk_store_get_or_append_reserved :: proc(coord: ChunkCoord) -> ChunkID {
+chunk_store_get_or_append_reserved :: proc(coord: world.ChunkCoord) -> ChunkID {
 	if index, ok := chunk_store_find_index_by_coord(coord).?; ok {
 		return chunk_store_id_from_index(index)
 	}
@@ -1181,7 +1125,7 @@ chunk_store_get_or_append_reserved :: proc(coord: ChunkCoord) -> ChunkID {
 	return chunk_store_append_reserved(coord)
 }
 
-chunk_store_snapshot_find_by_coord :: proc(coord: ChunkCoord) -> Maybe(ChunkSnapshot) {
+chunk_store_snapshot_find_by_coord :: proc(coord: world.ChunkCoord) -> Maybe(world.ChunkSnapshot) {
 	index, ok := chunk_store_find_index_by_coord(coord).?
 	if !ok {
 		return nil
@@ -1195,21 +1139,111 @@ chunk_store_snapshot_find_by_coord :: proc(coord: ChunkCoord) -> Maybe(ChunkSnap
 	return chunk_snapshot_from_chunk(chunk)
 }
 
-chunk_store_mesh_neighbors_find :: proc(coord: ChunkCoord) -> ChunkMeshNeighborSnapshots {
+chunk_store_mesh_neighbors_find :: proc(
+	coord: world.ChunkCoord,
+) -> world.ChunkMeshNeighborSnapshots {
 	return {
-		plus_x = chunk_store_snapshot_find_by_coord(ChunkCoord{coord.x + 1, coord.y, coord.z}),
-		minus_x = chunk_store_snapshot_find_by_coord(ChunkCoord{coord.x - 1, coord.y, coord.z}),
-		plus_y = chunk_store_snapshot_find_by_coord(ChunkCoord{coord.x, coord.y + 1, coord.z}),
-		minus_y = chunk_store_snapshot_find_by_coord(ChunkCoord{coord.x, coord.y - 1, coord.z}),
-		plus_z = chunk_store_snapshot_find_by_coord(ChunkCoord{coord.x, coord.y, coord.z + 1}),
-		minus_z = chunk_store_snapshot_find_by_coord(ChunkCoord{coord.x, coord.y, coord.z - 1}),
+		plus_x = chunk_store_snapshot_find_by_coord(
+			world.ChunkCoord{coord.x + 1, coord.y, coord.z},
+		),
+		minus_x = chunk_store_snapshot_find_by_coord(
+			world.ChunkCoord{coord.x - 1, coord.y, coord.z},
+		),
+		plus_y = chunk_store_snapshot_find_by_coord(
+			world.ChunkCoord{coord.x, coord.y + 1, coord.z},
+		),
+		minus_y = chunk_store_snapshot_find_by_coord(
+			world.ChunkCoord{coord.x, coord.y - 1, coord.z},
+		),
+		plus_z = chunk_store_snapshot_find_by_coord(
+			world.ChunkCoord{coord.x, coord.y, coord.z + 1},
+		),
+		minus_z = chunk_store_snapshot_find_by_coord(
+			world.ChunkCoord{coord.x, coord.y, coord.z - 1},
+		),
 	}
 }
 
+chunk_mesh_snapshot_ref_set_add :: proc(refs: ^ChunkMeshSnapshotRefSet, coord: world.ChunkCoord) {
+	for i := u32(0); i < refs.count; i += 1 {
+		if refs.coords[i] == coord {
+			return
+		}
+	}
+
+	log.assertf(
+		refs.count < u32(len(refs.coords)),
+		"chunk mesh snapshot ref set capacity exceeded",
+	)
+	refs.coords[refs.count] = coord
+	refs.count += 1
+}
+
+chunk_mesh_snapshot_ref_set_add_snapshot :: proc(
+	refs: ^ChunkMeshSnapshotRefSet,
+	snapshot: Maybe(world.ChunkSnapshot),
+) {
+	snapshot_value, ok := snapshot.?
+	if !ok {
+		return
+	}
+	chunk_mesh_snapshot_ref_set_add(refs, snapshot_value.coord)
+}
+
+chunk_mesh_snapshot_refs_from_job :: proc(job: async.ChunkMeshJob) -> ChunkMeshSnapshotRefSet {
+	refs := ChunkMeshSnapshotRefSet{}
+	chunk_mesh_snapshot_ref_set_add(&refs, job.snapshot.coord)
+	chunk_mesh_snapshot_ref_set_add_snapshot(&refs, job.neighbors.plus_x)
+	chunk_mesh_snapshot_ref_set_add_snapshot(&refs, job.neighbors.minus_x)
+	chunk_mesh_snapshot_ref_set_add_snapshot(&refs, job.neighbors.plus_y)
+	chunk_mesh_snapshot_ref_set_add_snapshot(&refs, job.neighbors.minus_y)
+	chunk_mesh_snapshot_ref_set_add_snapshot(&refs, job.neighbors.plus_z)
+	chunk_mesh_snapshot_ref_set_add_snapshot(&refs, job.neighbors.minus_z)
+	return refs
+}
+
+chunk_store_mesh_snapshot_refs_acquire :: proc(refs: ChunkMeshSnapshotRefSet) {
+	for i := u32(0); i < refs.count; i += 1 {
+		index, ok := chunk_store_find_index_by_coord(refs.coords[i]).?
+		log.assertf(ok, "mesh snapshot ref target chunk missing: coord=%v", refs.coords[i])
+
+		chunk := chunk_store_get_by_index(index)
+		chunk.mesh_snapshot_ref_count += 1
+	}
+}
+
+chunk_store_mesh_snapshot_refs_release :: proc(refs: ChunkMeshSnapshotRefSet) {
+	for i := u32(0); i < refs.count; i += 1 {
+		index, ok := chunk_store_find_index_by_coord(refs.coords[i]).?
+		log.assertf(
+			ok,
+			"mesh snapshot ref target chunk missing during release: coord=%v",
+			refs.coords[i],
+		)
+
+		chunk := chunk_store_get_by_index(index)
+		log.assertf(
+			chunk.mesh_snapshot_ref_count > 0,
+			"mesh snapshot ref count underflow: coord=%v",
+			refs.coords[i],
+		)
+		chunk.mesh_snapshot_ref_count -= 1
+	}
+}
+
+chunk_store_queued_mesh_snapshot_refs_release :: proc(chunk: ^Chunk) {
+	if chunk.queued_mesh_snapshot_refs.count == 0 {
+		return
+	}
+
+	chunk_store_mesh_snapshot_refs_release(chunk.queued_mesh_snapshot_refs)
+	chunk.queued_mesh_snapshot_refs = {}
+}
+
 chunk_snapshot_find_by_coord :: proc(
-	snapshots: []ChunkSnapshot,
-	coord: ChunkCoord,
-) -> Maybe(ChunkSnapshot) {
+	snapshots: []world.ChunkSnapshot,
+	coord: world.ChunkCoord,
+) -> Maybe(world.ChunkSnapshot) {
 	for i in 0 ..< len(snapshots) {
 		if snapshots[i].coord == coord {
 			return snapshots[i]
@@ -1219,33 +1253,33 @@ chunk_snapshot_find_by_coord :: proc(
 }
 
 chunk_mesh_neighbors_find :: proc(
-	snapshots: []ChunkSnapshot,
-	coord: ChunkCoord,
-) -> ChunkMeshNeighborSnapshots {
+	snapshots: []world.ChunkSnapshot,
+	coord: world.ChunkCoord,
+) -> world.ChunkMeshNeighborSnapshots {
 	return {
 		plus_x = chunk_snapshot_find_by_coord(
 			snapshots,
-			ChunkCoord{coord.x + 1, coord.y, coord.z},
+			world.ChunkCoord{coord.x + 1, coord.y, coord.z},
 		),
 		minus_x = chunk_snapshot_find_by_coord(
 			snapshots,
-			ChunkCoord{coord.x - 1, coord.y, coord.z},
+			world.ChunkCoord{coord.x - 1, coord.y, coord.z},
 		),
 		plus_y = chunk_snapshot_find_by_coord(
 			snapshots,
-			ChunkCoord{coord.x, coord.y + 1, coord.z},
+			world.ChunkCoord{coord.x, coord.y + 1, coord.z},
 		),
 		minus_y = chunk_snapshot_find_by_coord(
 			snapshots,
-			ChunkCoord{coord.x, coord.y - 1, coord.z},
+			world.ChunkCoord{coord.x, coord.y - 1, coord.z},
 		),
 		plus_z = chunk_snapshot_find_by_coord(
 			snapshots,
-			ChunkCoord{coord.x, coord.y, coord.z + 1},
+			world.ChunkCoord{coord.x, coord.y, coord.z + 1},
 		),
 		minus_z = chunk_snapshot_find_by_coord(
 			snapshots,
-			ChunkCoord{coord.x, coord.y, coord.z - 1},
+			world.ChunkCoord{coord.x, coord.y, coord.z - 1},
 		),
 	}
 }
@@ -1255,17 +1289,19 @@ chunk_block_storage_alloc :: proc {
 	chunk_block_storage_alloc_for_store,
 }
 
-chunk_block_storage_alloc_with_allocator :: proc(allocator: mem.Allocator) -> ChunkBlockStorage {
-	storage := ChunkBlockStorage{}
+chunk_block_storage_alloc_with_allocator :: proc(
+	allocator: mem.Allocator,
+) -> world.ChunkBlockStorage {
+	storage := world.ChunkBlockStorage{}
 	chunk_voxel_view_alloc(&storage.voxel_view, allocator)
 	return storage
 }
 
-chunk_block_storage_alloc_for_store :: proc() -> ChunkBlockStorage {
+chunk_block_storage_alloc_for_store :: proc() -> world.ChunkBlockStorage {
 	return chunk_block_storage_alloc(state.chunk_block_storage_allocator)
 }
 
-chunk_block_storage_release :: proc(storage: ^ChunkBlockStorage) {
+chunk_block_storage_release :: proc(storage: ^world.ChunkBlockStorage) {
 	if len(storage.voxel_view.blocks) == 0 {
 		return
 	}
@@ -1275,7 +1311,7 @@ chunk_block_storage_release :: proc(storage: ^ChunkBlockStorage) {
 	storage^ = {}
 }
 
-chunk_snapshot_from_chunk :: proc(chunk: ^Chunk) -> ChunkSnapshot {
+chunk_snapshot_from_chunk :: proc(chunk: ^Chunk) -> world.ChunkSnapshot {
 	log.assertf(
 		chunk.generation_state == .Generated,
 		"chunk must be generated before creating a snapshot",
@@ -1292,13 +1328,19 @@ chunk_snapshot_from_chunk :: proc(chunk: ^Chunk) -> ChunkSnapshot {
 	}
 }
 
-chunk_generation_job_execute_sync :: proc(job: ChunkGenerationJob) -> ChunkGenerationJobResult {
-	block_storage := chunk_block_storage_alloc(job.output_allocator)
+chunk_generation_job_execute_sync :: proc(
+	job: async.ChunkGenerationJob,
+) -> async.ChunkGenerationJobResult {
+	block_storage := job.block_storage
+	log.assertf(
+		len(block_storage.voxel_view.blocks) == CHUNK_BLOCK_COUNT,
+		"generation job output storage has wrong block count",
+	)
 	terrain_heightfield_voxel_view_fill(&block_storage.voxel_view, job.coord)
 	return {coord = job.coord, block_storage = block_storage}
 }
 
-chunk_store_mark_generated_chunk_boundary_dirty :: proc(coord: ChunkCoord) {
+chunk_store_mark_generated_chunk_boundary_dirty :: proc(coord: world.ChunkCoord) {
 	index, ok := chunk_store_find_index_by_coord(coord).?
 	if !ok {
 		return
@@ -1309,17 +1351,31 @@ chunk_store_mark_generated_chunk_boundary_dirty :: proc(coord: ChunkCoord) {
 		return
 	}
 
-	chunk.mesh_state = .Dirty
 	chunk.dirty_flags += {.Boundary}
+	if chunk.mesh_state != .Queued {
+		chunk.mesh_state = .Dirty
+	}
 }
 
-chunk_store_mark_generated_neighbors_boundary_dirty :: proc(coord: ChunkCoord) {
-	chunk_store_mark_generated_chunk_boundary_dirty(ChunkCoord{coord.x + 1, coord.y, coord.z})
-	chunk_store_mark_generated_chunk_boundary_dirty(ChunkCoord{coord.x - 1, coord.y, coord.z})
-	chunk_store_mark_generated_chunk_boundary_dirty(ChunkCoord{coord.x, coord.y + 1, coord.z})
-	chunk_store_mark_generated_chunk_boundary_dirty(ChunkCoord{coord.x, coord.y - 1, coord.z})
-	chunk_store_mark_generated_chunk_boundary_dirty(ChunkCoord{coord.x, coord.y, coord.z + 1})
-	chunk_store_mark_generated_chunk_boundary_dirty(ChunkCoord{coord.x, coord.y, coord.z - 1})
+chunk_store_mark_generated_neighbors_boundary_dirty :: proc(coord: world.ChunkCoord) {
+	chunk_store_mark_generated_chunk_boundary_dirty(
+		world.ChunkCoord{coord.x + 1, coord.y, coord.z},
+	)
+	chunk_store_mark_generated_chunk_boundary_dirty(
+		world.ChunkCoord{coord.x - 1, coord.y, coord.z},
+	)
+	chunk_store_mark_generated_chunk_boundary_dirty(
+		world.ChunkCoord{coord.x, coord.y + 1, coord.z},
+	)
+	chunk_store_mark_generated_chunk_boundary_dirty(
+		world.ChunkCoord{coord.x, coord.y - 1, coord.z},
+	)
+	chunk_store_mark_generated_chunk_boundary_dirty(
+		world.ChunkCoord{coord.x, coord.y, coord.z + 1},
+	)
+	chunk_store_mark_generated_chunk_boundary_dirty(
+		world.ChunkCoord{coord.x, coord.y, coord.z - 1},
+	)
 }
 
 chunk_store_count_dirty_generated :: proc() -> u32 {
@@ -1332,7 +1388,10 @@ chunk_store_count_dirty_generated :: proc() -> u32 {
 	return count
 }
 
-chunk_solid_block_at_world_block :: proc(chunk: ^Chunk, block: BlockCoord) -> Maybe(BlockCoord) {
+chunk_solid_block_at_world_block :: proc(
+	chunk: ^Chunk,
+	block: world.BlockCoord,
+) -> Maybe(world.BlockCoord) {
 	if chunk.generation_state != .Generated {
 		return nil
 	}
@@ -1360,7 +1419,7 @@ chunk_solid_block_at_world_block :: proc(chunk: ^Chunk, block: BlockCoord) -> Ma
 	return block
 }
 
-chunk_store_solid_block_at_world_position :: proc(position: Vec3) -> Maybe(BlockCoord) {
+chunk_store_solid_block_at_world_position :: proc(position: Vec3) -> Maybe(world.BlockCoord) {
 	block := block_coord_from_world_position(position)
 	chunk_coord := chunk_coord_from_block_coord(block)
 	index, ok := chunk_store_find_index_by_coord(chunk_coord).?
@@ -1372,7 +1431,7 @@ chunk_store_solid_block_at_world_position :: proc(position: Vec3) -> Maybe(Block
 	return chunk_solid_block_at_world_block(chunk, block)
 }
 
-chunk_store_coord_is_generated :: proc(coord: ChunkCoord) -> bool {
+chunk_store_coord_is_generated :: proc(coord: world.ChunkCoord) -> bool {
 	index, ok := chunk_store_find_index_by_coord(coord).?
 	if !ok {
 		return false
@@ -1382,14 +1441,15 @@ chunk_store_coord_is_generated :: proc(coord: ChunkCoord) -> bool {
 	return chunk.generation_state == .Generated
 }
 
-chunk_work_generate_budgeted :: proc() -> u32 {
-	generated_count: u32
+chunk_work_request_generation_budgeted :: proc() -> u32 {
 	if state.streaming_target_count == 0 {
 		return 0
 	}
 
+	generation_request_count: u32
+
 	scanned_count: u32
-	for generated_count < CHUNK_GENERATION_BUDGET_PER_FRAME &&
+	for generation_request_count < CHUNK_GENERATION_BUDGET_PER_FRAME &&
 	    scanned_count < state.streaming_target_count {
 		target_index := state.next_streaming_target_index
 		state.next_streaming_target_index =
@@ -1400,53 +1460,90 @@ chunk_work_generate_budgeted :: proc() -> u32 {
 		chunk_id := chunk_store_get_or_append_reserved(coord)
 		chunk := chunk_store_get_by_id(chunk_id)
 
-		if chunk.generation_state == .Generated {
+		if chunk.generation_state != .Missing {
 			continue
 		}
 
-		log.assertf(
-			chunk.generation_state == .Missing,
-			"streaming target chunk has unexpected generation state: coord=%v state=%v",
-			coord,
-			chunk.generation_state,
-		)
-
-		generation_job := ChunkGenerationJob {
-			coord            = coord,
-			seed             = 0,
-			output_allocator = state.chunk_block_storage_allocator,
+		job := async.ChunkGenerationJob {
+			coord         = coord,
+			seed          = 0,
+			block_storage = chunk_block_storage_alloc_for_store(),
 		}
-		generation_result := chunk_generation_job_execute_sync(generation_job)
-		log.assertf(generation_result.coord == coord, "Chunk generation job result coord mismatch")
+		if !async.request_generation(job) {
+			chunk_block_storage_release(&job.block_storage)
+			break
+		}
+
+		chunk.block_storage = job.block_storage
+		chunk.generation_state = .Queued
+		generation_request_count += 1
+	}
+
+	return generation_request_count
+}
+
+chunk_work_poll_generation_results_budgeted :: proc() -> u32 {
+	generation_results: [CHUNK_GENERATION_BUDGET_PER_FRAME]async.ChunkGenerationJobResult
+	result_count := async.poll_generation_results(generation_results[:])
+	if result_count == 0 {
+		return 0
+	}
+
+	for i := 0; i < int(result_count); i += 1 {
+		generation_result := &generation_results[i]
 		log.assertf(
 			len(generation_result.block_storage.voxel_view.blocks) == CHUNK_BLOCK_COUNT,
 			"generated chunk storage has wrong block count",
 		)
 
+		index, ok := chunk_store_find_index_by_coord(generation_result.coord).?
+		if !ok {
+			chunk_block_storage_release(&generation_result.block_storage)
+			continue
+		}
+
+		chunk := chunk_store_get_by_index(index)
+		if chunk.generation_state == .Generated {
+			if generation_result.block_storage.voxel_view.blocks.occupancy !=
+			   chunk.block_storage.voxel_view.blocks.occupancy {
+				chunk_block_storage_release(&generation_result.block_storage)
+			}
+			continue
+		}
+		if chunk.generation_state != .Queued {
+			if generation_result.block_storage.voxel_view.blocks.occupancy !=
+			   chunk.block_storage.voxel_view.blocks.occupancy {
+				chunk_block_storage_release(&generation_result.block_storage)
+			}
+			continue
+		}
+
+		log.assertf(
+			generation_result.block_storage.voxel_view.blocks.occupancy ==
+			chunk.block_storage.voxel_view.blocks.occupancy,
+			"generated storage must match queued chunk storage: coord=%v",
+			generation_result.coord,
+		)
 		chunk_mark_generated(chunk, generation_result.block_storage)
-		chunk_store_mark_generated_neighbors_boundary_dirty(coord)
-		generated_count += 1
+		chunk_store_mark_generated_neighbors_boundary_dirty(generation_result.coord)
 	}
 
-	return generated_count
+	return result_count
 }
 
-chunk_work_mesh_and_commit_budgeted :: proc() -> ChunkMeshBatchStats {
-	stats := ChunkMeshBatchStats{}
+chunk_work_request_mesh_budgeted :: proc() -> u32 {
 	if state.chunk_store.chunk_count == 0 {
-		return stats
+		return 0
 	}
 
 	if state.next_mesh_scan_index >= state.chunk_store.chunk_count {
 		state.next_mesh_scan_index = 0
 	}
 
-	chunk_mesh_jobs: [CHUNK_MESH_BUDGET_PER_FRAME]ChunkMeshJob
-	chunk_mesh_results: [CHUNK_MESH_BUDGET_PER_FRAME]ChunkMeshJobResult
-
-	mesh_job_count: u32
+	mesh_request_count: u32
 	for scanned := u32(0);
-	    scanned < state.chunk_store.chunk_count && mesh_job_count < CHUNK_MESH_BUDGET_PER_FRAME;
+	    scanned < state.chunk_store.chunk_count &&
+	    mesh_request_count < CHUNK_MESH_BUDGET_PER_FRAME;
 	    scanned += 1 {
 		index := state.next_mesh_scan_index
 		state.next_mesh_scan_index =
@@ -1461,75 +1558,48 @@ chunk_work_mesh_and_commit_budgeted :: proc() -> ChunkMeshBatchStats {
 		}
 
 		snapshot := chunk_snapshot_from_chunk(chunk)
-		chunk_mesh_jobs[mesh_job_count] = {
-			snapshot         = snapshot,
-			boundary_policy  = .Sample_Neighbor_Snapshots,
-			output_allocator = state.transient_allocator,
-			neighbors        = chunk_store_mesh_neighbors_find(snapshot.coord),
+		job := async.ChunkMeshJob {
+			snapshot        = snapshot,
+			boundary_policy = .Sample_Neighbor_Snapshots,
+			neighbors       = chunk_store_mesh_neighbors_find(snapshot.coord),
 		}
-		mesh_job_count += 1
-	}
+		refs := chunk_mesh_snapshot_refs_from_job(job)
+		chunk_store_mesh_snapshot_refs_acquire(refs)
 
-	if mesh_job_count == 0 {
-		return stats
-	}
-
-	job_slice := chunk_mesh_jobs[:int(mesh_job_count)]
-	result_slice := chunk_mesh_results[:len(job_slice)]
-	chunk_mesh_jobs_execute_workers(job_slice, result_slice)
-
-	when ODIN_DEBUG && VERIFY_CHUNK_MESH_WORKER_OUTPUTS {
-		chunk_mesh_output_matches :: proc(a, b: ChunkMeshOutput) -> bool {
-			if a.face_count != b.face_count {
-				return false
-			}
-
-			if len(a.vertices) != len(b.vertices) || len(a.indices) != len(b.indices) {
-				return false
-			}
-
-			if mem.compare(mem.slice_to_bytes(a.vertices), mem.slice_to_bytes(b.vertices)) != 0 {
-				return false
-			}
-
-			if mem.compare(mem.slice_to_bytes(a.indices), mem.slice_to_bytes(b.indices)) != 0 {
-				return false
-			}
-
-			return true
+		if !async.request_mesh(job) {
+			chunk_store_mesh_snapshot_refs_release(refs)
+			break
 		}
 
-		for job, i in job_slice {
-			sync_temp := mem.begin_arena_temp_memory(&state.transient_arena)
-			sync_output := chunk_mesh_job_execute_sync(job)
-			output_matches := chunk_mesh_output_matches(result_slice[i].output, sync_output)
-			mem.end_arena_temp_memory(sync_temp)
-
-			log.assertf(
-				output_matches,
-				"threaded chunk mesh result mismatch: job_index=%d coord=%v",
-				i,
-				job.snapshot.coord,
-			)
-			log.assertf(
-				result_slice[i].coord == job.snapshot.coord,
-				"threaded chunk mesh coord mismatch: job_index=%d expected=%v got=%v",
-				i,
-				job.snapshot.coord,
-				result_slice[i].coord,
-			)
-		}
+		chunk.mesh_state = .Queued
+		chunk.dirty_flags = {}
+		chunk.queued_mesh_snapshot_refs = refs
+		mesh_request_count += 1
 	}
 
-	return chunk_store_commit_mesh_results(job_slice, result_slice)
+	return mesh_request_count
+}
+
+chunk_work_poll_mesh_results_budgeted :: proc() -> ChunkMeshBatchStats {
+	chunk_mesh_results: [CHUNK_MESH_BUDGET_PER_FRAME]async.ChunkMeshJobResult
+	result_count := async.poll_mesh_results(chunk_mesh_results[:])
+	if result_count == 0 {
+		return {}
+	}
+
+	return chunk_store_commit_mesh_results(chunk_mesh_results[:int(result_count)])
 }
 
 chunk_work_update_budgeted :: proc() {
+	geometry_deferred_releases_poll(&state.geometry_pool)
+
 	state.chunks_evicted = chunk_streaming_update_for_observer(state.camera.position)
 
-	state.chunks_generated = chunk_work_generate_budgeted()
-	mesh_stats := chunk_work_mesh_and_commit_budgeted()
-	state.chunk_mesh_jobs_submitted = mesh_stats.chunks_attempted
+	state.chunks_generated = chunk_work_poll_generation_results_budgeted()
+	chunk_work_request_generation_budgeted()
+
+	mesh_stats := chunk_work_poll_mesh_results_budgeted()
+	state.chunk_mesh_jobs_submitted = chunk_work_request_mesh_budgeted()
 	state.chunk_mesh_results_committed = mesh_stats.chunks_committed
 	state.chunk_mesh_results_uploaded = mesh_stats.chunks_uploaded
 	state.chunks_dirty_remaining = chunk_store_count_dirty_generated()
@@ -1543,7 +1613,7 @@ chunk_streaming_update_for_observer :: proc(observer_world_position: Vec3) -> u3
 	return chunk_streaming_evict_outside_unload_radius()
 }
 
-chunk_streaming_center_from_observer :: proc(observer_world_position: Vec3) -> ChunkCoord {
+chunk_streaming_center_from_observer :: proc(observer_world_position: Vec3) -> world.ChunkCoord {
 	center := chunk_coord_from_block_coord(
 		block_coord_from_world_position(observer_world_position),
 	)
@@ -1551,17 +1621,18 @@ chunk_streaming_center_from_observer :: proc(observer_world_position: Vec3) -> C
 	return center
 }
 
-chunk_streaming_coord_inside_square_radius :: proc(center, coord: ChunkCoord, radius: u32) -> bool {
+chunk_streaming_coord_inside_square_radius :: proc(
+	center, coord: world.ChunkCoord,
+	radius: u32,
+) -> bool {
 	dx := coord.x - center.x
 	dz := coord.z - center.z
 	r := i32(radius)
 
-	return coord.y == center.y &&
-	       dx >= -r && dx <= r &&
-	       dz >= -r && dz <= r
+	return coord.y == center.y && dx >= -r && dx <= r && dz >= -r && dz <= r
 }
 
-chunk_streaming_target_less :: proc(center, a, b: ChunkCoord) -> bool {
+chunk_streaming_target_less :: proc(center, a, b: world.ChunkCoord) -> bool {
 	adx := a.x - center.x
 	adz := a.z - center.z
 	bdx := b.x - center.x
@@ -1586,6 +1657,14 @@ chunk_streaming_evict_outside_unload_radius :: proc() -> u32 {
 			i += 1
 			continue
 		}
+		if chunk.generation_state == .Queued {
+			i += 1
+			continue
+		}
+		if chunk.mesh_snapshot_ref_count > 0 {
+			i += 1
+			continue
+		}
 
 		chunk_store_mark_generated_neighbors_boundary_dirty(chunk.coord)
 		chunk_store_remove_at(i)
@@ -1594,7 +1673,7 @@ chunk_streaming_evict_outside_unload_radius :: proc() -> u32 {
 	return evicted_count
 }
 
-chunk_streaming_mesh_dependency_ready :: proc(coord: ChunkCoord) -> bool {
+chunk_streaming_mesh_dependency_ready :: proc(coord: world.ChunkCoord) -> bool {
 	if !chunk_streaming_coord_inside_square_radius(
 		state.streaming_center_coord,
 		coord,
@@ -1605,16 +1684,16 @@ chunk_streaming_mesh_dependency_ready :: proc(coord: ChunkCoord) -> bool {
 	return chunk_store_coord_is_generated(coord)
 }
 
-chunk_streaming_mesh_dependencies_ready :: proc(coord: ChunkCoord) -> bool {
-	return (
-		chunk_streaming_mesh_dependency_ready(ChunkCoord{coord.x + 1, coord.y, coord.z}) &&
-		chunk_streaming_mesh_dependency_ready(ChunkCoord{coord.x - 1, coord.y, coord.z}) &&
-		chunk_streaming_mesh_dependency_ready(ChunkCoord{coord.x, coord.y, coord.z + 1}) &&
-		chunk_streaming_mesh_dependency_ready(ChunkCoord{coord.x, coord.y, coord.z - 1})
+chunk_streaming_mesh_dependencies_ready :: proc(coord: world.ChunkCoord) -> bool {
+	return(
+		chunk_streaming_mesh_dependency_ready(world.ChunkCoord{coord.x + 1, coord.y, coord.z}) &&
+		chunk_streaming_mesh_dependency_ready(world.ChunkCoord{coord.x - 1, coord.y, coord.z}) &&
+		chunk_streaming_mesh_dependency_ready(world.ChunkCoord{coord.x, coord.y, coord.z + 1}) &&
+		chunk_streaming_mesh_dependency_ready(world.ChunkCoord{coord.x, coord.y, coord.z - 1}) \
 	)
 }
 
-chunk_streaming_window_rebuild_targets :: proc(center: ChunkCoord) {
+chunk_streaming_window_rebuild_targets :: proc(center: world.ChunkCoord) {
 	state.streaming_center_coord = center
 	state.streaming_target_count = 0
 
@@ -1642,7 +1721,8 @@ chunk_streaming_window_rebuild_targets :: proc(center: ChunkCoord) {
 			}
 		}
 		if best != i {
-			state.streaming_targets[i], state.streaming_targets[best] = state.streaming_targets[best], state.streaming_targets[i]
+			state.streaming_targets[i], state.streaming_targets[best] =
+				state.streaming_targets[best], state.streaming_targets[i]
 		}
 	}
 
@@ -1654,22 +1734,24 @@ when ODIN_DEBUG {
 		temp := mem.begin_arena_temp_memory(&state.transient_arena)
 		defer mem.end_arena_temp_memory(temp)
 
-		chunk := chunk_create(ChunkCoord{0, 0, 0})
+		chunk := chunk_create(world.ChunkCoord{0, 0, 0})
 		storage := chunk_block_storage_alloc(state.transient_allocator)
 		index := chunk_block_index(0, 0, 0)
 		storage.voxel_view.blocks.occupancy[index] = .Solid
-		storage.voxel_view.blocks.material_id[index] = BlockMaterialID(1)
+		storage.voxel_view.blocks.material_id[index] = world.BlockMaterialID(1)
 		chunk_mark_generated(&chunk, storage)
 
-		hit_block, hit := chunk_solid_block_at_world_block(&chunk, BlockCoord{0, 0, 0}).?
+		hit_block, hit := chunk_solid_block_at_world_block(&chunk, world.BlockCoord{0, 0, 0}).?
 		log.assert(hit, "camera terrain collision check: expected solid block hit")
 		log.assertf(
-			hit_block == BlockCoord{0, 0, 0},
+			hit_block == world.BlockCoord{0, 0, 0},
 			"camera terrain collision check: wrong hit block %v",
 			hit_block,
 		)
 
-		test_camera := Camera{position = {0.25, 0.25, 0.25}}
+		test_camera := Camera {
+			position = {0.25, 0.25, 0.25},
+		}
 		camera_move_above_block(&test_camera, hit_block)
 		log.assertf(
 			test_camera.position[1] > world_y_from_block_top(hit_block.y),
@@ -1680,20 +1762,20 @@ when ODIN_DEBUG {
 		_, lifted_hit := chunk_solid_block_at_world_block(&chunk, lifted_block).?
 		log.assert(!lifted_hit, "camera terrain collision check: lifted camera still intersects")
 
-		negative_chunk := chunk_create(ChunkCoord{-1, 0, -1})
+		negative_chunk := chunk_create(world.ChunkCoord{-1, 0, -1})
 		negative_storage := chunk_block_storage_alloc(state.transient_allocator)
 		negative_index := chunk_block_index(CHUNK_BLOCK_LOCAL_MAX, 0, CHUNK_BLOCK_LOCAL_MAX)
 		negative_storage.voxel_view.blocks.occupancy[negative_index] = .Solid
-		negative_storage.voxel_view.blocks.material_id[negative_index] = BlockMaterialID(1)
+		negative_storage.voxel_view.blocks.material_id[negative_index] = world.BlockMaterialID(1)
 		chunk_mark_generated(&negative_chunk, negative_storage)
 
 		negative_hit_block, negative_hit := chunk_solid_block_at_world_block(
 			&negative_chunk,
-			BlockCoord{-1, 0, -1},
+			world.BlockCoord{-1, 0, -1},
 		).?
 		log.assert(negative_hit, "camera terrain collision check: expected negative block hit")
 		log.assertf(
-			negative_hit_block == BlockCoord{-1, 0, -1},
+			negative_hit_block == world.BlockCoord{-1, 0, -1},
 			"camera terrain collision check: wrong negative hit block %v",
 			negative_hit_block,
 		)
@@ -1705,9 +1787,9 @@ when ODIN_DEBUG {
 		temp := mem.begin_arena_temp_memory(&state.transient_arena)
 		defer mem.end_arena_temp_memory(temp)
 
-		view := ChunkVoxelView {
+		view := world.ChunkVoxelView {
 			blocks = make(
-				#soa[]ChunkVoxelViewElement,
+				#soa[]world.ChunkVoxelViewElement,
 				CHUNK_BLOCK_COUNT,
 				state.transient_allocator,
 			),
@@ -1771,7 +1853,7 @@ when ODIN_DEBUG {
 		chunk_voxel_view_fill_empty(&view)
 		index := chunk_block_index(0, 0, 0)
 		view.blocks.occupancy[index] = .Solid
-		view.blocks.material_id[index] = BlockMaterialID(5)
+		view.blocks.material_id[index] = world.BlockMaterialID(5)
 
 		edge_output := chunk_voxel_view_build_naive_mesh(
 			view,
@@ -1788,7 +1870,7 @@ when ODIN_DEBUG {
 		chunk_voxel_view_fill_empty(&view)
 		index = chunk_block_index(2, 3, 4)
 		view.blocks.occupancy[index] = .Solid
-		view.blocks.material_id[index] = BlockMaterialID(5)
+		view.blocks.material_id[index] = world.BlockMaterialID(5)
 
 
 		output := chunk_voxel_view_build_naive_mesh(
@@ -1872,7 +1954,7 @@ when ODIN_DEBUG {
 		}
 
 		// adjacent X/Y/Z: each pair should remove one shared face from each block
-		adjacent_pairs := [?][2]BlockCoord {
+		adjacent_pairs := [?][2]world.BlockCoord {
 			{{1, 1, 1}, {2, 1, 1}},
 			{{1, 1, 1}, {1, 2, 1}},
 			{{1, 1, 1}, {1, 1, 2}},
@@ -1884,7 +1966,7 @@ when ODIN_DEBUG {
 			for block in pair {
 				index = chunk_block_index(u32(block.x), u32(block.y), u32(block.z))
 				view.blocks.occupancy[index] = .Solid
-				view.blocks.material_id[index] = BlockMaterialID(1)
+				view.blocks.material_id[index] = world.BlockMaterialID(1)
 			}
 
 			count := chunk_voxel_view_count_exposed_faces(view, .Treat_Out_Of_Chunk_As_Empty)
@@ -1897,16 +1979,16 @@ when ODIN_DEBUG {
 		}
 
 		// adjacent chunks: touching boundary blocks suppress their shared faces.
-		left_view := ChunkVoxelView {
+		left_view := world.ChunkVoxelView {
 			blocks = make(
-				#soa[]ChunkVoxelViewElement,
+				#soa[]world.ChunkVoxelViewElement,
 				CHUNK_BLOCK_COUNT,
 				state.transient_allocator,
 			),
 		}
-		right_view := ChunkVoxelView {
+		right_view := world.ChunkVoxelView {
 			blocks = make(
-				#soa[]ChunkVoxelViewElement,
+				#soa[]world.ChunkVoxelViewElement,
 				CHUNK_BLOCK_COUNT,
 				state.transient_allocator,
 			),
@@ -1916,21 +1998,21 @@ when ODIN_DEBUG {
 
 		left_index := chunk_block_index(CHUNK_BLOCK_LOCAL_MAX, 1, 1)
 		left_view.blocks.occupancy[left_index] = .Solid
-		left_view.blocks.material_id[left_index] = BlockMaterialID(7)
+		left_view.blocks.material_id[left_index] = world.BlockMaterialID(7)
 
 		right_index := chunk_block_index(0, 1, 1)
 		right_view.blocks.occupancy[right_index] = .Solid
-		right_view.blocks.material_id[right_index] = BlockMaterialID(7)
+		right_view.blocks.material_id[right_index] = world.BlockMaterialID(7)
 
-		left_snapshot := ChunkSnapshot {
+		left_snapshot := world.ChunkSnapshot {
 			coord      = {0, 0, 0},
 			voxel_view = left_view,
 		}
-		right_snapshot := ChunkSnapshot {
+		right_snapshot := world.ChunkSnapshot {
 			coord      = {1, 0, 0},
 			voxel_view = right_view,
 		}
-		neighbor_test_snapshots := [?]ChunkSnapshot{left_snapshot, right_snapshot}
+		neighbor_test_snapshots := [?]world.ChunkSnapshot{left_snapshot, right_snapshot}
 
 		left_neighbor_output := chunk_mesh_job_execute_sync(
 			{
@@ -1940,8 +2022,8 @@ when ODIN_DEBUG {
 					left_snapshot.coord,
 				),
 				boundary_policy = .Sample_Neighbor_Snapshots,
-				output_allocator = state.transient_allocator,
 			},
+			state.transient_allocator,
 		)
 		log.assertf(
 			left_neighbor_output.face_count == 5,
@@ -1957,8 +2039,8 @@ when ODIN_DEBUG {
 					right_snapshot.coord,
 				),
 				boundary_policy = .Sample_Neighbor_Snapshots,
-				output_allocator = state.transient_allocator,
 			},
+			state.transient_allocator,
 		)
 		log.assertf(
 			right_neighbor_output.face_count == 5,
@@ -1973,7 +2055,7 @@ when ODIN_DEBUG {
 				for x in 1 ..< 3 {
 					index = chunk_block_index(u32(x), u32(y), u32(z))
 					view.blocks.occupancy[index] = .Solid
-					view.blocks.material_id[index] = BlockMaterialID(2)
+					view.blocks.material_id[index] = world.BlockMaterialID(2)
 				}
 			}
 		}
@@ -2008,7 +2090,7 @@ when ODIN_DEBUG {
 				for x in 0 ..< CHUNK_BLOCK_LENGTH {
 					index = chunk_block_index(u32(x), u32(y), u32(z))
 					view.blocks.occupancy[index] = .Solid
-					view.blocks.material_id[index] = BlockMaterialID(3)
+					view.blocks.material_id[index] = world.BlockMaterialID(3)
 				}
 			}
 		}
@@ -2042,7 +2124,7 @@ when ODIN_DEBUG {
 					if ((x + y + z) & 1) == 0 {
 						index = chunk_block_index(u32(x), u32(y), u32(z))
 						view.blocks.occupancy[index] = .Solid
-						view.blocks.material_id[index] = BlockMaterialID(4)
+						view.blocks.material_id[index] = world.BlockMaterialID(4)
 					}
 				}
 			}
@@ -2055,7 +2137,7 @@ when ODIN_DEBUG {
 			checker_count,
 		)
 
-		terrain_heightfield_voxel_view_fill(&view, ChunkCoord{0, 0, 0})
+		terrain_heightfield_voxel_view_fill(&view, world.ChunkCoord{0, 0, 0})
 		heightfield_top_y: [CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH]i32
 		for z in 0 ..< CHUNK_BLOCK_LENGTH {
 			for x in 0 ..< CHUNK_BLOCK_LENGTH {
@@ -2183,8 +2265,7 @@ TERRAIN_FACE_DESCS := [?]TerrainFaceDesc {
 	{neighbor_dx = 0, neighbor_dy = 0, neighbor_dz = -1, normal_id = 5},
 }
 
-TerrainPackedVertex :: distinct u32
-#assert(size_of(TerrainPackedVertex) == 4)
+TERRAIN_FACE_MASKS := [?]u8{1, 2, 4, 8, 16, 32}
 
 TerrainUnpackedVertex :: struct {
 	block_x, block_y, block_z:         u32,
@@ -2204,7 +2285,7 @@ TerrainFaceDesc :: struct {
 	normal_id:                             u32,
 }
 
-terrain_chunk_origin_world_from_coord :: proc(coord: ChunkCoord) -> Vec4 {
+terrain_chunk_origin_world_from_coord :: proc(coord: world.ChunkCoord) -> Vec4 {
 	origin := chunk_origin_from_coord(coord)
 	return {
 		f32(origin.x) * TERRAIN_BLOCK_WORLD_SIZE,
@@ -2217,14 +2298,14 @@ terrain_chunk_origin_world_from_coord :: proc(coord: ChunkCoord) -> Vec4 {
 terrain_pack_vertex :: proc(
 	block_x, block_y, block_z: u32,
 	normal_id, material_id, corner_id: u32,
-) -> TerrainPackedVertex {
+) -> world.TerrainPackedVertex {
 	log.assertf(block_x <= CHUNK_BLOCK_LOCAL_MAX, "terrain block_x out of range: %d", block_x)
 	log.assertf(block_y <= CHUNK_BLOCK_LOCAL_MAX, "terrain block_y out of range: %d", block_y)
 	log.assertf(block_z <= CHUNK_BLOCK_LOCAL_MAX, "terrain block_z out of range: %d", block_z)
 	log.assertf(normal_id < 6, "terrain normal_id out of range: %d", normal_id)
 	log.assertf(material_id <= 255, "terrain material_id out of range: %d", material_id)
 	log.assertf(corner_id < 4, "terrain corner_id out of range: %d", corner_id)
-	return TerrainPackedVertex(
+	return world.TerrainPackedVertex(
 		(block_x << TERRAIN_PACK_LOCAL_X_SHIFT) |
 		(block_y << TERRAIN_PACK_LOCAL_Y_SHIFT) |
 		(block_z << TERRAIN_PACK_LOCAL_Z_SHIFT) |
@@ -2234,7 +2315,7 @@ terrain_pack_vertex :: proc(
 	)
 }
 
-terrain_unpack_vertex :: proc(vertex: TerrainPackedVertex) -> TerrainUnpackedVertex {
+terrain_unpack_vertex :: proc(vertex: world.TerrainPackedVertex) -> TerrainUnpackedVertex {
 	packed := u32(vertex)
 	return {
 		block_x = (packed >> TERRAIN_PACK_LOCAL_X_SHIFT) & TERRAIN_PACK_LOCAL_MASK,
@@ -2247,20 +2328,21 @@ terrain_unpack_vertex :: proc(vertex: TerrainPackedVertex) -> TerrainUnpackedVer
 }
 
 terrain_emit_face :: proc(
-	vertices: []TerrainPackedVertex,
+	vertices: []world.TerrainPackedVertex,
 	indices: []u32,
+	face_index: u32,
 	block_x, block_y, block_z: u32,
 	normal_id: u32,
 	material_id: u32,
-	vertex_count: ^u32,
-	index_count: ^u32,
 ) {
-	log.assertf(int(vertex_count^) + 4 <= len(vertices), "terrain mesh vertex capacity exceeded")
-	log.assertf(int(index_count^) + 6 <= len(indices), "terrain mesh index capacity exceeded")
+	vertex_index := face_index * 4
+	index_index := face_index * 6
+	log.assertf(int(vertex_index) + 4 <= len(vertices), "terrain mesh vertex capacity exceeded")
+	log.assertf(int(index_index) + 6 <= len(indices), "terrain mesh index capacity exceeded")
 
-	base := vertex_count^
-	v := int(vertex_count^)
-	i := int(index_count^)
+	base := vertex_index
+	v := int(vertex_index)
+	i := int(index_index)
 
 	vertices[v + 0] = terrain_pack_vertex(block_x, block_y, block_z, normal_id, material_id, 0)
 	vertices[v + 1] = terrain_pack_vertex(block_x, block_y, block_z, normal_id, material_id, 1)
@@ -2273,12 +2355,9 @@ terrain_emit_face :: proc(
 	indices[i + 3] = base + 0
 	indices[i + 4] = base + 2
 	indices[i + 5] = base + 3
-
-	vertex_count^ += 4
-	index_count^ += 6
 }
 
-terrain_heightfield_voxel_view_fill :: proc(view: ^ChunkVoxelView, chunk: ChunkCoord) {
+terrain_heightfield_voxel_view_fill :: proc(view: ^world.ChunkVoxelView, chunk: world.ChunkCoord) {
 	log.assertf(
 		len(view.blocks) == CHUNK_BLOCK_COUNT,
 		"heightfield fill expects %d blocks, got %d",
@@ -2322,12 +2401,12 @@ terrain_heightfield_voxel_view_fill :: proc(view: ^ChunkVoxelView, chunk: ChunkC
 				// slope side faces green; otherwise just-below-top dirt blocks show as
 				// brown speckles wherever neighboring columns are lower.
 				blocks_below_surface := height - world_y
-				material_id := BlockMaterialID(TERRAIN_STONE_MAT_ID)
+				material_id := world.BlockMaterialID(TERRAIN_STONE_MAT_ID)
 				if blocks_below_surface < TERRAIN_GRASS_CAP_BLOCK_DEPTH {
-					material_id = BlockMaterialID(TERRAIN_GRASS_MAT_ID)
+					material_id = world.BlockMaterialID(TERRAIN_GRASS_MAT_ID)
 				} else if blocks_below_surface <
 				   TERRAIN_GRASS_CAP_BLOCK_DEPTH + TERRAIN_DIRT_LAYER_BLOCK_DEPTH {
-					material_id = BlockMaterialID(TERRAIN_DIRT_MAT_ID)
+					material_id = world.BlockMaterialID(TERRAIN_DIRT_MAT_ID)
 				}
 
 				index := chunk_block_index(u32(x), u32(y), u32(z))
@@ -2351,6 +2430,7 @@ GEOMETRY_MAX_UPLOAD_POSITION_COLOR_VERTICES :: 65_536
 GEOMETRY_MAX_VERTEX_UPLOAD_BYTES ::
 	GEOMETRY_MAX_UPLOAD_POSITION_COLOR_VERTICES * size_of(PositionColorVertex)
 GEOMETRY_MAX_UPLOAD_INDEX_ELEMENTS :: 196_608
+GEOMETRY_DEFERRED_RELEASE_CAPACITY :: GEOMETRY_MAX_GEOMETRIES
 GEOMETRY_VERTEX_BYTE_ALIGNMENT :: 4
 GEOMETRY_ID_SLOT_BITS :: 16
 GEOMETRY_ID_SLOT_MASK :: u32((1 << GEOMETRY_ID_SLOT_BITS) - 1)
@@ -2389,6 +2469,11 @@ GeometrySlot :: struct {
 	occupied:   bool,
 }
 
+GeometryDeferredRelease :: struct {
+	geometry: Geometry,
+	fence:    ^sdl.GPUFence,
+}
+
 GeometryDrawParams :: struct {
 	vertex_byte_offset:  u32,
 	vertex_stride_bytes: u32,
@@ -2396,22 +2481,26 @@ GeometryDrawParams :: struct {
 }
 
 GeometryPool :: struct {
-	geometry_slots:              []GeometrySlot,
-	geometry_count:              u32,
-	vertex_range_tlsf:           mem_tlsf.Allocator,
-	index_range_tlsf:            mem_tlsf.Allocator,
-	vertex_range_allocator:      mem.Allocator,
-	index_range_allocator:       mem.Allocator,
-	vertex_buffer:               ^sdl.GPUBuffer,
-	index_buffer:                ^sdl.GPUBuffer,
-	vertex_upload_buffer:        ^sdl.GPUTransferBuffer,
-	index_upload_buffer:         ^sdl.GPUTransferBuffer,
-	vertex_byte_capacity:        u32,
-	vertex_byte_count:           u32,
-	index_element_capacity:      u32,
-	index_element_count:         u32,
-	vertex_upload_byte_capacity: u32,
-	index_upload_byte_capacity:  u32,
+	geometry_slots:                   []GeometrySlot,
+	geometry_count:                   u32,
+	vertex_range_tlsf:                mem_tlsf.Allocator,
+	index_range_tlsf:                 mem_tlsf.Allocator,
+	vertex_range_allocator:           mem.Allocator,
+	index_range_allocator:            mem.Allocator,
+	vertex_buffer:                    ^sdl.GPUBuffer,
+	index_buffer:                     ^sdl.GPUBuffer,
+	vertex_upload_buffer:             ^sdl.GPUTransferBuffer,
+	index_upload_buffer:              ^sdl.GPUTransferBuffer,
+	deferred_releases:                [GEOMETRY_DEFERRED_RELEASE_CAPACITY]GeometryDeferredRelease,
+	deferred_release_count:           u32,
+	deferred_release_enqueued_total:  u64,
+	deferred_release_completed_total: u64,
+	vertex_byte_capacity:             u32,
+	vertex_byte_count:                u32,
+	index_element_capacity:           u32,
+	index_element_count:              u32,
+	vertex_upload_byte_capacity:      u32,
+	index_upload_byte_capacity:       u32,
 }
 
 geometry_layout_stride_bytes :: proc(layout_kind: GeometryLayoutKind) -> u32 {
@@ -2419,7 +2508,7 @@ geometry_layout_stride_bytes :: proc(layout_kind: GeometryLayoutKind) -> u32 {
 	case GeometryLayoutKind.Position_Color_F32x4:
 		return u32(size_of(PositionColorVertex))
 	case GeometryLayoutKind.Terrain_Packed_U32:
-		return u32(size_of(TerrainPackedVertex))
+		return u32(size_of(world.TerrainPackedVertex))
 	case GeometryLayoutKind.Invalid:
 		log.assertf(false, "unknown layout kind: %v", layout_kind)
 	}
@@ -2593,6 +2682,8 @@ geometry_init :: proc(
 }
 
 geometry_destroy :: proc(pool: ^GeometryPool) {
+	geometry_deferred_releases_flush_after_idle(pool)
+
 	if pool.vertex_upload_buffer != nil {
 		sdl.ReleaseGPUTransferBuffer(state.device, pool.vertex_upload_buffer)
 	}
@@ -2614,6 +2705,10 @@ geometry_destroy :: proc(pool: ^GeometryPool) {
 
 	pool.geometry_slots = nil
 	pool.geometry_count = 0
+	pool.deferred_releases = {}
+	pool.deferred_release_count = 0
+	pool.deferred_release_enqueued_total = 0
+	pool.deferred_release_completed_total = 0
 	pool.vertex_byte_capacity = 0
 	pool.vertex_byte_count = 0
 	pool.index_element_capacity = 0
@@ -2623,8 +2718,16 @@ geometry_destroy :: proc(pool: ^GeometryPool) {
 }
 
 geometry_id_from_slot :: proc(slot_index, generation: u32) -> GeometryID {
-	log.assertf(slot_index < GEOMETRY_ID_SLOT_MASK, "geometry slot index exceeds ID range: %d", slot_index)
-	log.assertf(generation > 0 && generation <= GEOMETRY_ID_GENERATION_MASK, "invalid geometry generation: %d", generation)
+	log.assertf(
+		slot_index < GEOMETRY_ID_SLOT_MASK,
+		"geometry slot index exceeds ID range: %d",
+		slot_index,
+	)
+	log.assertf(
+		generation > 0 && generation <= GEOMETRY_ID_GENERATION_MASK,
+		"invalid geometry generation: %d",
+		generation,
+	)
 	return GeometryID((generation << GEOMETRY_ID_SLOT_BITS) | (slot_index + 1))
 }
 
@@ -2649,7 +2752,11 @@ geometry_slot_get :: proc(pool: ^GeometryPool, id: GeometryID) -> ^GeometrySlot 
 	log.assertf(id != INVALID_GEOMETRY_ID, "Invalid geometry ID: %d", u32(id))
 
 	slot_index := geometry_id_slot_index(id)
-	log.assertf(slot_index < u32(len(pool.geometry_slots)), "Geometry ID out of bounds: %d", u32(id))
+	log.assertf(
+		slot_index < u32(len(pool.geometry_slots)),
+		"Geometry ID out of bounds: %d",
+		u32(id),
+	)
 
 	slot := &pool.geometry_slots[slot_index]
 	log.assertf(slot.occupied, "Geometry ID refers to a free slot: %d", u32(id))
@@ -2684,6 +2791,136 @@ geometry_range_byte_offset :: proc(range, backing: []byte) -> u32 {
 	return u32(offset_wide)
 }
 
+geometry_free_ranges :: proc(pool: ^GeometryPool, geometry: Geometry) {
+	vertex_free_err := mem.free_bytes(geometry.vertex_allocation, pool.vertex_range_allocator)
+	index_free_err := mem.free_bytes(geometry.index_allocation, pool.index_range_allocator)
+	log.assertf(
+		vertex_free_err == nil,
+		"geometry vertex range release failed: %v",
+		vertex_free_err,
+	)
+	log.assertf(index_free_err == nil, "geometry index range release failed: %v", index_free_err)
+}
+
+geometry_deferred_release_remove_at :: proc(pool: ^GeometryPool, index: u32) {
+	log.assertf(
+		index < pool.deferred_release_count,
+		"deferred geometry release index out of bounds: %d",
+		index,
+	)
+
+	last_index := pool.deferred_release_count - 1
+	if index != last_index {
+		pool.deferred_releases[index] = pool.deferred_releases[last_index]
+	}
+	pool.deferred_releases[last_index] = {}
+	pool.deferred_release_count -= 1
+	pool.deferred_release_completed_total += 1
+}
+
+geometry_deferred_release_records_for_fence :: proc(pool: ^GeometryPool, fence: ^sdl.GPUFence) {
+	log.assertf(fence != nil, "deferred geometry release fence must not be nil")
+
+	for i := u32(0); i < pool.deferred_release_count; {
+		record := pool.deferred_releases[i]
+		if record.fence != fence {
+			i += 1
+			continue
+		}
+
+		geometry_free_ranges(pool, record.geometry)
+		geometry_deferred_release_remove_at(pool, i)
+	}
+
+	sdl.ReleaseGPUFence(state.device, fence)
+}
+
+geometry_deferred_releases_flush_after_idle :: proc(pool: ^GeometryPool) {
+	for pool.deferred_release_count > 0 {
+		record := pool.deferred_releases[0]
+		if record.fence != nil {
+			geometry_deferred_release_records_for_fence(pool, record.fence)
+			continue
+		}
+
+		geometry_free_ranges(pool, record.geometry)
+		geometry_deferred_release_remove_at(pool, 0)
+	}
+}
+
+geometry_deferred_releases_poll :: proc(pool: ^GeometryPool) {
+	if state.device == nil {
+		geometry_deferred_releases_flush_after_idle(pool)
+		return
+	}
+
+	for i := u32(0); i < pool.deferred_release_count; {
+		fence := pool.deferred_releases[i].fence
+		if fence == nil || !sdl.QueryGPUFence(state.device, fence) {
+			i += 1
+			continue
+		}
+
+		geometry_deferred_release_records_for_fence(pool, fence)
+		i = 0
+	}
+}
+
+geometry_deferred_releases_has_pending_fence :: proc(pool: ^GeometryPool) -> bool {
+	for i := u32(0); i < pool.deferred_release_count; i += 1 {
+		if pool.deferred_releases[i].fence == nil {
+			return true
+		}
+	}
+	return false
+}
+
+geometry_deferred_releases_attach_pending_to_fence :: proc(
+	pool: ^GeometryPool,
+	fence: ^sdl.GPUFence,
+) {
+	log.assertf(fence != nil, "deferred geometry release fence must not be nil")
+
+	attached := false
+	for i := u32(0); i < pool.deferred_release_count; i += 1 {
+		if pool.deferred_releases[i].fence != nil {
+			continue
+		}
+		pool.deferred_releases[i].fence = fence
+		attached = true
+	}
+
+	if !attached {
+		sdl.ReleaseGPUFence(state.device, fence)
+	}
+}
+
+geometry_deferred_release_enqueue :: proc(pool: ^GeometryPool, geometry: Geometry) {
+	if state.device == nil {
+		geometry_free_ranges(pool, geometry)
+		return
+	}
+
+	if pool.deferred_release_count >= GEOMETRY_DEFERRED_RELEASE_CAPACITY {
+		log.assertf(
+			sdl.WaitForGPUIdle(state.device),
+			"WaitForGPUIdle before deferred geometry release flush failed: %s",
+			sdl.GetError(),
+		)
+		geometry_deferred_releases_flush_after_idle(pool)
+	}
+
+	log.assertf(
+		pool.deferred_release_count < GEOMETRY_DEFERRED_RELEASE_CAPACITY,
+		"deferred geometry release capacity exceeded",
+	)
+	pool.deferred_releases[pool.deferred_release_count] = {
+		geometry = geometry,
+	}
+	pool.deferred_release_count += 1
+	pool.deferred_release_enqueued_total += 1
+}
+
 geometry_alloc :: proc(
 	pool: ^GeometryPool,
 	layout_kind: GeometryLayoutKind,
@@ -2709,7 +2946,11 @@ geometry_alloc :: proc(
 	)
 
 	index_bytes_wide := u64(index_count) * u64(size_of(u32))
-	log.assertf(index_bytes_wide <= u64(max(int)), "index allocation size exceeds int: %d", index_bytes_wide)
+	log.assertf(
+		index_bytes_wide <= u64(max(int)),
+		"index allocation size exceeds int: %d",
+		index_bytes_wide,
+	)
 
 	vertex_allocation, vertex_err := mem.alloc_bytes_non_zeroed(
 		int(vertex_byte_count),
@@ -2733,14 +2974,31 @@ geometry_alloc :: proc(
 	if !slot_ok {
 		vertex_free_err := mem.free_bytes(vertex_allocation, pool.vertex_range_allocator)
 		index_free_err := mem.free_bytes(index_allocation, pool.index_range_allocator)
-		log.assertf(vertex_free_err == nil, "geometry vertex range rollback failed: %v", vertex_free_err)
-		log.assertf(index_free_err == nil, "geometry index range rollback failed: %v", index_free_err)
+		log.assertf(
+			vertex_free_err == nil,
+			"geometry vertex range rollback failed: %v",
+			vertex_free_err,
+		)
+		log.assertf(
+			index_free_err == nil,
+			"geometry index range rollback failed: %v",
+			index_free_err,
+		)
 		log.assertf(false, "geometry pool is full")
 	}
 
-	vertex_byte_offset := geometry_range_byte_offset(vertex_allocation, pool.vertex_range_tlsf.pool.data)
-	index_byte_offset := geometry_range_byte_offset(index_allocation, pool.index_range_tlsf.pool.data)
-	log.assertf(index_byte_offset % u32(size_of(u32)) == 0, "index range offset must be u32-aligned")
+	vertex_byte_offset := geometry_range_byte_offset(
+		vertex_allocation,
+		pool.vertex_range_tlsf.pool.data,
+	)
+	index_byte_offset := geometry_range_byte_offset(
+		index_allocation,
+		pool.index_range_tlsf.pool.data,
+	)
+	log.assertf(
+		index_byte_offset % u32(size_of(u32)) == 0,
+		"index range offset must be u32-aligned",
+	)
 
 	slot := &pool.geometry_slots[slot_index]
 	id := geometry_id_from_slot(slot_index, slot.generation)
@@ -2771,15 +3029,10 @@ geometry_release :: proc(pool: ^GeometryPool, id: GeometryID) {
 	slot := geometry_slot_get(pool, id)
 	geometry := slot.geometry
 
-	if state.device != nil {
-		log.assertf(sdl.WaitForGPUIdle(state.device), "WaitForGPUIdle before geometry release failed: %s", sdl.GetError())
-	}
-
-	vertex_free_err := mem.free_bytes(geometry.vertex_allocation, pool.vertex_range_allocator)
-	index_free_err := mem.free_bytes(geometry.index_allocation, pool.index_range_allocator)
-	log.assertf(vertex_free_err == nil, "geometry vertex range release failed: %v", vertex_free_err)
-	log.assertf(index_free_err == nil, "geometry index range release failed: %v", index_free_err)
-	log.assertf(pool.vertex_byte_count >= u32(len(geometry.vertex_allocation)), "geometry vertex byte count underflow")
+	log.assertf(
+		pool.vertex_byte_count >= u32(len(geometry.vertex_allocation)),
+		"geometry vertex byte count underflow",
+	)
 	log.assertf(pool.index_element_count >= geometry.index_count, "geometry index count underflow")
 	log.assertf(pool.geometry_count > 0, "geometry count underflow")
 
@@ -2790,6 +3043,8 @@ geometry_release :: proc(pool: ^GeometryPool, id: GeometryID) {
 	slot.geometry = {}
 	slot.occupied = false
 	geometry_slot_generation_advance(slot)
+
+	geometry_deferred_release_enqueue(pool, geometry)
 }
 
 geometry_upload_bytes :: proc(
@@ -2803,17 +3058,34 @@ geometry_upload_bytes :: proc(
 
 	index_count := u32(len(indices))
 	index_bytes_wide := u64(index_count) * u64(size_of(u32))
-	log.assertf(index_bytes_wide <= u64(max(u32)), "index upload size exceeds u32: %d", index_bytes_wide)
+	log.assertf(
+		index_bytes_wide <= u64(max(u32)),
+		"index upload size exceeds u32: %d",
+		index_bytes_wide,
+	)
 	index_bytes := u32(index_bytes_wide)
 
-	log.assertf(vertex_byte_count == u32(len(geometry.vertex_allocation)), "vertex upload size mismatch")
+	log.assertf(
+		vertex_byte_count == u32(len(geometry.vertex_allocation)),
+		"vertex upload size mismatch",
+	)
 	log.assertf(index_bytes == u32(len(geometry.index_allocation)), "index upload size mismatch")
-	log.assertf(vertex_byte_count <= pool.vertex_upload_byte_capacity, "geometry vertex append exceeds upload buffer capacity")
-	log.assertf(index_bytes <= pool.index_upload_byte_capacity, "geometry index append exceeds upload buffer capacity")
+	log.assertf(
+		vertex_byte_count <= pool.vertex_upload_byte_capacity,
+		"geometry vertex append exceeds upload buffer capacity",
+	)
+	log.assertf(
+		index_bytes <= pool.index_upload_byte_capacity,
+		"geometry index append exceeds upload buffer capacity",
+	)
 
 	vertex_dst_offset := geometry.vertex_byte_offset
 	index_dst_offset_wide := u64(geometry.first_index) * u64(size_of(u32))
-	log.assertf(index_dst_offset_wide <= u64(max(u32)), "index destination offset exceeds u32: %d", index_dst_offset_wide)
+	log.assertf(
+		index_dst_offset_wide <= u64(max(u32)),
+		"index destination offset exceeds u32: %d",
+		index_dst_offset_wide,
+	)
 	index_dst_offset := u32(index_dst_offset_wide)
 
 	// Upload command buffers execute asynchronously; cycle the reused staging buffer
@@ -2914,7 +3186,7 @@ geometry_append_bytes :: proc(
 
 geometry_append_chunk_mesh_output :: proc(
 	pool: ^GeometryPool,
-	output: ChunkMeshOutput,
+	output: world.ChunkMeshOutput,
 ) -> GeometryID {
 	log.assertf(pool != nil, "pool is nil")
 
@@ -2956,7 +3228,11 @@ geometry_append_chunk_mesh_output :: proc(
 	)
 }
 
-geometry_replace :: proc(pool: ^GeometryPool, old_id: GeometryID, output: ChunkMeshOutput) -> GeometryID {
+geometry_replace :: proc(
+	pool: ^GeometryPool,
+	old_id: GeometryID,
+	output: world.ChunkMeshOutput,
+) -> GeometryID {
 	if output.face_count == 0 {
 		geometry_release(pool, old_id)
 		return INVALID_GEOMETRY_ID
@@ -3244,8 +3520,25 @@ gfx_render :: proc() {
 		sdl.EndGPURenderPass(render_pass)
 	}
 
-	log.assertf(sdl.SubmitGPUCommandBuffer(cmdbuf), "SubmitGPUCommandBuffer: %s", sdl.GetError())
+	if geometry_deferred_releases_has_pending_fence(&state.geometry_pool) {
+		fence := sdl.SubmitGPUCommandBufferAndAcquireFence(cmdbuf)
+		log.assertf(fence != nil, "SubmitGPUCommandBufferAndAcquireFence: %s", sdl.GetError())
+		geometry_deferred_releases_attach_pending_to_fence(&state.geometry_pool, fence)
+	} else {
+		log.assertf(
+			sdl.SubmitGPUCommandBuffer(cmdbuf),
+			"SubmitGPUCommandBuffer: %s",
+			sdl.GetError(),
+		)
+	}
+	geometry_deferred_releases_poll(&state.geometry_pool)
+}
 
+metrics_record_frame :: proc(dt: f32) {
+	state.frame_count += 1
+	state.current_frame_ms = dt * 1000.0
+	state.current_fps = dt > 0 ? 1.0 / dt : 0.0
+	state.auto_test_elapsed_ms += state.current_frame_ms
 	state.prev_chunks_total = state.chunks_total
 	state.prev_chunks_without_geometry = state.chunks_without_geometry
 	state.prev_chunks_frustum_culled = state.chunks_frustum_culled
@@ -3258,6 +3551,64 @@ gfx_render :: proc() {
 	state.prev_chunk_mesh_results_uploaded = state.chunk_mesh_results_uploaded
 	state.prev_chunks_dirty_remaining = state.chunks_dirty_remaining
 	state.prev_chunks_evicted = state.chunks_evicted
+
+	if state.frame_metrics_sample_count == 0 {
+		state.frame_metrics_min_ms = state.current_frame_ms
+		state.frame_metrics_max_ms = state.current_frame_ms
+	} else {
+		state.frame_metrics_min_ms = math.min(state.frame_metrics_min_ms, state.current_frame_ms)
+		state.frame_metrics_max_ms = math.max(state.frame_metrics_max_ms, state.current_frame_ms)
+	}
+
+	state.frame_metrics_accum_ms += state.current_frame_ms
+	state.frame_metrics_elapsed_ms += state.current_frame_ms
+	state.frame_metrics_sample_count += 1
+	state.frame_metrics_chunks_generated += state.prev_chunks_generated
+	state.frame_metrics_chunks_evicted += state.prev_chunks_evicted
+	state.frame_metrics_mesh_submitted += state.prev_chunk_mesh_jobs_submitted
+	state.frame_metrics_mesh_committed += state.prev_chunk_mesh_results_committed
+	state.frame_metrics_mesh_uploaded += state.prev_chunk_mesh_results_uploaded
+	state.frame_metrics_dirty_remaining_max = math.max(
+		state.frame_metrics_dirty_remaining_max,
+		state.prev_chunks_dirty_remaining,
+	)
+
+	when LOG_FRAME_METRICS {
+		if state.frame_metrics_elapsed_ms >= f32(FRAME_METRICS_LOG_INTERVAL_MS) {
+			avg_ms := state.frame_metrics_accum_ms / f32(state.frame_metrics_sample_count)
+			avg_fps := avg_ms > 0 ? 1000.0 / avg_ms : 0.0
+			log.infof(
+				"Frame metrics: frame=%d samples=%d avg_ms=%.3f min_ms=%.3f max_ms=%.3f avg_fps=%.1f chunks_generated=%d chunks_evicted=%d mesh_submitted=%d mesh_committed=%d mesh_uploaded=%d dirty_remaining_max=%d deferred_geometry=%d deferred_enqueued=%d deferred_completed=%d",
+				state.frame_count,
+				state.frame_metrics_sample_count,
+				avg_ms,
+				state.frame_metrics_min_ms,
+				state.frame_metrics_max_ms,
+				avg_fps,
+				state.frame_metrics_chunks_generated,
+				state.frame_metrics_chunks_evicted,
+				state.frame_metrics_mesh_submitted,
+				state.frame_metrics_mesh_committed,
+				state.frame_metrics_mesh_uploaded,
+				state.frame_metrics_dirty_remaining_max,
+				state.geometry_pool.deferred_release_count,
+				state.geometry_pool.deferred_release_enqueued_total,
+				state.geometry_pool.deferred_release_completed_total,
+			)
+
+			state.frame_metrics_accum_ms = 0
+			state.frame_metrics_elapsed_ms = 0
+			state.frame_metrics_sample_count = 0
+			state.frame_metrics_min_ms = 0
+			state.frame_metrics_max_ms = 0
+			state.frame_metrics_chunks_generated = 0
+			state.frame_metrics_chunks_evicted = 0
+			state.frame_metrics_mesh_submitted = 0
+			state.frame_metrics_mesh_committed = 0
+			state.frame_metrics_mesh_uploaded = 0
+			state.frame_metrics_dirty_remaining_max = 0
+		}
+	}
 
 	state.chunks_total = 0
 	state.chunks_without_geometry = 0
@@ -3318,9 +3669,12 @@ init :: proc() {
 	sdl.SetLogOutputFunction(sdl_log_output, nil)
 	sdl.SetLogPriority(.GPU, .DEBUG)
 
-	state.chunk_mesh_worker_arena_pool = arena_pool_init(
-		CHUNK_MESH_WORKER_COUNT,
-		CHUNK_MESH_WORKER_ARENA_BYTES,
+	async.init(
+		{
+			allocator = state.persistent_allocator,
+			generation_execute = chunk_generation_job_execute_sync,
+			mesh_execute = chunk_mesh_job_execute_sync,
+		},
 	)
 
 	log.debug("Application initialized")
@@ -3328,6 +3682,7 @@ init :: proc() {
 
 shutdown :: proc() {
 	log.debug("Application shutdown")
+	async.shutdown()
 	sdl.ReleaseWindowFromGPUDevice(state.device, state.window)
 	sdl.DestroyGPUDevice(state.device)
 	sdl.DestroyWindow(state.window)
@@ -3428,6 +3783,7 @@ setup_resources :: proc() {
 
 destroy_resources :: proc() {
 	log.debug("Destroying resources")
+	async.shutdown()
 	log.assertf(sdl.WaitForGPUIdle(state.device), "WaitForGPUIdle failed: %s", sdl.GetError())
 	geometry_destroy(&state.geometry_pool)
 	sdl.ReleaseGPUTexture(state.device, state.depth_texture)
@@ -3575,10 +3931,11 @@ main :: proc() {
 	setup_resources()
 	defer destroy_resources()
 
-	current_time := sdl.GetTicks()
+	performance_frequency := f64(sdl.GetPerformanceFrequency())
+	current_time := sdl.GetPerformanceCounter()
 	for state.is_window_open {
-		now := sdl.GetTicks()
-		dt := cast(f32)(now - current_time) / 1000.0
+		now := sdl.GetPerformanceCounter()
+		dt := f32(f64(now - current_time) / performance_frequency)
 		current_time = now
 
 		process_events()
@@ -3586,5 +3943,24 @@ main :: proc() {
 		handle_input(dt)
 		update()
 		gfx_render()
+		metrics_record_frame(dt)
+
+		when AUTO_TEST_DURATION_MS > 0 {
+			if state.auto_test_elapsed_ms >= f32(AUTO_TEST_DURATION_MS) {
+				log.infof(
+					"Auto test duration reached: frame=%d elapsed_ms=%.3f",
+					state.frame_count,
+					state.auto_test_elapsed_ms,
+				)
+				state.is_window_open = false
+			}
+		} else {
+			when AUTO_TEST_FRAME_LIMIT > 0 {
+				if state.frame_count >= AUTO_TEST_FRAME_LIMIT {
+					log.infof("Auto test frame limit reached: frame=%d", state.frame_count)
+					state.is_window_open = false
+				}
+			}
+		}
 	}
 }

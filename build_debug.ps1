@@ -60,7 +60,7 @@ if (Test-Path $ShaderSourceDir) {
 		}
 }
 
-odin build $SourceDir -out:$ExePath -pdb-name:$PdbPath -debug -vet -vet-packages:main -vet-unused-procedures -warnings-as-errors
+odin build $SourceDir -out:$ExePath -pdb-name:$PdbPath -debug -vet -vet-packages:main,async,world -vet-unused-procedures -warnings-as-errors
 if ($LASTEXITCODE -ne 0) {
 	exit $LASTEXITCODE
 }
