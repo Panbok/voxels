@@ -22,6 +22,7 @@ GENERATION_RESULT_QUEUE_CAPACITY :: 128
 
 MESH_WORKER_COUNT :: 4
 MESH_WORKER_ARENA_BYTES :: 8 * mem.Megabyte
+MESH_WORKER_SCRATCH_ARENA_BYTES :: 2 * mem.Megabyte
 
 MESH_QUEUE_CAPACITY :: 128
 MESH_RESULT_QUEUE_CAPACITY :: MESH_WORKER_COUNT
@@ -63,6 +64,7 @@ state := struct {
 	mesh_threads:              [MESH_WORKER_COUNT]^thread.Thread,
 	mesh_contexts:             [MESH_WORKER_COUNT]MeshWorkerContext,
 	mesh_worker_arena_pool:    MeshWorkerArenaPool,
+	mesh_worker_scratch_pool:  MeshWorkerArenaPool,
 	mesh_result_pending:       [MESH_WORKER_COUNT]bool,
 	mesh_jobs:                 [MESH_QUEUE_CAPACITY]world_async.ChunkMeshJob,
 	mesh_job_head:             u32,
@@ -80,6 +82,7 @@ GenerationExecuteProc :: #type proc(
 MeshExecuteProc :: #type proc(
 	job: world_async.ChunkMeshJob,
 	output_allocator: mem.Allocator,
+	scratch_allocator: mem.Allocator,
 ) -> world_async.ChunkMeshOutput
 
 InitConfig :: struct {
@@ -342,13 +345,20 @@ mesh_worker_proc :: proc(data: rawptr) {
 		}
 
 		mesh_worker_arena_pool_reset_element(&state.mesh_worker_arena_pool, worker_index)
-		output := execute(job, state.mesh_worker_arena_pool.elements[worker_index].allocator)
+		mesh_worker_arena_pool_reset_element(&state.mesh_worker_scratch_pool, worker_index)
+		output := execute(
+			job,
+			state.mesh_worker_arena_pool.elements[worker_index].allocator,
+			state.mesh_worker_scratch_pool.elements[worker_index].allocator,
+		)
 
 		result := world_async.ChunkMeshJobResult {
-			coord         = job.snapshot.coord,
-			block_version = job.snapshot.block_version,
-			worker_index  = worker_index,
-			output        = output,
+			coord          = job.snapshot.coord,
+			block_version  = job.snapshot.block_version,
+			scope_kind     = job.scope_kind,
+			subchunk_index = job.subchunk_index,
+			worker_index   = worker_index,
+			output         = output,
 		}
 
 		sync.lock(&state.mesh_mutex)
@@ -378,6 +388,12 @@ init :: proc(config: InitConfig) {
 		&state.mesh_worker_arena_pool,
 		MESH_WORKER_COUNT,
 		MESH_WORKER_ARENA_BYTES,
+		config.allocator,
+	)
+	mesh_worker_arena_pool_init(
+		&state.mesh_worker_scratch_pool,
+		MESH_WORKER_COUNT,
+		MESH_WORKER_SCRATCH_ARENA_BYTES,
 		config.allocator,
 	)
 

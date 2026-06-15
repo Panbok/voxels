@@ -36,6 +36,8 @@ AUTO_TEST_DURATION_MS :: #config(AUTO_TEST_DURATION_MS, 0)
 LOG_FRAME_METRICS :: #config(LOG_FRAME_METRICS, false)
 FRAME_METRICS_LOG_INTERVAL_MS :: #config(FRAME_METRICS_LOG_INTERVAL_MS, 1000)
 AUTO_TEST_DISABLE_VSYNC :: #config(AUTO_TEST_DISABLE_VSYNC, false)
+RUN_MESH_BENCHMARK :: #config(RUN_MESH_BENCHMARK, false)
+MESH_BENCHMARK_ITERATIONS :: #config(MESH_BENCHMARK_ITERATIONS, 8)
 
 //////////////////////////////////////
 // State
@@ -43,7 +45,7 @@ AUTO_TEST_DISABLE_VSYNC :: #config(AUTO_TEST_DISABLE_VSYNC, false)
 
 Memory :: struct {
 	// Main
-	persistent_slab:      [128 * mem.Megabyte]u8,
+	persistent_slab:      [192 * mem.Megabyte]u8,
 	transient_slab:       [16 * mem.Megabyte]u8,
 	persistent_arena:     mem.Arena,
 	transient_arena:      mem.Arena,
@@ -409,7 +411,7 @@ when ODIN_DEBUG {
 ///////////////////////////////////////////
 
 INVALID_GEOMETRY_ID :: GeometryID(0)
-GEOMETRY_MAX_GEOMETRIES :: 1024
+GEOMETRY_MAX_GEOMETRIES :: 16384
 GEOMETRY_MAX_POSITION_COLOR_VERTICES :: 2_000_000
 GEOMETRY_MAX_VERTEX_BYTES :: GEOMETRY_MAX_POSITION_COLOR_VERTICES * size_of(PositionColorVertex)
 GEOMETRY_MAX_INDEX_ELEMENTS :: 24_000_000
@@ -1449,7 +1451,9 @@ gfx_render :: proc() {
 		for chunk in world.chunk_store_chunks() {
 			state.chunks_total += 1
 
-			if chunk.geometry_id == world.INVALID_CHUNK_GEOMETRY_ID {
+			has_full_geometry := chunk.geometry_id != world.INVALID_CHUNK_GEOMETRY_ID
+			has_subchunk_geometry := world.chunk_subchunk_geometry_has_any(chunk)
+			if !has_full_geometry && !has_subchunk_geometry {
 				state.chunks_without_geometry += 1
 				continue
 			}
@@ -1460,13 +1464,6 @@ gfx_render :: proc() {
 				continue
 			}
 
-			geometry := geometry_get(&state.geometry_pool, GeometryID(chunk.geometry_id))
-			log.assertf(
-				geometry.layout_kind == .Terrain_Packed_U32,
-				"chunk geometry must use terrain layout: %v",
-				geometry.layout_kind,
-			)
-
 			sdl.PushGPUVertexUniformData(
 				cmdbuf,
 				0,
@@ -1475,31 +1472,83 @@ gfx_render :: proc() {
 			)
 			chunk_origin_world := world.terrain_chunk_origin_world_from_coord(chunk.coord)
 			draw_params := world.TerrainDrawParams {
-				vertex_byte_offset  = geometry.vertex_byte_offset,
-				vertex_stride_bytes = geometry.vertex_stride_bytes,
-				chunk_origin        = chunk_origin_world,
+				chunk_origin = chunk_origin_world,
 			}
-			sdl.PushGPUVertexUniformData(
+			sdl.PushGPUFragmentUniformData(
 				cmdbuf,
-				1,
-				&draw_params,
-				cast(u32)size_of(world.TerrainDrawParams),
+				0,
+				&world.TERRAIN_MATERIAL_COLORS,
+				cast(u32)size_of(world.TerrainMaterialColorPalette),
 			)
 
 			pipeline :=
 				state.use_wireframe_mode ? state.terrain_line_pipeline : state.terrain_fill_pipeline
 			sdl.BindGPUGraphicsPipeline(render_pass, pipeline)
-			sdl.DrawGPUIndexedPrimitives(
-				render_pass,
-				geometry.index_count,
-				1,
-				geometry.first_index,
-				0,
-				0,
-			)
 
-			state.terrain_faces_drawn += geometry.index_count / 6
-			state.terrain_indices_drawn += geometry.index_count
+			if has_full_geometry {
+				geometry := geometry_get(&state.geometry_pool, GeometryID(chunk.geometry_id))
+				log.assertf(
+					geometry.layout_kind == .Terrain_Packed_U32,
+					"chunk geometry must use terrain layout: %v",
+					geometry.layout_kind,
+				)
+
+				draw_params.vertex_byte_offset = geometry.vertex_byte_offset
+				draw_params.vertex_stride_bytes = geometry.vertex_stride_bytes
+				sdl.PushGPUVertexUniformData(
+					cmdbuf,
+					1,
+					&draw_params,
+					cast(u32)size_of(world.TerrainDrawParams),
+				)
+				sdl.DrawGPUIndexedPrimitives(
+					render_pass,
+					geometry.index_count,
+					1,
+					geometry.first_index,
+					0,
+					0,
+				)
+
+				state.terrain_faces_drawn += geometry.index_count / 6
+				state.terrain_indices_drawn += geometry.index_count
+			} else {
+				for subchunk_geometry_id in chunk.subchunk_geometry_ids {
+					if subchunk_geometry_id == world.INVALID_CHUNK_GEOMETRY_ID {
+						continue
+					}
+
+					geometry := geometry_get(
+						&state.geometry_pool,
+						GeometryID(subchunk_geometry_id),
+					)
+					log.assertf(
+						geometry.layout_kind == .Terrain_Packed_U32,
+						"chunk subchunk geometry must use terrain layout: %v",
+						geometry.layout_kind,
+					)
+
+					draw_params.vertex_byte_offset = geometry.vertex_byte_offset
+					draw_params.vertex_stride_bytes = geometry.vertex_stride_bytes
+					sdl.PushGPUVertexUniformData(
+						cmdbuf,
+						1,
+						&draw_params,
+						cast(u32)size_of(world.TerrainDrawParams),
+					)
+					sdl.DrawGPUIndexedPrimitives(
+						render_pass,
+						geometry.index_count,
+						1,
+						geometry.first_index,
+						0,
+						0,
+					)
+
+					state.terrain_faces_drawn += geometry.index_count / 6
+					state.terrain_indices_drawn += geometry.index_count
+				}
+			}
 
 			state.chunks_drawn += 1
 		}
@@ -1710,7 +1759,7 @@ setup_resources :: proc() {
 
 	// new shaders for terrain rendering, will be the primary rendering pipeline for terrain geometry
 	terrain_vert_shader, _ := gfx_load_shader("assets/shaders/Terrain.vert.dxil", 0, 2, 1, 0)
-	terrain_frag_shader, _ := gfx_load_shader("assets/shaders/Terrain.frag.dxil", 0, 0, 0, 0)
+	terrain_frag_shader, _ := gfx_load_shader("assets/shaders/Terrain.frag.dxil", 0, 1, 0, 0)
 
 	// Create the pipelines
 	gfx_create_pipelines_fill_and_line(
@@ -1779,6 +1828,9 @@ setup_resources :: proc() {
 			chunk_geometry_release = world_chunk_geometry_release,
 		},
 	)
+	when ODIN_DEBUG {
+		world.debug_chunk_edit_contract_checks_run(&state.transient_arena)
+	}
 	world.streaming_update_for_observer(state.camera.position)
 
 	log.debug("Resources initialized")
@@ -1934,6 +1986,11 @@ main :: proc() {
 		debug_frustum_contract_checks_run()
 		debug_camera_terrain_collision_checks_run()
 		world.debug_chunk_mesher_contract_checks_run(&state.transient_arena)
+	}
+
+	when RUN_MESH_BENCHMARK {
+		world.chunk_mesher_benchmark_runs_run(&state.transient_arena, MESH_BENCHMARK_ITERATIONS)
+		return
 	}
 
 	init()
