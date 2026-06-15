@@ -170,9 +170,20 @@ shutdown :: proc() {
 	sdl.DestroyGPUDevice(state.device)
 	sdl.DestroyWindow(state.window)
 	sdl.Quit()
-	state = {
+
+	// Do not assign the whole state here; GeometryPool contains a large fixed array.
+	state.persistent_allocator = {}
+	state.transient_allocator = {}
+	state.transient_arena = nil
+	state.graphics = {
 		camera = camera.default_create(),
 	}
+	state.render_stats = {}
+	state.initialized = false
+	state.resources_ready = false
+	state.debug_mode = false
+	state.enable_vsync = false
+	state.use_wireframe_mode = false
 }
 
 setup_resources :: proc() {
@@ -341,7 +352,7 @@ GeometryLayoutKind :: enum u32 {
 	Terrain_Packed_U32,
 }
 
-// Mesh.vert.hlsl decodes this layout by byte offsets.
+// Mesh.vert.slang decodes this layout by byte offsets.
 PositionColorVertex :: struct {
 	position: world.Vec4,
 	color:    world.Vec4,
