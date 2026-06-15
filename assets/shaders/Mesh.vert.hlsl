@@ -1,7 +1,7 @@
 // Hardware indexed PVP:
 // SDL's index buffer drives SV_VertexID, then the shader pulls vertex bytes
 // from this storage buffer instead of using fixed vertex attributes.
-// NOTE: Keep these byte offsets in sync with PositionColorVertex in src/main.odin.
+// NOTE: Keep these byte offsets in sync with PositionColorVertex in src/gfx/gfx.odin.
 ByteAddressBuffer GeometryVertices : register(t0, space0);
 
 static const uint POSITION_COLOR_POSITION_OFFSET_BYTES = 0;

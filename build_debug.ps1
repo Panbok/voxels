@@ -14,6 +14,7 @@ $BuildDir = Join-Path $ProjectRoot "build"
 $ExePath = Join-Path $BuildDir "debug_build.exe"
 $PdbPath = Join-Path $BuildDir "debug_build.pdb"
 $AsyncCollectionDir = Join-Path $SourceDir "async"
+$GfxCollectionDir = Join-Path $SourceDir "gfx"
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 
@@ -61,7 +62,7 @@ if (Test-Path $ShaderSourceDir) {
 		}
 }
 
-odin build $SourceDir -collection:async=$AsyncCollectionDir -out:$ExePath -pdb-name:$PdbPath -debug -vet -vet-packages:main,async,world,world_async -vet-unused-procedures -warnings-as-errors
+odin build $SourceDir -collection:app=$SourceDir -collection:async=$AsyncCollectionDir -collection:gfx=$GfxCollectionDir -out:$ExePath -pdb-name:$PdbPath -debug -vet -vet-packages:main,async,world,world_async,gfx,camera -vet-unused-procedures -warnings-as-errors
 if ($LASTEXITCODE -ne 0) {
 	exit $LASTEXITCODE
 }

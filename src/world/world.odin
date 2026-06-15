@@ -29,8 +29,9 @@ INVALID_CHUNK_GEOMETRY_ID :: ChunkGeometryID(0)
 /////////////////////////////////////
 
 ChunkStore :: struct {
-	chunks:      []Chunk,
-	chunk_count: u32,
+	chunks:                  []Chunk,
+	chunk_count:             u32,
+	subchunk_geometry_count: u32,
 }
 
 //////////////////////////////////////
@@ -217,6 +218,14 @@ chunk_store_chunks :: proc() -> []Chunk {
 	return state.chunk_store.chunks[:state.chunk_store.chunk_count]
 }
 
+chunk_store_subchunk_geometry_has_any :: proc() -> bool {
+	return state.chunk_store.subchunk_geometry_count > 0
+}
+
+chunk_store_subchunk_geometry_count :: proc() -> u32 {
+	return state.chunk_store.subchunk_geometry_count
+}
+
 //////////////////////////////////////
 // Chunk Constants
 /////////////////////////////////////
@@ -287,11 +296,6 @@ CHUNK_STORE_CAPACITY :: 128
 /////////////////////////////////////
 
 LOG_CHUNK_MESH_COMMITS :: #config(LOG_CHUNK_MESH_COMMITS, false)
-RUN_MESH_BENCHMARK :: #config(RUN_MESH_BENCHMARK, false)
-when !RUN_MESH_BENCHMARK {
-	#assert(time.Second > 0)
-}
-
 
 //////////////////////////////////////
 // Chunk Mesh Job Types
@@ -377,6 +381,8 @@ Chunk :: struct {
 	coord:                     world_async.ChunkCoord,
 	geometry_id:               ChunkGeometryID,
 	subchunk_geometry_ids:     [CHUNK_SUBCHUNK_COUNT]ChunkGeometryID,
+	subchunk_geometry_count:   u32,
+	subchunk_geometry_mask:    u64,
 	subchunk_dirty_mask:       u64,
 	subchunk_ready_mask:       u64,
 	queued_subchunk_index:     u32,
@@ -384,6 +390,7 @@ Chunk :: struct {
 	mesh_state:                ChunkMeshState,
 	dirty_flags:               ChunkDirtyFlags,
 	dirty_region:              world_async.ChunkDirtyRegion,
+	visibility_graph:          ChunkVisibilityGraph,
 	mesh_snapshot_ref_count:   u32,
 	queued_mesh_snapshot_refs: ChunkMeshSnapshotRefSet,
 	slot_generation:           u32,
@@ -596,25 +603,77 @@ chunk_subchunk_dirty_mask_include_region :: proc(chunk: ^Chunk) {
 }
 
 chunk_subchunk_geometry_release_all :: proc(chunk: ^Chunk) {
+	released_count: u32
+	released_mask: u64
 	for i := u32(0); i < CHUNK_SUBCHUNK_COUNT; i += 1 {
 		if chunk.subchunk_geometry_ids[i] == INVALID_CHUNK_GEOMETRY_ID {
 			continue
 		}
 		state.chunk_geometry_release(chunk.subchunk_geometry_ids[i])
 		chunk.subchunk_geometry_ids[i] = INVALID_CHUNK_GEOMETRY_ID
+		released_count += 1
+		released_mask |= chunk_subchunk_mask_from_index(i)
 	}
+	log.assertf(
+		chunk.subchunk_geometry_count == released_count,
+		"subchunk geometry count mismatch during release: tracked=%d actual=%d",
+		chunk.subchunk_geometry_count,
+		released_count,
+	)
+	log.assertf(
+		chunk.subchunk_geometry_mask == released_mask,
+		"subchunk geometry mask mismatch during release: tracked=%#x actual=%#x",
+		chunk.subchunk_geometry_mask,
+		released_mask,
+	)
+	if released_count > 0 {
+		log.assert(
+			state.chunk_store.subchunk_geometry_count >= released_count,
+			"subchunk geometry count underflow",
+		)
+		state.chunk_store.subchunk_geometry_count -= released_count
+	}
+	chunk.subchunk_geometry_count = 0
+	chunk.subchunk_geometry_mask = 0
 	chunk.subchunk_dirty_mask = 0
 	chunk.subchunk_ready_mask = 0
 	chunk.queued_subchunk_index = CHUNK_SUBCHUNK_INVALID_INDEX
 }
 
-chunk_subchunk_geometry_has_any :: proc(chunk: Chunk) -> bool {
-	for id in chunk.subchunk_geometry_ids {
-		if id != INVALID_CHUNK_GEOMETRY_ID {
-			return true
-		}
+chunk_subchunk_geometry_set :: proc(chunk: ^Chunk, subchunk_index: u32, new_id: ChunkGeometryID) {
+	log.assertf(
+		subchunk_index < CHUNK_SUBCHUNK_COUNT,
+		"subchunk index out of range: %d",
+		subchunk_index,
+	)
+
+	old_id := chunk.subchunk_geometry_ids[subchunk_index]
+	subchunk_bit := chunk_subchunk_mask_from_index(subchunk_index)
+	old_has_geometry := old_id != INVALID_CHUNK_GEOMETRY_ID
+	log.assertf(
+		((chunk.subchunk_geometry_mask & subchunk_bit) != 0) == old_has_geometry,
+		"subchunk geometry mask mismatch before set: index=%d",
+		subchunk_index,
+	)
+	if old_id == INVALID_CHUNK_GEOMETRY_ID && new_id != INVALID_CHUNK_GEOMETRY_ID {
+		state.chunk_store.subchunk_geometry_count += 1
+		chunk.subchunk_geometry_count += 1
+		chunk.subchunk_geometry_mask |= subchunk_bit
+	} else if old_id != INVALID_CHUNK_GEOMETRY_ID && new_id == INVALID_CHUNK_GEOMETRY_ID {
+		log.assert(
+			state.chunk_store.subchunk_geometry_count > 0,
+			"subchunk geometry count underflow",
+		)
+		state.chunk_store.subchunk_geometry_count -= 1
+		log.assert(chunk.subchunk_geometry_count > 0, "chunk subchunk geometry count underflow")
+		chunk.subchunk_geometry_count -= 1
+		chunk.subchunk_geometry_mask &~= subchunk_bit
 	}
-	return false
+	chunk.subchunk_geometry_ids[subchunk_index] = new_id
+}
+
+chunk_subchunk_geometry_has_any :: proc(chunk: Chunk) -> bool {
+	return chunk.subchunk_geometry_count > 0
 }
 
 //////////////////////////////////////
@@ -660,6 +719,7 @@ chunk_mark_generated :: proc(chunk: ^Chunk, block_storage: world_async.ChunkBloc
 	if chunk.block_storage.binary_greedy_row_cache != nil {
 		chunk.block_storage.binary_greedy_row_cache.block_version = chunk.block_version
 	}
+	chunk_visibility_graph_rebuild(chunk)
 }
 
 //////////////////////////////////////
@@ -2091,6 +2151,12 @@ chunk_store_clear :: proc() {
 		state.chunk_store.chunks[i] = {}
 	}
 	state.chunk_store.chunk_count = 0
+	log.assertf(
+		state.chunk_store.subchunk_geometry_count == 0,
+		"chunk store clear leaked subchunk geometry count: %d",
+		state.chunk_store.subchunk_geometry_count,
+	)
+	state.chunk_store.subchunk_geometry_count = 0
 }
 
 chunk_store_append :: proc(chunk: Chunk) {
@@ -2125,6 +2191,7 @@ chunk_store_release_chunk_resources :: proc(chunk: ^Chunk) {
 	chunk_subchunk_geometry_release_all(chunk)
 
 	chunk_block_storage_release(&chunk.block_storage)
+	chunk.visibility_graph = {}
 	chunk.generation_state = .Missing
 	chunk.mesh_state = .Missing
 	chunk.dirty_flags = {}
@@ -2213,10 +2280,8 @@ chunk_store_commit_mesh_results :: proc(
 			}
 
 			old_id := chunk.subchunk_geometry_ids[result.subchunk_index]
-			chunk.subchunk_geometry_ids[result.subchunk_index] = state.chunk_mesh_upload(
-				old_id,
-				result.output,
-			)
+			new_id := state.chunk_mesh_upload(old_id, result.output)
+			chunk_subchunk_geometry_set(chunk, result.subchunk_index, new_id)
 			chunk.subchunk_ready_mask |= result_subchunk_bit
 			chunk.queued_subchunk_index = CHUNK_SUBCHUNK_INVALID_INDEX
 			chunk.mesh_version = result.block_version
@@ -2905,6 +2970,7 @@ chunk_store_block_edit_apply :: proc(
 		)
 	}
 
+	chunk_visibility_graph_rebuild(chunk)
 	chunk_store_mark_edited_block_dirty(chunk, local)
 	return true
 }
@@ -4293,321 +4359,4 @@ when ODIN_DEBUG {
 		streaming_reset()
 		log.debug("Chunk edit contract checks passed")
 	}
-}
-
-//////////////////////////////////////
-// Benchmarking
-/////////////////////////////////////
-
-when RUN_MESH_BENCHMARK {
-
-	ChunkMesherBenchmarkCase :: struct {
-		name:         string,
-		view:         world_async.ChunkVoxelView,
-		run_build:    bool,
-		face_count:   u32,
-		output_bytes: u32,
-	}
-
-	chunk_mesher_benchmark_fill_full :: proc(view: ^world_async.ChunkVoxelView) {
-		chunk_voxel_view_fill_empty(view)
-		for z in 0 ..< CHUNK_BLOCK_LENGTH {
-			for y in 0 ..< CHUNK_BLOCK_LENGTH {
-				for x in 0 ..< CHUNK_BLOCK_LENGTH {
-					index := chunk_block_index(u32(x), u32(y), u32(z))
-					view.blocks.occupancy[index] = .Solid
-					view.blocks.material_id[index] = world_async.BlockMaterialID(
-						TERRAIN_STONE_MAT_ID,
-					)
-				}
-			}
-		}
-	}
-
-	chunk_mesher_benchmark_fill_checkerboard :: proc(view: ^world_async.ChunkVoxelView) {
-		chunk_voxel_view_fill_empty(view)
-		for z in 0 ..< CHUNK_BLOCK_LENGTH {
-			for y in 0 ..< CHUNK_BLOCK_LENGTH {
-				for x in 0 ..< CHUNK_BLOCK_LENGTH {
-					if ((x + y + z) & 1) != 0 {
-						continue
-					}
-
-					index := chunk_block_index(u32(x), u32(y), u32(z))
-					view.blocks.occupancy[index] = .Solid
-					view.blocks.material_id[index] = world_async.BlockMaterialID(
-						TERRAIN_STONE_MAT_ID,
-					)
-				}
-			}
-		}
-	}
-
-	chunk_mesher_benchmark_count_once :: proc(
-		view: world_async.ChunkVoxelView,
-		mesher: world_async.ChunkMeshing,
-		scratch: ^TerrainBinaryGreedyScratch,
-	) -> u32 {
-		switch mesher {
-		case .Greedy_Binary:
-			return chunk_voxel_view_count_binary_greedy_faces(
-				view,
-				.Treat_Out_Of_Chunk_As_Empty,
-				scratch,
-			)
-		}
-
-		log.assertf(false, "unhandled benchmark mesher: %v", mesher)
-		return 0
-	}
-
-	chunk_mesher_benchmark_build_once :: proc(
-		view: world_async.ChunkVoxelView,
-		mesher: world_async.ChunkMeshing,
-		allocator: mem.Allocator,
-		scratch: ^TerrainBinaryGreedyScratch,
-	) -> world_async.ChunkMeshOutput {
-		switch mesher {
-		case .Greedy_Binary:
-			return chunk_voxel_view_build_binary_greedy_mesh(
-				view,
-				.Treat_Out_Of_Chunk_As_Empty,
-				allocator,
-				scratch,
-			)
-		}
-
-		log.assertf(false, "unhandled benchmark mesher: %v", mesher)
-		return {}
-	}
-
-	chunk_mesher_benchmark_mesher_name :: proc(mesher: world_async.ChunkMeshing) -> string {
-		switch mesher {
-		case .Greedy_Binary:
-			return "binary_greedy"
-		}
-
-		return "unknown"
-	}
-
-	chunk_mesher_benchmark_log_result :: proc(
-		case_name, phase: string,
-		mesher: world_async.ChunkMeshing,
-		iterations: u32,
-		duration: time.Duration,
-		face_count: u32,
-		output_bytes: u32,
-	) {
-		total_ms := time.duration_milliseconds(duration)
-		avg_us := time.duration_microseconds(duration) / f64(iterations)
-		log.infof(
-			"MESH_BENCH case=%s phase=%s mesher=%s iterations=%d total_ms=%.3f avg_us=%.3f faces=%d output_bytes=%d",
-			case_name,
-			phase,
-			chunk_mesher_benchmark_mesher_name(mesher),
-			iterations,
-			total_ms,
-			avg_us,
-			face_count,
-			output_bytes,
-		)
-	}
-
-	chunk_mesher_benchmark_count_run :: proc(
-		case_data: ChunkMesherBenchmarkCase,
-		mesher: world_async.ChunkMeshing,
-		iterations: u32,
-		transient_arena: ^mem.Arena,
-	) {
-		log.assertf(iterations > 0, "benchmark iterations must be greater than zero")
-
-		// Warm the instruction/data path before taking the timed sample.
-		warmup_temp := mem.begin_arena_temp_memory(transient_arena)
-		warmup_allocator := mem.arena_allocator(transient_arena)
-		warmup_scratch := terrain_binary_greedy_scratch_alloc(warmup_allocator)
-		_ = chunk_mesher_benchmark_count_once(case_data.view, mesher, warmup_scratch)
-		mem.end_arena_temp_memory(warmup_temp)
-
-		face_count: u32
-		start := time.tick_now()
-		for _ in 0 ..< iterations {
-			temp := mem.begin_arena_temp_memory(transient_arena)
-			allocator := mem.arena_allocator(transient_arena)
-			scratch := terrain_binary_greedy_scratch_alloc(allocator)
-			face_count = chunk_mesher_benchmark_count_once(case_data.view, mesher, scratch)
-			mem.end_arena_temp_memory(temp)
-		}
-		duration := time.tick_since(start)
-
-		chunk_mesher_benchmark_log_result(
-			case_data.name,
-			"count",
-			mesher,
-			iterations,
-			duration,
-			face_count,
-			0,
-		)
-	}
-
-	chunk_mesher_benchmark_build_run :: proc(
-		case_data: ChunkMesherBenchmarkCase,
-		mesher: world_async.ChunkMeshing,
-		iterations: u32,
-		transient_arena: ^mem.Arena,
-	) {
-		log.assertf(iterations > 0, "benchmark iterations must be greater than zero")
-
-		warmup_temp := mem.begin_arena_temp_memory(transient_arena)
-		warmup_allocator := mem.arena_allocator(transient_arena)
-		warmup_scratch := terrain_binary_greedy_scratch_alloc(warmup_allocator)
-		_ = chunk_mesher_benchmark_build_once(
-			case_data.view,
-			mesher,
-			warmup_allocator,
-			warmup_scratch,
-		)
-		mem.end_arena_temp_memory(warmup_temp)
-
-		face_count: u32
-		output_bytes: u32
-		start := time.tick_now()
-		for _ in 0 ..< iterations {
-			temp := mem.begin_arena_temp_memory(transient_arena)
-			allocator := mem.arena_allocator(transient_arena)
-			scratch := terrain_binary_greedy_scratch_alloc(allocator)
-			output := chunk_mesher_benchmark_build_once(case_data.view, mesher, allocator, scratch)
-			face_count = output.face_count
-			output_bytes =
-				u32(len(output.vertices) * size_of(world_async.TerrainPackedVertex)) +
-				u32(len(output.indices) * size_of(u32))
-			mem.end_arena_temp_memory(temp)
-		}
-		duration := time.tick_since(start)
-
-		chunk_mesher_benchmark_log_result(
-			case_data.name,
-			"build",
-			mesher,
-			iterations,
-			duration,
-			face_count,
-			output_bytes,
-		)
-	}
-
-	chunk_mesher_benchmark_subchunk_build_run :: proc(
-		case_name: string,
-		view: world_async.ChunkVoxelView,
-		subchunk_index: u32,
-		iterations: u32,
-		transient_arena: ^mem.Arena,
-	) {
-		log.assertf(iterations > 0, "benchmark iterations must be greater than zero")
-		min_bound, max_bound := chunk_subchunk_bounds_from_index(subchunk_index)
-
-		warmup_temp := mem.begin_arena_temp_memory(transient_arena)
-		warmup_allocator := mem.arena_allocator(transient_arena)
-		warmup_scratch := terrain_binary_greedy_scratch_alloc(warmup_allocator)
-		_ = chunk_voxel_view_build_binary_greedy_mesh_in_bounds(
-			view,
-			min_bound,
-			max_bound,
-			.Treat_Out_Of_Chunk_As_Empty,
-			warmup_allocator,
-			warmup_scratch,
-		)
-		mem.end_arena_temp_memory(warmup_temp)
-
-		face_count: u32
-		output_bytes: u32
-		start := time.tick_now()
-		for _ in 0 ..< iterations {
-			temp := mem.begin_arena_temp_memory(transient_arena)
-			allocator := mem.arena_allocator(transient_arena)
-			scratch := terrain_binary_greedy_scratch_alloc(allocator)
-			output := chunk_voxel_view_build_binary_greedy_mesh_in_bounds(
-				view,
-				min_bound,
-				max_bound,
-				.Treat_Out_Of_Chunk_As_Empty,
-				allocator,
-				scratch,
-			)
-			face_count = output.face_count
-			output_bytes =
-				u32(len(output.vertices) * size_of(world_async.TerrainPackedVertex)) +
-				u32(len(output.indices) * size_of(u32))
-			mem.end_arena_temp_memory(temp)
-		}
-		duration := time.tick_since(start)
-
-		chunk_mesher_benchmark_log_result(
-			case_name,
-			"subchunk_build",
-			.Greedy_Binary,
-			iterations,
-			duration,
-			face_count,
-			output_bytes,
-		)
-	}
-
-	chunk_mesher_benchmark_run_case :: proc(
-		case_data: ChunkMesherBenchmarkCase,
-		iterations: u32,
-		transient_arena: ^mem.Arena,
-	) {
-		meshers := [?]world_async.ChunkMeshing{.Greedy_Binary}
-		for mesher in meshers {
-			chunk_mesher_benchmark_count_run(case_data, mesher, iterations, transient_arena)
-			if case_data.run_build {
-				chunk_mesher_benchmark_build_run(case_data, mesher, iterations, transient_arena)
-			}
-		}
-	}
-
-	chunk_mesher_benchmark_runs_run :: proc(transient_arena: ^mem.Arena, iterations: u32) {
-		log.assertf(iterations > 0, "benchmark iterations must be greater than zero")
-
-		temp := mem.begin_arena_temp_memory(transient_arena)
-		defer mem.end_arena_temp_memory(temp)
-		allocator := mem.arena_allocator(transient_arena)
-
-		heightfield := world_async.ChunkVoxelView{}
-		chunk_voxel_view_alloc(&heightfield, allocator)
-		terrain_heightfield_voxel_view_fill(&heightfield, world_async.ChunkCoord{0, 0, 0})
-
-		rect := world_async.ChunkVoxelView{}
-		chunk_voxel_view_debug_rect_build(&rect, allocator)
-
-		full := world_async.ChunkVoxelView{}
-		chunk_voxel_view_alloc(&full, allocator)
-		chunk_mesher_benchmark_fill_full(&full)
-
-		checkerboard := world_async.ChunkVoxelView{}
-		chunk_voxel_view_alloc(&checkerboard, allocator)
-		chunk_mesher_benchmark_fill_checkerboard(&checkerboard)
-
-		cases := [?]ChunkMesherBenchmarkCase {
-			{name = "heightfield", view = heightfield, run_build = true},
-			{name = "solid_rect", view = rect, run_build = true},
-			{name = "full_chunk", view = full, run_build = true},
-			{name = "checkerboard_count_only", view = checkerboard, run_build = false},
-		}
-
-		log.infof("MESH_BENCH_START iterations=%d chunk_blocks=%d", iterations, CHUNK_BLOCK_COUNT)
-		for case_data in cases {
-			chunk_mesher_benchmark_run_case(case_data, iterations, transient_arena)
-		}
-		chunk_mesher_benchmark_subchunk_build_run(
-			"heightfield_subchunk",
-			heightfield,
-			chunk_subchunk_index_from_coord(1, 1, 1),
-			iterations,
-			transient_arena,
-		)
-		log.info("MESH_BENCH_END")
-	}
-
 }
