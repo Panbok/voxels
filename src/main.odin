@@ -24,13 +24,14 @@ AUTO_TEST_DURATION_MS :: #config(AUTO_TEST_DURATION_MS, 0)
 LOG_FRAME_METRICS :: #config(LOG_FRAME_METRICS, false)
 FRAME_METRICS_LOG_INTERVAL_MS :: #config(FRAME_METRICS_LOG_INTERVAL_MS, 1000)
 AUTO_TEST_DISABLE_VSYNC :: #config(AUTO_TEST_DISABLE_VSYNC, false)
+PERSISTENT_SLAB_BYTES :: 448 * mem.Megabyte
 
 //////////////////////////////////////
 // State Types
 /////////////////////////////////////
 
 Memory :: struct {
-	persistent_slab:      [192 * mem.Megabyte]u8,
+	persistent_slab:      []u8,
 	transient_slab:       [16 * mem.Megabyte]u8,
 	persistent_arena:     mem.Arena,
 	transient_arena:      mem.Arena,
@@ -138,7 +139,15 @@ state := struct {
 /////////////////////////////////////
 
 memory_init :: proc() {
-	mem.arena_init(&state.persistent_arena, state.persistent_slab[:])
+	state.persistent_slab = make([]u8, PERSISTENT_SLAB_BYTES)
+	log.assertf(
+		len(state.persistent_slab) == PERSISTENT_SLAB_BYTES,
+		"persistent slab allocation failed: expected=%d got=%d",
+		PERSISTENT_SLAB_BYTES,
+		len(state.persistent_slab),
+	)
+
+	mem.arena_init(&state.persistent_arena, state.persistent_slab)
 	mem.arena_init(&state.transient_arena, state.transient_slab[:])
 
 	state.transient_allocator = mem.arena_allocator(&state.transient_arena)

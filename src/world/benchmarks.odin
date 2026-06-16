@@ -308,7 +308,7 @@ when ODIN_DEBUG {
 
 			heightfield := world_async.ChunkVoxelView{}
 			chunk_voxel_view_alloc(&heightfield, allocator)
-			terrain_heightfield_voxel_view_fill(&heightfield, world_async.ChunkCoord{0, 0, 0})
+			terrain_heightfield_voxel_view_fill(&heightfield, world_async.ChunkCoord{0, 0, 0}, 0)
 
 			rect := world_async.ChunkVoxelView{}
 			chunk_voxel_view_debug_rect_build(&rect, allocator)

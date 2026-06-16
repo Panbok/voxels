@@ -1,6 +1,5 @@
 package world
 
-import biomes "world:biomes"
 import world_async "async:world"
 import "core:log"
 import math "core:math"
@@ -8,6 +7,7 @@ import bits "core:math/bits"
 import "core:mem"
 import mem_tlsf "core:mem/tlsf"
 import time "core:time"
+import biomes "world:biomes"
 
 //////////////////////////////////////
 // Types
@@ -190,6 +190,10 @@ init :: proc(config: InitConfig) {
 	)
 	state.chunk_mesh_row_cache_allocator = mem_tlsf.allocator(&state.chunk_mesh_row_cache_tlsf)
 
+	when ODIN_DEBUG {
+		debug_chunk_block_storage_pool_contract_checks_run()
+	}
+
 	chunk_store_init(CHUNK_STORE_CAPACITY)
 	streaming_reset()
 	state.initialized = true
@@ -270,8 +274,10 @@ DEBUG_CHUNK_SOLID_Z1 :: 24
 // Chunk Storage Constants
 /////////////////////////////////////
 
-CHUNK_BLOCK_STORAGE_POOL_BYTES :: 64 * mem.Megabyte
-CHUNK_MESH_ROW_CACHE_POOL_BYTES :: 48 * mem.Megabyte
+// This must exceed raw block bytes for CHUNK_STORE_CAPACITY because TLSF and #soa
+// allocations need their own bookkeeping/alignment headroom.
+CHUNK_BLOCK_STORAGE_POOL_BYTES :: 192 * mem.Megabyte
+CHUNK_MESH_ROW_CACHE_POOL_BYTES :: 128 * mem.Megabyte
 
 //////////////////////////////////////
 // Streaming Budget Constants
@@ -284,7 +290,7 @@ CHUNK_MESH_BUDGET_PER_FRAME :: 2
 // Streaming Constants
 /////////////////////////////////////
 
-CHUNK_STREAMING_RADIUS_XZ :: 3
+CHUNK_STREAMING_RADIUS_XZ :: 5
 CHUNK_UNLOAD_RADIUS_XZ :: CHUNK_STREAMING_RADIUS_XZ + 1
 CHUNK_STREAMING_TARGET_CAPACITY ::
 	(CHUNK_STREAMING_RADIUS_XZ * 2 + 1) * (CHUNK_STREAMING_RADIUS_XZ * 2 + 1)
@@ -292,7 +298,7 @@ CHUNK_UNLOAD_CAPACITY :: (CHUNK_UNLOAD_RADIUS_XZ * 2 + 1) * (CHUNK_UNLOAD_RADIUS
 #assert(CHUNK_UNLOAD_RADIUS_XZ >= CHUNK_STREAMING_RADIUS_XZ)
 
 // Until chunk/geometry eviction exists, store capacity must stay within the fixed arenas.
-CHUNK_STORE_CAPACITY :: 128
+CHUNK_STORE_CAPACITY :: 256
 #assert(CHUNK_STREAMING_TARGET_CAPACITY > 0)
 #assert(CHUNK_STORE_CAPACITY >= CHUNK_UNLOAD_CAPACITY)
 
@@ -2398,14 +2404,6 @@ chunk_store_append_reserved :: proc(coord: world_async.ChunkCoord) -> ChunkID {
 	return chunk_store_id_from_index(state.chunk_store.chunk_count - 1)
 }
 
-chunk_store_get_or_append_reserved :: proc(coord: world_async.ChunkCoord) -> ChunkID {
-	if index, ok := chunk_store_find_index_by_coord(coord).?; ok {
-		return chunk_store_id_from_index(index)
-	}
-
-	return chunk_store_append_reserved(coord)
-}
-
 chunk_store_snapshot_find_by_coord :: proc(
 	coord: world_async.ChunkCoord,
 ) -> Maybe(world_async.ChunkSnapshot) {
@@ -2618,6 +2616,19 @@ chunk_block_storage_release :: proc(storage: ^world_async.ChunkBlockStorage) {
 	storage^ = {}
 }
 
+when ODIN_DEBUG {
+	debug_chunk_block_storage_pool_contract_checks_run :: proc() {
+		storages: [CHUNK_STORE_CAPACITY]world_async.ChunkBlockStorage
+		for i in 0 ..< CHUNK_STORE_CAPACITY {
+			storages[i] = chunk_block_storage_alloc_for_store()
+		}
+		for i in 0 ..< CHUNK_STORE_CAPACITY {
+			chunk_block_storage_release(&storages[i])
+		}
+		log.debug("Chunk block storage pool contract checks passed")
+	}
+}
+
 chunk_snapshot_from_chunk :: proc(chunk: ^Chunk) -> world_async.ChunkSnapshot {
 	log.assertf(
 		chunk.generation_state == .Generated,
@@ -2654,7 +2665,7 @@ generation_job_execute_sync :: proc(
 		len(block_storage.voxel_view.blocks) == CHUNK_BLOCK_COUNT,
 		"generation job output storage has wrong block count",
 	)
-	terrain_heightfield_voxel_view_fill(&block_storage.voxel_view, job.coord)
+	terrain_heightfield_voxel_view_fill(&block_storage.voxel_view, job.coord, job.seed)
 	if block_storage.binary_greedy_row_cache != nil {
 		terrain_binary_row_cache_fill(
 			block_storage.binary_greedy_row_cache,
@@ -3000,8 +3011,16 @@ generation_request_budgeted :: proc() -> u32 {
 		scanned_count += 1
 
 		coord := state.streaming_targets[target_index]
-		chunk_id := chunk_store_get_or_append_reserved(coord)
-		chunk := chunk_store_get_by_id(chunk_id)
+		chunk: ^Chunk
+		if chunk_index, ok := chunk_store_find_index_by_coord(coord).?; ok {
+			chunk = chunk_store_get_by_index(chunk_index)
+		} else {
+			if state.chunk_store.chunk_count >= u32(len(state.chunk_store.chunks)) {
+				break
+			}
+			chunk_id := chunk_store_append_reserved(coord)
+			chunk = chunk_store_get_by_id(chunk_id)
+		}
 
 		if chunk.generation_state != .Missing {
 			continue
@@ -3096,6 +3115,14 @@ mesh_request_budgeted :: proc() -> u32 {
 		if chunk.generation_state != .Generated || chunk.mesh_state != .Dirty {
 			continue
 		}
+		if state.streaming_target_count > 0 &&
+		   !streaming_coord_inside_square_radius(
+				   state.streaming_center_coord,
+				   chunk.coord,
+				   CHUNK_STREAMING_RADIUS_XZ,
+			   ) {
+			continue
+		}
 		if !streaming_mesh_dependencies_ready(chunk.coord) {
 			continue
 		}
@@ -3168,12 +3195,12 @@ mesh_results_poll_budgeted :: proc() -> ChunkMeshBatchStats {
 
 streaming_update_budgeted :: proc(observer_world_position: Vec3) -> StreamingUpdateStats {
 	stats := StreamingUpdateStats{}
-	stats.chunks_evicted = streaming_update_for_observer(observer_world_position)
-
-	stats.chunks_generated = generation_results_poll_budgeted()
-	generation_request_budgeted()
 
 	mesh_stats := mesh_results_poll_budgeted()
+	stats.chunks_generated = generation_results_poll_budgeted()
+	stats.chunks_evicted = streaming_update_for_observer(observer_world_position)
+	generation_request_budgeted()
+
 	stats.chunk_mesh_jobs_submitted = mesh_request_budgeted()
 	stats.chunk_mesh_results_committed = mesh_stats.chunks_committed
 	stats.chunk_mesh_results_uploaded = mesh_stats.chunks_uploaded
@@ -3326,9 +3353,12 @@ TERRAIN_PACK_MATERIAL_MASK :: 0xFF
 TERRAIN_GRASS_MAT_ID :: 0
 TERRAIN_DIRT_MAT_ID :: 1
 TERRAIN_STONE_MAT_ID :: 2
+TERRAIN_WET_MARSH_MAT_ID :: 4
+TERRAIN_CORRUPTED_ASH_MAT_ID :: 5
 TERRAIN_MATERIAL_PALETTE_COUNT :: 8
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == 8)
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == world_async.TERRAIN_MATERIAL_PALETTE_COUNT)
+TERRAIN_GENERATOR_VERSION :: u32(1)
 TERRAIN_GRASS_CAP_BLOCK_DEPTH :: 4
 TERRAIN_DIRT_LAYER_BLOCK_DEPTH :: 4
 TERRAIN_BINARY_AXIS_COUNT :: 3
@@ -3395,6 +3425,12 @@ TerrainGridPoint :: struct {
 	x, y, z: u32,
 }
 
+TerrainBiomeColumn :: struct {
+	surface_height:      i32,
+	surface_layer_depth: i32,
+	dominant_biome_id:   biomes.BiomeID,
+}
+
 //////////////////////////////////////
 // Terrain Methods
 /////////////////////////////////////
@@ -3441,6 +3477,7 @@ terrain_unpack_vertex :: proc(vertex: world_async.TerrainPackedVertex) -> Terrai
 terrain_heightfield_voxel_view_fill :: proc(
 	view: ^world_async.ChunkVoxelView,
 	chunk: world_async.ChunkCoord,
+	seed: u32,
 ) {
 	log.assertf(
 		len(view.blocks) == CHUNK_BLOCK_COUNT,
@@ -3451,47 +3488,35 @@ terrain_heightfield_voxel_view_fill :: proc(
 	chunk_voxel_view_fill_empty(view)
 
 	origin := chunk_origin_from_coord(chunk)
+	key := terrain_generation_key_make(seed)
+	generation_region := biomes.generation_region_build(
+		key,
+		biomes.generation_region_coord_from_block(origin.x, origin.y, origin.z),
+	)
 	for z in 0 ..< CHUNK_BLOCK_LENGTH {
 		for x in 0 ..< CHUNK_BLOCK_LENGTH {
 			world_x := origin.x + i32(x)
 			world_z := origin.z + i32(z)
-
-			// Sample in world block coordinates so neighboring chunks use the same
-			// heightfield instead of repeating the same local 64x64 tile.
-			//
-			// The base height keeps terrain above the chunk floor. The three waves
-			// use different axes/frequencies so the heightfield terrain has broad hills
-			// instead of a single obvious stripe pattern.
-			height_f :=
-				18.0 +
-				math.sin_f32(f32(world_x) * 0.13) * 7.0 +
-				math.cos_f32(f32(world_z) * 0.11) * 5.0 +
-				math.sin_f32(f32(world_x + world_z) * 0.07) * 4.0
-
-			// Clamp to the vertical block range this first heightfield chunk can represent.
-			// Later multi-height terrain can decide whether to generate stacked chunks.
-			height := i32(height_f)
-			height = math.clamp(height, 0, CHUNK_BLOCK_LENGTH - 1)
+			surface_sample := biomes.surface_biome_field_sample_from_region(
+				&generation_region,
+				world_x,
+				world_z,
+			)
+			column := terrain_biome_column_sample(key, surface_sample, world_x, world_z)
 
 			for y in 0 ..< CHUNK_BLOCK_LENGTH {
 				world_y := origin.y + i32(y)
 
-				// Heightfield terrain is solid at and below the sampled surface.
-				if world_y > height {
+				if world_y > column.surface_height {
 					continue
 				}
 
-				// Material is still block-level. A shallow grass cap keeps ordinary
-				// slope side faces green; otherwise just-below-top dirt blocks show as
-				// brown speckles wherever neighboring columns are lower.
-				blocks_below_surface := height - world_y
-				material_id := world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
-				if blocks_below_surface < TERRAIN_GRASS_CAP_BLOCK_DEPTH {
-					material_id = world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID)
-				} else if blocks_below_surface <
-				   TERRAIN_GRASS_CAP_BLOCK_DEPTH + TERRAIN_DIRT_LAYER_BLOCK_DEPTH {
-					material_id = world_async.BlockMaterialID(TERRAIN_DIRT_MAT_ID)
-				}
+				blocks_below_surface := column.surface_height - world_y
+				material_id := terrain_biome_block_material_id(
+					column.dominant_biome_id,
+					blocks_below_surface,
+					column.surface_layer_depth,
+				)
 
 				index := chunk_block_index(u32(x), u32(y), u32(z))
 				view.blocks.occupancy[index] = .Solid
@@ -3499,6 +3524,100 @@ terrain_heightfield_voxel_view_fill :: proc(
 			}
 		}
 	}
+}
+
+terrain_generation_key_make :: proc(seed: u32) -> biomes.FeatureGridKey {
+	return biomes.feature_grid_key_make(u64(seed), TERRAIN_GENERATOR_VERSION)
+}
+
+terrain_biome_column_sample :: proc(
+	key: biomes.FeatureGridKey,
+	surface_sample: biomes.SurfaceBiomeFieldSample,
+	world_x, world_z: i32,
+) -> TerrainBiomeColumn {
+	evaluation := biomes.surface_biome_profile_evaluate(key, surface_sample, world_x, world_z)
+	target := evaluation.blended_target
+
+	height := i32(math.floor_f32(target.surface_height_blocks))
+	height = math.clamp(height, 0, CHUNK_BLOCK_LENGTH - 1)
+
+	surface_layer_depth := terrain_biome_layer_depth_ceil(target.surface_layer_depth_blocks)
+	surface_layer_depth = math.clamp(surface_layer_depth, 1, CHUNK_BLOCK_LENGTH)
+
+	return {
+		surface_height = height,
+		surface_layer_depth = surface_layer_depth,
+		dominant_biome_id = target.biome_id,
+	}
+}
+
+terrain_biome_column_sample_direct :: proc(
+	key: biomes.FeatureGridKey,
+	world_x, world_z: i32,
+) -> TerrainBiomeColumn {
+	surface_sample := biomes.surface_biome_field_sample(key, world_x, world_z)
+	return terrain_biome_column_sample(key, surface_sample, world_x, world_z)
+}
+
+terrain_biome_layer_depth_ceil :: proc(depth: f32) -> i32 {
+	whole := i32(depth)
+	if f32(whole) < depth {
+		whole += 1
+	}
+	return whole
+}
+
+terrain_biome_block_material_id :: proc(
+	biome_id: biomes.BiomeID,
+	blocks_below_surface, surface_layer_depth: i32,
+) -> world_async.BlockMaterialID {
+	if blocks_below_surface < surface_layer_depth {
+		return terrain_biome_surface_material_id(biome_id)
+	}
+	if blocks_below_surface < surface_layer_depth + TERRAIN_DIRT_LAYER_BLOCK_DEPTH {
+		return terrain_biome_subsurface_material_id(biome_id)
+	}
+	return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+}
+
+terrain_biome_surface_material_id :: proc(
+	biome_id: biomes.BiomeID,
+) -> world_async.BlockMaterialID {
+	switch biome_id {
+	case .Temperate_Hills:
+		return world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID)
+	case .Basalt_Spire_Highlands:
+		return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+	case .Wet_Lowland_Marsh:
+		return world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID)
+	case .Corrupted_Ash_Forest:
+		return world_async.BlockMaterialID(TERRAIN_CORRUPTED_ASH_MAT_ID)
+	case .Fungal_Vaults, .Crystal_Geode_Network, .Buried_Aquifer_Caves:
+		log.assert(false, "surface terrain fill received subterranean biome identity")
+		return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+	}
+
+	log.assertf(false, "unhandled terrain biome surface material: %v", biome_id)
+	return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+}
+
+terrain_biome_subsurface_material_id :: proc(
+	biome_id: biomes.BiomeID,
+) -> world_async.BlockMaterialID {
+	switch biome_id {
+	case .Basalt_Spire_Highlands:
+		return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+	case .Corrupted_Ash_Forest:
+		return world_async.BlockMaterialID(TERRAIN_CORRUPTED_ASH_MAT_ID)
+	case .Temperate_Hills, .Wet_Lowland_Marsh:
+		return world_async.BlockMaterialID(TERRAIN_DIRT_MAT_ID)
+	case .Fungal_Vaults, .Crystal_Geode_Network, .Buried_Aquifer_Caves:
+		log.assert(false, "surface terrain fill received subterranean biome identity")
+		return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+	}
+
+	log.assertf(false, "unhandled terrain biome subsurface material: %v", biome_id)
+	return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
 }
 
 //////////////////////////////////////
@@ -4076,10 +4195,19 @@ when ODIN_DEBUG {
 			)
 		}
 
-		terrain_heightfield_voxel_view_fill(&view, world_async.ChunkCoord{0, 0, 0})
+		heightfield_coord := world_async.ChunkCoord{0, 0, 0}
+		heightfield_seed := u32(0)
+		heightfield_origin := chunk_origin_from_coord(heightfield_coord)
+		heightfield_key := terrain_generation_key_make(heightfield_seed)
+		terrain_heightfield_voxel_view_fill(&view, heightfield_coord, heightfield_seed)
 		heightfield_top_y: [CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH]i32
 		for z in 0 ..< CHUNK_BLOCK_LENGTH {
 			for x in 0 ..< CHUNK_BLOCK_LENGTH {
+				column := terrain_biome_column_sample_direct(
+					heightfield_key,
+					heightfield_origin.x + i32(x),
+					heightfield_origin.z + i32(z),
+				)
 				top_y: i32 = -1
 				for y in 0 ..< CHUNK_BLOCK_LENGTH {
 					index = chunk_block_index(u32(x), u32(y), u32(z))
@@ -4096,21 +4224,33 @@ when ODIN_DEBUG {
 				)
 				heightfield_top_y[x + z * CHUNK_BLOCK_LENGTH] = top_y
 
-				top_index := chunk_block_index(u32(x), u32(top_y), u32(z))
-				top_material_id := u32(u8(view.blocks.material_id[top_index]))
 				log.assertf(
-					top_material_id == TERRAIN_GRASS_MAT_ID,
-					"heightfield column %d,%d: expected top material %d, got %d",
+					top_y == column.surface_height,
+					"biome heightfield column %d,%d: expected top y %d, got %d",
 					x,
 					z,
-					TERRAIN_GRASS_MAT_ID,
+					column.surface_height,
+					top_y,
+				)
+
+				top_index := chunk_block_index(u32(x), u32(top_y), u32(z))
+				top_material_id := u32(u8(view.blocks.material_id[top_index]))
+				expected_top_material_id := u32(
+					u8(terrain_biome_surface_material_id(column.dominant_biome_id)),
+				)
+				log.assertf(
+					top_material_id == expected_top_material_id,
+					"biome heightfield column %d,%d: expected top material %d, got %d",
+					x,
+					z,
+					expected_top_material_id,
 					top_material_id,
 				)
 
 				for y in 0 ..< CHUNK_BLOCK_LENGTH {
 					blocks_below_surface := top_y - i32(y)
 					if blocks_below_surface < 0 ||
-					   blocks_below_surface >= TERRAIN_GRASS_CAP_BLOCK_DEPTH {
+					   blocks_below_surface >= column.surface_layer_depth {
 						continue
 					}
 
@@ -4125,11 +4265,11 @@ when ODIN_DEBUG {
 
 					material_id := u32(u8(view.blocks.material_id[index]))
 					log.assertf(
-						material_id == TERRAIN_GRASS_MAT_ID,
-						"heightfield column %d,%d: expected grass-cap material %d, got %d",
+						material_id == expected_top_material_id,
+						"biome heightfield column %d,%d: expected surface material %d, got %d",
 						x,
 						z,
-						TERRAIN_GRASS_MAT_ID,
+						expected_top_material_id,
 						material_id,
 					)
 				}
@@ -4173,11 +4313,19 @@ when ODIN_DEBUG {
 				surface_block_y,
 			)
 
+			column := terrain_biome_column_sample_direct(
+				heightfield_key,
+				heightfield_origin.x + i32(vertex.block_x),
+				heightfield_origin.z + i32(vertex.block_z),
+			)
+			expected_top_material_id := u32(
+				u8(terrain_biome_surface_material_id(column.dominant_biome_id)),
+			)
 			log.assertf(
-				vertex.material_id == TERRAIN_GRASS_MAT_ID,
+				vertex.material_id == expected_top_material_id,
 				"heightfield face %d: expected top block material %d, got %d",
 				face_index,
-				TERRAIN_GRASS_MAT_ID,
+				expected_top_material_id,
 				vertex.material_id,
 			)
 		}
