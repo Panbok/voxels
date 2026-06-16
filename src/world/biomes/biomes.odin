@@ -1904,6 +1904,8 @@ when ODIN_DEBUG {
 			subterranean_sample.cell_count,
 		)
 
+		profile_debug_contract_checks_run()
+
 		log.debug("Biome feature grid and field contract checks passed")
 		generation_region_debug_contract_checks_run()
 	}
