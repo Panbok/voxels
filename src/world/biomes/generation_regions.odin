@@ -15,6 +15,7 @@ GenerationInfluenceMargins :: struct {
 	subterranean_biome_blocks:         i32,
 	surface_water_feature_blocks:      i32,
 	subterranean_water_feature_blocks: i32,
+	cave_network_blocks:               i32,
 }
 
 GenerationRegionSurfaceBiomeCell :: struct {
@@ -39,6 +40,7 @@ GenerationRegionQuery :: struct {
 	subterranean_biome_owner_range:         FeatureGridOwnerRange3,
 	surface_water_feature_owner_range:      FeatureGridOwnerRange2,
 	subterranean_water_feature_owner_range: FeatureGridOwnerRange3,
+	cave_network_owner_range:               FeatureGridOwnerRange3,
 }
 
 GenerationRegion :: struct {
@@ -50,6 +52,7 @@ GenerationRegion :: struct {
 	subterranean_biome_owner_range:         FeatureGridOwnerRange3,
 	surface_water_feature_owner_range:      FeatureGridOwnerRange2,
 	subterranean_water_feature_owner_range: FeatureGridOwnerRange3,
+	cave_network_owner_range:               FeatureGridOwnerRange3,
 	surface_biome_cells:                    [GENERATION_REGION_SURFACE_BIOME_CELL_CAPACITY]GenerationRegionSurfaceBiomeCell,
 	surface_biome_cell_count:               u32,
 	subterranean_biome_cells:               [GENERATION_REGION_SUBTERRANEAN_BIOME_CELL_CAPACITY]GenerationRegionSubterraneanBiomeCell,
@@ -60,6 +63,12 @@ GenerationRegion :: struct {
 	water_feature_segment_count:            u32,
 	water_feature_anchors:                  [GENERATION_REGION_WATER_FEATURE_ANCHOR_CAPACITY]WaterFeatureAnchor,
 	water_feature_anchor_count:             u32,
+	cave_network_nodes:                     [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]CaveNetworkNode,
+	cave_network_node_count:                u32,
+	cave_network_edges:                     [GENERATION_REGION_CAVE_NETWORK_EDGE_CAPACITY]CaveNetworkEdge,
+	cave_network_edge_count:                u32,
+	cave_anchors:                           [GENERATION_REGION_CAVE_ANCHOR_CAPACITY]CaveAnchor,
+	cave_anchor_count:                      u32,
 }
 
 //////////////////////////////////////
@@ -75,12 +84,14 @@ GENERATION_REGION_SUBTERRANEAN_BIOME_MARGIN_BLOCKS :: 456
 GENERATION_REGION_SURFACE_WATER_FEATURE_MARGIN_BLOCKS :: HYDROLOGY_SURFACE_SAMPLE_MARGIN_BLOCKS
 GENERATION_REGION_SUBTERRANEAN_WATER_FEATURE_MARGIN_BLOCKS ::
 	HYDROLOGY_SUBTERRANEAN_SAMPLE_MARGIN_BLOCKS
+GENERATION_REGION_CAVE_NETWORK_MARGIN_BLOCKS :: CAVE_NETWORK_SAMPLE_MARGIN_BLOCKS
 
 GENERATION_REGION_DEFAULT_INFLUENCE_MARGINS :: GenerationInfluenceMargins {
 	surface_biome_blocks              = GENERATION_REGION_SURFACE_BIOME_MARGIN_BLOCKS,
 	subterranean_biome_blocks         = GENERATION_REGION_SUBTERRANEAN_BIOME_MARGIN_BLOCKS,
 	surface_water_feature_blocks      = GENERATION_REGION_SURFACE_WATER_FEATURE_MARGIN_BLOCKS,
 	subterranean_water_feature_blocks = GENERATION_REGION_SUBTERRANEAN_WATER_FEATURE_MARGIN_BLOCKS,
+	cave_network_blocks               = GENERATION_REGION_CAVE_NETWORK_MARGIN_BLOCKS,
 }
 
 GENERATION_REGION_SURFACE_BIOME_CELL_CAPACITY :: 25
@@ -88,6 +99,9 @@ GENERATION_REGION_SUBTERRANEAN_BIOME_CELL_CAPACITY :: 125
 GENERATION_REGION_WATER_FEATURE_NODE_CAPACITY :: 64
 GENERATION_REGION_WATER_FEATURE_SEGMENT_CAPACITY :: 128
 GENERATION_REGION_WATER_FEATURE_ANCHOR_CAPACITY :: 192
+GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY :: 125
+GENERATION_REGION_CAVE_NETWORK_EDGE_CAPACITY :: 375
+GENERATION_REGION_CAVE_ANCHOR_CAPACITY :: 320
 
 #assert(GENERATION_REGION_BLOCK_LENGTH > SURFACE_MICRO_GRID_CONFIG.cell_size_blocks)
 #assert(GENERATION_REGION_BLOCK_LENGTH > 64)
@@ -174,6 +188,7 @@ generation_region_build_with_margins :: proc(
 	generation_region_surface_biome_cells_fill(&region)
 	generation_region_subterranean_biome_cells_fill(&region)
 	generation_region_water_features_fill(&region)
+	generation_region_cave_networks_fill(&region)
 	return region
 }
 
@@ -191,6 +206,7 @@ generation_region_influence_margins_validate :: proc(margins: GenerationInfluenc
 		margins.subterranean_water_feature_blocks >= 0,
 		"subterranean water feature margin must not be negative",
 	)
+	log.assert(margins.cave_network_blocks >= 0, "cave network margin must not be negative")
 }
 
 generation_region_surface_biome_cells_fill :: proc(region: ^GenerationRegion) {
@@ -441,6 +457,147 @@ generation_region_water_feature_anchor_append :: proc(
 	region.water_feature_anchor_count += 1
 }
 
+generation_region_cave_networks_fill :: proc(region: ^GenerationRegion) {
+	region.cave_network_owner_range = feature_grid_owner_range_from_block_bounds(
+		region.bounds,
+		region.influence_margins.cave_network_blocks,
+		CAVE_NETWORK_GRID_CONFIG,
+	)
+
+	node_count_required := feature_grid_owner_range_count(region.cave_network_owner_range)
+	log.assertf(
+		node_count_required <= GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY,
+		"Generation Region Cave Network node capacity too small: required=%d capacity=%d",
+		node_count_required,
+		GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY,
+	)
+	log.assertf(
+		node_count_required * 3 <= GENERATION_REGION_CAVE_NETWORK_EDGE_CAPACITY,
+		"Generation Region Cave Network edge capacity too small: required=%d capacity=%d",
+		node_count_required * 3,
+		GENERATION_REGION_CAVE_NETWORK_EDGE_CAPACITY,
+	)
+
+	for z := region.cave_network_owner_range.min.z;
+	    z <= region.cave_network_owner_range.max.z;
+	    z += 1 {
+		for y := region.cave_network_owner_range.min.y;
+		    y <= region.cave_network_owner_range.max.y;
+		    y += 1 {
+			for x := region.cave_network_owner_range.min.x;
+			    x <= region.cave_network_owner_range.max.x;
+			    x += 1 {
+				owner := FeatureGridCoord3 {
+					x = x,
+					y = y,
+					z = z,
+				}
+				node := cave_network_node_from_owner(region.key, owner)
+				generation_region_cave_network_node_append(region, node)
+				if cave_node_should_emit_anchor(node) {
+					generation_region_cave_anchor_append(
+						region,
+						cave_anchor_from_node(region.key, node),
+					)
+				}
+			}
+		}
+	}
+
+	for i := u32(0); i < region.cave_network_node_count; i += 1 {
+		node := region.cave_network_nodes[i]
+		owner := node.owner
+		generation_region_cave_network_edge_maybe_append(
+			region,
+			node,
+			{x = owner.x + 1, y = owner.y, z = owner.z},
+		)
+		generation_region_cave_network_edge_maybe_append(
+			region,
+			node,
+			{x = owner.x, y = owner.y + 1, z = owner.z},
+		)
+		generation_region_cave_network_edge_maybe_append(
+			region,
+			node,
+			{x = owner.x, y = owner.y, z = owner.z + 1},
+		)
+	}
+
+	for i := u32(0); i < region.water_feature_anchor_count; i += 1 {
+		generation_region_cave_anchor_append(
+			region,
+			cave_anchor_from_water_anchor(region.water_feature_anchors[i]),
+		)
+	}
+}
+
+generation_region_cave_network_node_append :: proc(
+	region: ^GenerationRegion,
+	node: CaveNetworkNode,
+) {
+	log.assert(
+		region.cave_network_node_count < GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY,
+		"Generation Region Cave Network node capacity exceeded",
+	)
+	region.cave_network_nodes[region.cave_network_node_count] = node
+	region.cave_network_node_count += 1
+}
+
+generation_region_cave_network_edge_maybe_append :: proc(
+	region: ^GenerationRegion,
+	node: CaveNetworkNode,
+	neighbor_owner: FeatureGridCoord3,
+) {
+	neighbor_node, found := generation_region_cave_network_node_find(region, neighbor_owner)
+	if !found {
+		neighbor_node = cave_network_node_from_owner(region.key, neighbor_owner)
+	}
+	edge := cave_network_edge_from_nodes(node, neighbor_node)
+	if !cave_network_edge_should_exist(edge, node, neighbor_node) {
+		return
+	}
+	generation_region_cave_network_edge_append(region, edge)
+}
+
+generation_region_cave_network_node_find :: proc(
+	region: ^GenerationRegion,
+	owner: FeatureGridCoord3,
+) -> (
+	node: CaveNetworkNode,
+	found: bool,
+) {
+	for i := u32(0); i < region.cave_network_node_count; i += 1 {
+		if region.cave_network_nodes[i].owner == owner {
+			node = region.cave_network_nodes[i]
+			found = true
+			return
+		}
+	}
+	return
+}
+
+generation_region_cave_network_edge_append :: proc(
+	region: ^GenerationRegion,
+	edge: CaveNetworkEdge,
+) {
+	log.assert(
+		region.cave_network_edge_count < GENERATION_REGION_CAVE_NETWORK_EDGE_CAPACITY,
+		"Generation Region Cave Network edge capacity exceeded",
+	)
+	region.cave_network_edges[region.cave_network_edge_count] = edge
+	region.cave_network_edge_count += 1
+}
+
+generation_region_cave_anchor_append :: proc(region: ^GenerationRegion, anchor: CaveAnchor) {
+	log.assert(
+		region.cave_anchor_count < GENERATION_REGION_CAVE_ANCHOR_CAPACITY,
+		"Generation Region Cave Anchor capacity exceeded",
+	)
+	region.cave_anchors[region.cave_anchor_count] = anchor
+	region.cave_anchor_count += 1
+}
+
 generation_region_surface_biome_cell_from_owner :: proc(
 	key: FeatureGridKey,
 	owner: FeatureGridCoord2,
@@ -510,6 +667,11 @@ generation_region_query_make :: proc(
 			influence_margins.subterranean_water_feature_blocks,
 			HYDROLOGY_SUBTERRANEAN_GRAPH_GRID_CONFIG,
 		),
+		cave_network_owner_range = feature_grid_owner_range_from_block_bounds(
+			bounds,
+			influence_margins.cave_network_blocks,
+			CAVE_NETWORK_GRID_CONFIG,
+		),
 	}
 }
 
@@ -549,6 +711,13 @@ generation_region_query_validate :: proc(region: ^GenerationRegion, query: Gener
 			query.subterranean_water_feature_owner_range,
 		),
 		"Generation Region is missing subterranean Water Feature owners for the query margin",
+	)
+	log.assert(
+		generation_region_owner_range_contains_range_3(
+			region.cave_network_owner_range,
+			query.cave_network_owner_range,
+		),
+		"Generation Region is missing Cave Network owners for the query margin",
 	)
 }
 
@@ -676,6 +845,87 @@ generation_region_water_feature_anchors_write :: proc(
 		log.assertf(
 			count < u32(len(anchors)),
 			"water feature anchor query output too small: got=%d",
+			len(anchors),
+		)
+		anchors[count] = anchor
+		count += 1
+	}
+	return count
+}
+
+generation_region_cave_network_nodes_write :: proc(
+	region: ^GenerationRegion,
+	query: GenerationRegionQuery,
+	nodes: []CaveNetworkNode,
+) -> u32 {
+	generation_region_query_validate(region, query)
+
+	count: u32
+	for i := u32(0); i < region.cave_network_node_count; i += 1 {
+		node := region.cave_network_nodes[i]
+		if !generation_region_owner_range_contains_owner_3(
+			query.cave_network_owner_range,
+			node.owner,
+		) {
+			continue
+		}
+		log.assertf(
+			count < u32(len(nodes)),
+			"Cave Network node query output too small: got=%d",
+			len(nodes),
+		)
+		nodes[count] = node
+		count += 1
+	}
+	return count
+}
+
+generation_region_cave_network_edges_write :: proc(
+	region: ^GenerationRegion,
+	query: GenerationRegionQuery,
+	edges: []CaveNetworkEdge,
+) -> u32 {
+	generation_region_query_validate(region, query)
+
+	count: u32
+	for i := u32(0); i < region.cave_network_edge_count; i += 1 {
+		edge := region.cave_network_edges[i]
+		if !generation_region_owner_range_contains_owner_3(
+			query.cave_network_owner_range,
+			edge.owner,
+		) {
+			continue
+		}
+		log.assertf(
+			count < u32(len(edges)),
+			"Cave Network edge query output too small: got=%d",
+			len(edges),
+		)
+		edges[count] = edge
+		count += 1
+	}
+	return count
+}
+
+generation_region_cave_anchors_write :: proc(
+	region: ^GenerationRegion,
+	query: GenerationRegionQuery,
+	anchors: []CaveAnchor,
+) -> u32 {
+	generation_region_query_validate(region, query)
+
+	count: u32
+	for i := u32(0); i < region.cave_anchor_count; i += 1 {
+		anchor := region.cave_anchors[i]
+		if !generation_region_owner_range_contains_owner_3(
+			query.cave_network_owner_range,
+			anchor.owner,
+		) {
+			continue
+		}
+		log.assertf(
+			count < u32(len(anchors)),
+			"Cave Anchor query output too small: got=%d",
 			len(anchors),
 		)
 		anchors[count] = anchor
@@ -1017,6 +1267,12 @@ when ODIN_DEBUG {
 			"origin region should store sparse Water Feature Graph data",
 		)
 		log.assert(
+			origin_region.cave_network_node_count > 0 &&
+			origin_region.cave_network_edge_count > 0 &&
+			origin_region.cave_anchor_count > 0,
+			"origin region should store sparse Cave Network data",
+		)
+		log.assert(
 			generation_region_coord_from_block(-1, -1, -1) ==
 			GenerationRegionCoord{x = -1, y = -1, z = -1},
 			"negative block coordinates must use floor division for Generation Regions",
@@ -1079,6 +1335,30 @@ when ODIN_DEBUG {
 			water_anchors[:],
 		)
 		log.assert(water_anchor_count > 0, "chunk Water Feature anchor query returned no data")
+
+		cave_nodes: [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]CaveNetworkNode
+		cave_node_count := generation_region_cave_network_nodes_write(
+			&origin_region,
+			query,
+			cave_nodes[:],
+		)
+		log.assert(cave_node_count > 0, "chunk Cave Network node query returned no data")
+
+		cave_edges: [GENERATION_REGION_CAVE_NETWORK_EDGE_CAPACITY]CaveNetworkEdge
+		cave_edge_count := generation_region_cave_network_edges_write(
+			&origin_region,
+			query,
+			cave_edges[:],
+		)
+		log.assert(cave_edge_count > 0, "chunk Cave Network edge query returned no data")
+
+		cave_anchors: [GENERATION_REGION_CAVE_ANCHOR_CAPACITY]CaveAnchor
+		cave_anchor_count := generation_region_cave_anchors_write(
+			&origin_region,
+			query,
+			cave_anchors[:],
+		)
+		log.assert(cave_anchor_count > 0, "chunk Cave Anchor query returned no data")
 
 		edge_chunk_bounds := BlockBounds3 {
 			min = {x = 448, y = 448, z = 448},
@@ -1165,6 +1445,16 @@ when ODIN_DEBUG {
 		debug_hydrology_subterranean_samples_assert_equal(
 			subterranean_hydrology_direct,
 			subterranean_hydrology_region,
+		)
+
+		cave_debug_sample := cave_network_debug_surface_sample_from_region(
+			&surface_region,
+			surface_sample_coord.x,
+			surface_sample_coord.z,
+		)
+		log.assert(
+			cave_debug_sample.nearest_distance_blocks >= 0,
+			"surface Cave Network debug sample should be valid",
 		)
 
 		log.debug("Generation Region contract checks passed")
