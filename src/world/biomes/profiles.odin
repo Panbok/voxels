@@ -25,52 +25,115 @@ RegionalTerrainFields :: struct {
 /////////////////////////////////////
 
 BiomeProfile :: struct {
-	biome_id:                      BiomeID,
-	base_height_blocks:            f32,
-	continental_height_blocks:     f32,
-	elevation_height_blocks:       f32,
-	erosion_height_blocks:         f32,
-	relief_height_blocks:          f32,
-	relief_amplitude_blocks:       f32,
-	ruggedness_response:           f32,
-	cliff_bias:                    f32,
-	terrace_strength:              f32,
-	cave_openness:                 f32,
-	surface_layer_depth_blocks:    f32,
-	local_detail_amplitude_blocks: f32,
-	fantasy_affinity_bias:         f32,
-	magic_affinity_weight:         f32,
-	corruption_affinity_weight:    f32,
-	heat_affinity_weight:          f32,
-	cold_affinity_weight:          f32,
-	subterranean_pressure_weight:  f32,
+	biome_id:                           BiomeID,
+	base_height_blocks:                 f32,
+	continental_height_blocks:          f32,
+	elevation_height_blocks:            f32,
+	erosion_height_blocks:              f32,
+	relief_height_blocks:               f32,
+	relief_amplitude_blocks:            f32,
+	ruggedness_response:                f32,
+	cliff_bias:                         f32,
+	terrace_strength:                   f32,
+	cave_openness:                      f32,
+	surface_layer_depth_blocks:         f32,
+	local_detail_amplitude_blocks:      f32,
+	shoreline_width_blocks:             f32,
+	shoreline_slope:                    f32,
+	underwater_floor_depression_blocks: f32,
+	cliff_coast_bias:                   f32,
+	swamp_shallowness:                  f32,
+	seabed_roughness_blocks:            f32,
+	fantasy_affinity_bias:              f32,
+	magic_affinity_weight:              f32,
+	corruption_affinity_weight:         f32,
+	heat_affinity_weight:               f32,
+	cold_affinity_weight:               f32,
+	subterranean_pressure_weight:       f32,
 }
 
 BiomeShapeTarget :: struct {
-	biome_id:                      BiomeID,
-	surface_height_blocks:         f32,
-	relief_amplitude_blocks:       f32,
-	ruggedness_response:           f32,
-	cliff_bias:                    f32,
-	terrace_strength:              f32,
-	cave_openness:                 f32,
-	surface_layer_depth_blocks:    f32,
-	local_detail_amplitude_blocks: f32,
-	fantasy_affinity:              f32,
+	biome_id:                           BiomeID,
+	surface_height_blocks:              f32,
+	relief_amplitude_blocks:            f32,
+	ruggedness_response:                f32,
+	cliff_bias:                         f32,
+	terrace_strength:                   f32,
+	cave_openness:                      f32,
+	surface_layer_depth_blocks:         f32,
+	local_detail_amplitude_blocks:      f32,
+	shoreline_width_blocks:             f32,
+	shoreline_slope:                    f32,
+	underwater_floor_depression_blocks: f32,
+	cliff_coast_bias:                   f32,
+	swamp_shallowness:                  f32,
+	seabed_roughness_blocks:            f32,
+	fantasy_affinity:                   f32,
+}
+
+// BiomeTransitionStyle describes whether a boundary should reconcile terrain smoothly
+// or preserve a deliberate shaped edge.
+BiomeTransitionStyle :: enum u8 {
+	// Soft transitions blend neighboring Biome Shape Targets without a strong border feature.
+	Soft,
+	// Hard transitions keep a structured boundary such as a cliff, shell, or corruption band.
+	Hard,
+}
+
+// BiomeTransitionRuleKind identifies the selected pair rule for a biome boundary.
+BiomeTransitionRuleKind :: enum u8 {
+	// Generic_Smooth is the fallback for compatible or unspecified biome pairs.
+	Generic_Smooth,
+	// Temperate_Marsh_Shelf creates a broad, shallow soft edge between ordinary hills and marsh.
+	Temperate_Marsh_Shelf,
+	// Basalt_Marsh_Cliff creates a hard volcanic-to-wetland boundary with stronger cliff shaping.
+	Basalt_Marsh_Cliff,
+	// Corrupted_Border_Band creates a structured hostile boundary around corrupted terrain.
+	Corrupted_Border_Band,
+	// Fungal_Aquifer_Connector creates an open, water-friendly underground transition.
+	Fungal_Aquifer_Connector,
+	// Crystal_Geode_Shell creates a harder subterranean boundary around crystal geode regions.
+	Crystal_Geode_Shell,
+}
+
+BiomeTransitionRule :: struct {
+	kind:                                BiomeTransitionRuleKind,
+	style:                               BiomeTransitionStyle,
+	band_width_blocks:                   f32,
+	dominant_bias:                       f32,
+	height_bias_blocks:                  f32,
+	cliff_bias_boost:                    f32,
+	terrace_strength_boost:              f32,
+	cave_openness_boost:                 f32,
+	local_detail_amplitude_boost_blocks: f32,
+	fantasy_affinity_boost:              f32,
+	shoreline_width_scale:               f32,
+	underwater_depression_boost_blocks:  f32,
 }
 
 SurfaceBiomeProfileEvaluation :: struct {
-	fields:         RegionalTerrainFields,
-	targets:        [BIOME_FIELD_NEAREST_CELL_COUNT]BiomeShapeTarget,
-	blended_target: BiomeShapeTarget,
-	cell_count:     u32,
+	fields:                   RegionalTerrainFields,
+	targets:                  [BIOME_FIELD_NEAREST_CELL_COUNT]BiomeShapeTarget,
+	blend_weights:            [BIOME_FIELD_NEAREST_CELL_COUNT]f32,
+	blended_target:           BiomeShapeTarget,
+	transition_rule:          BiomeTransitionRule,
+	transition_strength:      f32,
+	transitioned_target:      BiomeShapeTarget,
+	sea_compression_strength: f32,
+	final_target:             BiomeShapeTarget,
+	cell_count:               u32,
 }
 
 SubterraneanBiomeProfileEvaluation :: struct {
-	fields:         RegionalTerrainFields,
-	targets:        [BIOME_FIELD_NEAREST_CELL_COUNT]BiomeShapeTarget,
-	blended_target: BiomeShapeTarget,
-	cell_count:     u32,
+	fields:              RegionalTerrainFields,
+	targets:             [BIOME_FIELD_NEAREST_CELL_COUNT]BiomeShapeTarget,
+	blend_weights:       [BIOME_FIELD_NEAREST_CELL_COUNT]f32,
+	blended_target:      BiomeShapeTarget,
+	transition_rule:     BiomeTransitionRule,
+	transition_strength: f32,
+	transitioned_target: BiomeShapeTarget,
+	final_target:        BiomeShapeTarget,
+	cell_count:          u32,
 }
 
 //////////////////////////////////////
@@ -97,6 +160,13 @@ REGIONAL_TERRAIN_CORRUPTION_SALT :: u64(0xc0ffee3175ad43b1)
 REGIONAL_TERRAIN_HEAT_SALT :: u64(0x2f8a7bd152946e33)
 REGIONAL_TERRAIN_COLD_SALT :: u64(0x9b879d623e4c11af)
 REGIONAL_TERRAIN_PRESSURE_SALT :: u64(0x47c1b7e93d524a05)
+
+//////////////////////////////////////
+// Sea Compression Constants
+/////////////////////////////////////
+
+SEA_LEVEL_BLOCKS :: f32(20.0)
+SEA_COMPRESSION_MIN_SHORELINE_WIDTH_BLOCKS :: f32(1.0)
 
 //////////////////////////////////////
 // Regional Terrain Field Methods
@@ -340,6 +410,12 @@ biome_profile_for :: proc(biome_id: BiomeID) -> BiomeProfile {
 			cave_openness = 0.20,
 			surface_layer_depth_blocks = 4,
 			local_detail_amplitude_blocks = 3,
+			shoreline_width_blocks = 14,
+			shoreline_slope = 0.45,
+			underwater_floor_depression_blocks = 2,
+			cliff_coast_bias = 0.08,
+			swamp_shallowness = 0.10,
+			seabed_roughness_blocks = 1,
 			fantasy_affinity_bias = 0.00,
 			magic_affinity_weight = 0.10,
 			corruption_affinity_weight = -0.15,
@@ -362,6 +438,12 @@ biome_profile_for :: proc(biome_id: BiomeID) -> BiomeProfile {
 			cave_openness = 0.24,
 			surface_layer_depth_blocks = 2,
 			local_detail_amplitude_blocks = 7,
+			shoreline_width_blocks = 8,
+			shoreline_slope = 0.72,
+			underwater_floor_depression_blocks = 5,
+			cliff_coast_bias = 0.50,
+			swamp_shallowness = 0.00,
+			seabed_roughness_blocks = 4,
 			fantasy_affinity_bias = 0.10,
 			magic_affinity_weight = 0.10,
 			corruption_affinity_weight = 0.05,
@@ -384,6 +466,12 @@ biome_profile_for :: proc(biome_id: BiomeID) -> BiomeProfile {
 			cave_openness = 0.26,
 			surface_layer_depth_blocks = 5,
 			local_detail_amplitude_blocks = 2,
+			shoreline_width_blocks = 26,
+			shoreline_slope = 0.18,
+			underwater_floor_depression_blocks = 1,
+			cliff_coast_bias = 0.00,
+			swamp_shallowness = 0.88,
+			seabed_roughness_blocks = 0.5,
 			fantasy_affinity_bias = 0.05,
 			magic_affinity_weight = 0.10,
 			corruption_affinity_weight = 0.00,
@@ -406,6 +494,12 @@ biome_profile_for :: proc(biome_id: BiomeID) -> BiomeProfile {
 			cave_openness = 0.34,
 			surface_layer_depth_blocks = 3,
 			local_detail_amplitude_blocks = 5,
+			shoreline_width_blocks = 14,
+			shoreline_slope = 0.34,
+			underwater_floor_depression_blocks = 3,
+			cliff_coast_bias = 0.18,
+			swamp_shallowness = 0.20,
+			seabed_roughness_blocks = 2,
 			fantasy_affinity_bias = 0.18,
 			magic_affinity_weight = 0.15,
 			corruption_affinity_weight = 0.65,
@@ -428,6 +522,12 @@ biome_profile_for :: proc(biome_id: BiomeID) -> BiomeProfile {
 			cave_openness = 0.72,
 			surface_layer_depth_blocks = 4,
 			local_detail_amplitude_blocks = 5,
+			shoreline_width_blocks = 10,
+			shoreline_slope = 0.35,
+			underwater_floor_depression_blocks = 2,
+			cliff_coast_bias = 0.05,
+			swamp_shallowness = 0.35,
+			seabed_roughness_blocks = 1,
 			fantasy_affinity_bias = 0.22,
 			magic_affinity_weight = 0.35,
 			corruption_affinity_weight = -0.10,
@@ -450,6 +550,12 @@ biome_profile_for :: proc(biome_id: BiomeID) -> BiomeProfile {
 			cave_openness = 0.48,
 			surface_layer_depth_blocks = 2,
 			local_detail_amplitude_blocks = 6,
+			shoreline_width_blocks = 7,
+			shoreline_slope = 0.70,
+			underwater_floor_depression_blocks = 3,
+			cliff_coast_bias = 0.40,
+			swamp_shallowness = 0.00,
+			seabed_roughness_blocks = 3,
 			fantasy_affinity_bias = 0.28,
 			magic_affinity_weight = 0.42,
 			corruption_affinity_weight = 0.00,
@@ -472,6 +578,12 @@ biome_profile_for :: proc(biome_id: BiomeID) -> BiomeProfile {
 			cave_openness = 0.62,
 			surface_layer_depth_blocks = 5,
 			local_detail_amplitude_blocks = 3,
+			shoreline_width_blocks = 22,
+			shoreline_slope = 0.22,
+			underwater_floor_depression_blocks = 2,
+			cliff_coast_bias = 0.02,
+			swamp_shallowness = 0.72,
+			seabed_roughness_blocks = 1,
 			fantasy_affinity_bias = 0.14,
 			magic_affinity_weight = 0.12,
 			corruption_affinity_weight = -0.08,
@@ -527,6 +639,15 @@ biome_shape_target_evaluate :: proc(
 			f32(0),
 			profile.local_detail_amplitude_blocks * (0.5 + fields.ruggedness),
 		),
+		shoreline_width_blocks = math.max(f32(1), profile.shoreline_width_blocks),
+		shoreline_slope = regional_terrain_field_saturate(profile.shoreline_slope),
+		underwater_floor_depression_blocks = math.max(
+			f32(0),
+			profile.underwater_floor_depression_blocks,
+		),
+		cliff_coast_bias = regional_terrain_field_saturate(profile.cliff_coast_bias),
+		swamp_shallowness = regional_terrain_field_saturate(profile.swamp_shallowness),
+		seabed_roughness_blocks = math.max(f32(0), profile.seabed_roughness_blocks),
 		fantasy_affinity = fantasy_affinity,
 	}
 }
@@ -554,12 +675,38 @@ surface_biome_profile_evaluate :: proc(
 		profile := biome_profile_for(sample.cells[i].biome_id)
 		evaluation.targets[i] = biome_shape_target_evaluate(profile, fields)
 	}
-	blend_weights := sample.blend_weights
+	evaluation.transition_rule = surface_biome_transition_rule_select(sample)
+	evaluation.transition_strength = biome_transition_strength(
+		sample.distance_gap,
+		evaluation.transition_rule,
+	)
+	distances: [BIOME_FIELD_NEAREST_CELL_COUNT]f32
+	for i := u32(0); i < sample.cell_count; i += 1 {
+		distances[i] = sample.cells[i].distance
+	}
+	biome_transition_blend_weights_write(
+		distances[:],
+		sample.cell_count,
+		SURFACE_BIOME_JUNCTION_BAND_BLOCKS,
+		evaluation.transition_rule,
+		evaluation.transition_strength,
+		evaluation.blend_weights[:],
+	)
 	evaluation.blended_target = biome_shape_target_blend(
 		evaluation.targets[:],
-		blend_weights[:],
+		evaluation.blend_weights[:],
 		sample.cell_count,
 	)
+	evaluation.transitioned_target = biome_transition_rule_apply(
+		evaluation.blended_target,
+		evaluation.targets[0],
+		evaluation.targets[1],
+		evaluation.transition_rule,
+		evaluation.transition_strength,
+		sample.cell_count,
+	)
+	evaluation.final_target, evaluation.sea_compression_strength =
+		biome_shape_target_apply_sea_compression(evaluation.transitioned_target)
 	return evaluation
 }
 
@@ -578,20 +725,45 @@ subterranean_biome_profile_evaluate :: proc(
 ) -> SubterraneanBiomeProfileEvaluation {
 	fields := regional_terrain_fields_sample(key, block_x, block_y, block_z)
 	evaluation := SubterraneanBiomeProfileEvaluation {
-		fields     = fields,
-		cell_count = sample.cell_count,
-	}
+			fields     = fields,
+			cell_count = sample.cell_count,
+		}
 
 	for i := u32(0); i < sample.cell_count; i += 1 {
 		profile := biome_profile_for(sample.cells[i].biome_id)
 		evaluation.targets[i] = biome_shape_target_evaluate(profile, fields)
 	}
-	blend_weights := sample.blend_weights
+	evaluation.transition_rule = subterranean_biome_transition_rule_select(sample)
+	evaluation.transition_strength = biome_transition_strength(
+		sample.distance_gap,
+		evaluation.transition_rule,
+	)
+	distances: [BIOME_FIELD_NEAREST_CELL_COUNT]f32
+	for i := u32(0); i < sample.cell_count; i += 1 {
+		distances[i] = sample.cells[i].distance
+	}
+	biome_transition_blend_weights_write(
+		distances[:],
+		sample.cell_count,
+		SUBTERRANEAN_BIOME_JUNCTION_BAND_BLOCKS,
+		evaluation.transition_rule,
+		evaluation.transition_strength,
+		evaluation.blend_weights[:],
+	)
 	evaluation.blended_target = biome_shape_target_blend(
 		evaluation.targets[:],
-		blend_weights[:],
+		evaluation.blend_weights[:],
 		sample.cell_count,
 	)
+	evaluation.transitioned_target = biome_transition_rule_apply(
+		evaluation.blended_target,
+		evaluation.targets[0],
+		evaluation.targets[1],
+		evaluation.transition_rule,
+		evaluation.transition_strength,
+		sample.cell_count,
+	)
+	evaluation.final_target = evaluation.transitioned_target
 	return evaluation
 }
 
@@ -627,9 +799,295 @@ biome_shape_target_blend :: proc(
 		blended.cave_openness += targets[i].cave_openness * weight
 		blended.surface_layer_depth_blocks += targets[i].surface_layer_depth_blocks * weight
 		blended.local_detail_amplitude_blocks += targets[i].local_detail_amplitude_blocks * weight
+		blended.shoreline_width_blocks += targets[i].shoreline_width_blocks * weight
+		blended.shoreline_slope += targets[i].shoreline_slope * weight
+		blended.underwater_floor_depression_blocks +=
+			targets[i].underwater_floor_depression_blocks * weight
+		blended.cliff_coast_bias += targets[i].cliff_coast_bias * weight
+		blended.swamp_shallowness += targets[i].swamp_shallowness * weight
+		blended.seabed_roughness_blocks += targets[i].seabed_roughness_blocks * weight
 		blended.fantasy_affinity += targets[i].fantasy_affinity * weight
 	}
 	return blended
+}
+
+//////////////////////////////////////
+// Biome Transition Methods
+/////////////////////////////////////
+
+surface_biome_transition_rule_select :: proc(
+	sample: SurfaceBiomeFieldSample,
+) -> BiomeTransitionRule {
+	if sample.cell_count < 2 {
+		return biome_transition_rule_generic(SURFACE_BIOME_BLEND_BAND_BLOCKS)
+	}
+	return biome_transition_rule_for(
+		sample.cells[0].biome_id,
+		sample.cells[1].biome_id,
+		SURFACE_BIOME_BLEND_BAND_BLOCKS,
+	)
+}
+
+subterranean_biome_transition_rule_select :: proc(
+	sample: SubterraneanBiomeFieldSample,
+) -> BiomeTransitionRule {
+	if sample.cell_count < 2 {
+		return biome_transition_rule_generic(SUBTERRANEAN_BIOME_BLEND_BAND_BLOCKS)
+	}
+	return biome_transition_rule_for(
+		sample.cells[0].biome_id,
+		sample.cells[1].biome_id,
+		SUBTERRANEAN_BIOME_BLEND_BAND_BLOCKS,
+	)
+}
+
+biome_transition_rule_for :: proc(
+	a, b: BiomeID,
+	fallback_band_width_blocks: f32,
+) -> BiomeTransitionRule {
+	if a == b {
+		return biome_transition_rule_generic(fallback_band_width_blocks)
+	}
+
+	if biome_transition_pair_matches(a, b, .Temperate_Hills, .Wet_Lowland_Marsh) {
+		return {
+			kind = .Temperate_Marsh_Shelf,
+			style = .Soft,
+			band_width_blocks = 128,
+			dominant_bias = 0.00,
+			height_bias_blocks = -1,
+			cliff_bias_boost = 0.00,
+			terrace_strength_boost = 0.02,
+			cave_openness_boost = 0.00,
+			local_detail_amplitude_boost_blocks = 0.5,
+			fantasy_affinity_boost = 0.02,
+			shoreline_width_scale = 1.20,
+			underwater_depression_boost_blocks = 0.5,
+		}
+	}
+
+	if biome_transition_pair_matches(a, b, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh) {
+		return {
+			kind = .Basalt_Marsh_Cliff,
+			style = .Hard,
+			band_width_blocks = 72,
+			dominant_bias = 0.45,
+			height_bias_blocks = 4,
+			cliff_bias_boost = 0.30,
+			terrace_strength_boost = 0.18,
+			cave_openness_boost = 0.00,
+			local_detail_amplitude_boost_blocks = 2,
+			fantasy_affinity_boost = 0.06,
+			shoreline_width_scale = 0.85,
+			underwater_depression_boost_blocks = 2,
+		}
+	}
+
+	if biome_transition_pair_matches(a, b, .Corrupted_Ash_Forest, .Temperate_Hills) {
+		return {
+			kind = .Corrupted_Border_Band,
+			style = .Hard,
+			band_width_blocks = 104,
+			dominant_bias = 0.30,
+			height_bias_blocks = 1,
+			cliff_bias_boost = 0.12,
+			terrace_strength_boost = 0.08,
+			cave_openness_boost = 0.06,
+			local_detail_amplitude_boost_blocks = 1.5,
+			fantasy_affinity_boost = 0.20,
+			shoreline_width_scale = 1.00,
+			underwater_depression_boost_blocks = 1,
+		}
+	}
+
+	if biome_transition_pair_matches(a, b, .Fungal_Vaults, .Buried_Aquifer_Caves) {
+		return {
+			kind = .Fungal_Aquifer_Connector,
+			style = .Soft,
+			band_width_blocks = 96,
+			dominant_bias = 0.00,
+			height_bias_blocks = -2,
+			cliff_bias_boost = 0.00,
+			terrace_strength_boost = 0.04,
+			cave_openness_boost = 0.16,
+			local_detail_amplitude_boost_blocks = 1,
+			fantasy_affinity_boost = 0.08,
+			shoreline_width_scale = 1.15,
+			underwater_depression_boost_blocks = 1,
+		}
+	}
+
+	if biome_transition_pair_matches(a, b, .Crystal_Geode_Network, .Fungal_Vaults) {
+		return {
+			kind = .Crystal_Geode_Shell,
+			style = .Hard,
+			band_width_blocks = 60,
+			dominant_bias = 0.38,
+			height_bias_blocks = 2,
+			cliff_bias_boost = 0.22,
+			terrace_strength_boost = 0.20,
+			cave_openness_boost = -0.08,
+			local_detail_amplitude_boost_blocks = 2,
+			fantasy_affinity_boost = 0.12,
+			shoreline_width_scale = 0.90,
+			underwater_depression_boost_blocks = 0,
+		}
+	}
+
+	return biome_transition_rule_generic(fallback_band_width_blocks)
+}
+
+biome_transition_rule_generic :: proc(band_width_blocks: f32) -> BiomeTransitionRule {
+	return {
+		kind = .Generic_Smooth,
+		style = .Soft,
+		band_width_blocks = band_width_blocks,
+		dominant_bias = 0,
+		height_bias_blocks = 0,
+		cliff_bias_boost = 0,
+		terrace_strength_boost = 0,
+		cave_openness_boost = 0,
+		local_detail_amplitude_boost_blocks = 0,
+		fantasy_affinity_boost = 0,
+		shoreline_width_scale = 1,
+		underwater_depression_boost_blocks = 0,
+	}
+}
+
+biome_transition_pair_matches :: proc(a, b, expected_a, expected_b: BiomeID) -> bool {
+	return a == expected_a && b == expected_b || a == expected_b && b == expected_a
+}
+
+biome_transition_strength :: proc(distance_gap: f32, rule: BiomeTransitionRule) -> f32 {
+	return biome_field_boundary_strength(distance_gap, rule.band_width_blocks)
+}
+
+biome_transition_blend_weights_write :: proc(
+	distances: []f32,
+	cell_count: u32,
+	junction_band_blocks: f32,
+	rule: BiomeTransitionRule,
+	transition_strength: f32,
+	weights: []f32,
+) {
+	_, _ = biome_field_blend_weights_write(
+		distances,
+		cell_count,
+		rule.band_width_blocks,
+		junction_band_blocks,
+		weights,
+	)
+
+	if cell_count < 2 || rule.dominant_bias <= 0 || transition_strength <= 0 {
+		return
+	}
+
+	dominant_push := math.clamp(rule.dominant_bias * transition_strength, f32(0), f32(0.95))
+	neighbor_total := f32(0)
+	for i := u32(1); i < cell_count; i += 1 {
+		neighbor_total += weights[i]
+	}
+	if neighbor_total <= 0 {
+		return
+	}
+
+	weights[0] += neighbor_total * dominant_push
+	remaining_neighbor_total := math.max(f32(0), 1.0 - weights[0])
+	neighbor_scale := remaining_neighbor_total / neighbor_total
+	for i := u32(1); i < cell_count; i += 1 {
+		weights[i] *= neighbor_scale
+	}
+}
+
+biome_transition_rule_apply :: proc(
+	target, dominant_target, neighbor_target: BiomeShapeTarget,
+	rule: BiomeTransitionRule,
+	transition_strength: f32,
+	cell_count: u32,
+) -> BiomeShapeTarget {
+	if cell_count < 2 || transition_strength <= 0 {
+		return target
+	}
+
+	result := target
+	if rule.style == .Hard {
+		higher_height := math.max(
+			dominant_target.surface_height_blocks,
+			neighbor_target.surface_height_blocks,
+		)
+		result.surface_height_blocks +=
+			(higher_height - result.surface_height_blocks) *
+			rule.dominant_bias *
+			transition_strength
+	}
+
+	result.surface_height_blocks += rule.height_bias_blocks * transition_strength
+	result.cliff_bias = regional_terrain_field_saturate(
+		result.cliff_bias + rule.cliff_bias_boost * transition_strength,
+	)
+	result.terrace_strength = regional_terrain_field_saturate(
+		result.terrace_strength + rule.terrace_strength_boost * transition_strength,
+	)
+	result.cave_openness = regional_terrain_field_saturate(
+		result.cave_openness + rule.cave_openness_boost * transition_strength,
+	)
+	result.local_detail_amplitude_blocks = math.max(
+		f32(0),
+		result.local_detail_amplitude_blocks +
+		rule.local_detail_amplitude_boost_blocks * transition_strength,
+	)
+	result.fantasy_affinity = regional_terrain_field_saturate(
+		result.fantasy_affinity + rule.fantasy_affinity_boost * transition_strength,
+	)
+	result.shoreline_width_blocks = math.max(
+		SEA_COMPRESSION_MIN_SHORELINE_WIDTH_BLOCKS,
+		result.shoreline_width_blocks *
+		regional_terrain_field_lerp(1, rule.shoreline_width_scale, transition_strength),
+	)
+	result.underwater_floor_depression_blocks = math.max(
+		f32(0),
+		result.underwater_floor_depression_blocks +
+		rule.underwater_depression_boost_blocks * transition_strength,
+	)
+	return result
+}
+
+//////////////////////////////////////
+// Sea Compression Methods
+/////////////////////////////////////
+
+biome_shape_target_apply_sea_compression :: proc(
+	target: BiomeShapeTarget,
+) -> (
+	result: BiomeShapeTarget,
+	compression_strength: f32,
+) {
+	result = target
+	shoreline_width := math.max(
+		SEA_COMPRESSION_MIN_SHORELINE_WIDTH_BLOCKS,
+		target.shoreline_width_blocks,
+	)
+	height_delta := target.surface_height_blocks - SEA_LEVEL_BLOCKS
+	compression_strength = biome_field_boundary_strength(math.abs(height_delta), shoreline_width)
+	shoreline_slope := math.clamp(target.shoreline_slope, f32(0.05), f32(1.0))
+	result.surface_height_blocks =
+		SEA_LEVEL_BLOCKS +
+		height_delta * regional_terrain_field_lerp(1.0, shoreline_slope, compression_strength)
+
+	if height_delta < 0 {
+		depth := -height_delta
+		depth_factor := math.clamp(depth / shoreline_width, f32(0), f32(1))
+		depression_scale := regional_terrain_field_lerp(1.0, 0.35, target.swamp_shallowness)
+		result.surface_height_blocks -=
+			target.underwater_floor_depression_blocks * depth_factor * depression_scale
+		result.local_detail_amplitude_blocks += target.seabed_roughness_blocks * depth_factor
+	}
+
+	result.cliff_bias = regional_terrain_field_saturate(
+		result.cliff_bias +
+		target.cliff_coast_bias * compression_strength * (1.0 - target.swamp_shallowness),
+	)
+	return
 }
 
 //////////////////////////////////////
@@ -713,12 +1171,96 @@ when ODIN_DEBUG {
 			"blended shape target should retain dominant biome identity",
 		)
 
+		soft_rule := biome_transition_rule_for(
+			.Temperate_Hills,
+			.Wet_Lowland_Marsh,
+			SURFACE_BIOME_BLEND_BAND_BLOCKS,
+		)
+		hard_rule := biome_transition_rule_for(
+			.Basalt_Spire_Highlands,
+			.Wet_Lowland_Marsh,
+			SURFACE_BIOME_BLEND_BAND_BLOCKS,
+		)
+		log.assert(
+			soft_rule.style == .Soft && soft_rule.kind == .Temperate_Marsh_Shelf,
+			"temperate-marsh transition should use a soft shelf rule",
+		)
+		log.assert(
+			hard_rule.style == .Hard && hard_rule.kind == .Basalt_Marsh_Cliff,
+			"basalt-marsh transition should use a hard cliff rule",
+		)
+
+		boundary_distances := [BIOME_FIELD_NEAREST_CELL_COUNT]f32{10, 10, 220}
+		soft_weights: [BIOME_FIELD_NEAREST_CELL_COUNT]f32
+		biome_transition_blend_weights_write(
+			boundary_distances[:],
+			BIOME_FIELD_NEAREST_CELL_COUNT,
+			SURFACE_BIOME_JUNCTION_BAND_BLOCKS,
+			soft_rule,
+			1,
+			soft_weights[:],
+		)
+		hard_weights: [BIOME_FIELD_NEAREST_CELL_COUNT]f32
+		biome_transition_blend_weights_write(
+			boundary_distances[:],
+			BIOME_FIELD_NEAREST_CELL_COUNT,
+			SURFACE_BIOME_JUNCTION_BAND_BLOCKS,
+			hard_rule,
+			1,
+			hard_weights[:],
+		)
+		log.assert(
+			hard_weights[0] > soft_weights[0],
+			"hard transition should bias blend weights toward the dominant cell",
+		)
+
+		hard_applied := biome_transition_rule_apply(
+			blended,
+			basalt_target,
+			marsh_target,
+			hard_rule,
+			1,
+			2,
+		)
+		log.assert(
+			hard_applied.cliff_bias > blended.cliff_bias &&
+			hard_applied.terrace_strength > blended.terrace_strength,
+			"hard transition should strengthen cliff and terrace shape parameters",
+		)
+
+		shore_target := temperate_target
+		shore_target.surface_height_blocks = SEA_LEVEL_BLOCKS + 4
+		shore_target.shoreline_width_blocks = 16
+		shore_target.shoreline_slope = 0.25
+		compressed_shore, shore_strength := biome_shape_target_apply_sea_compression(shore_target)
+		log.assert(
+			shore_strength > 0 &&
+			compressed_shore.surface_height_blocks < shore_target.surface_height_blocks,
+			"sea compression should flatten terrain near sea level",
+		)
+
+		underwater_target := marsh_target
+		underwater_target.surface_height_blocks =
+			SEA_LEVEL_BLOCKS - underwater_target.shoreline_width_blocks - 8
+		compressed_underwater, _ := biome_shape_target_apply_sea_compression(underwater_target)
+		log.assert(
+			compressed_underwater.surface_height_blocks < underwater_target.surface_height_blocks,
+			"sea compression should depress underwater floors",
+		)
+
 		surface_evaluation := surface_biome_profile_sample(key, 17, -33)
 		log.assert(
 			surface_evaluation.cell_count == BIOME_FIELD_NEAREST_CELL_COUNT,
 			"surface biome profile evaluation should keep nearest-cell count",
 		)
 		debug_biome_shape_target_assert_valid(surface_evaluation.blended_target)
+		debug_biome_shape_target_assert_valid(surface_evaluation.transitioned_target)
+		debug_biome_shape_target_assert_valid(surface_evaluation.final_target)
+		log.assert(
+			surface_evaluation.sea_compression_strength >= 0 &&
+			surface_evaluation.sea_compression_strength <= 1,
+			"surface sea compression strength must be normalized",
+		)
 
 		subterranean_evaluation := subterranean_biome_profile_sample(key, -45, -96, 130)
 		log.assert(
@@ -726,6 +1268,8 @@ when ODIN_DEBUG {
 			"subterranean biome profile evaluation should keep nearest-cell count",
 		)
 		debug_biome_shape_target_assert_valid(subterranean_evaluation.blended_target)
+		debug_biome_shape_target_assert_valid(subterranean_evaluation.transitioned_target)
+		debug_biome_shape_target_assert_valid(subterranean_evaluation.final_target)
 
 		log.debug("Biome profile and regional field contract checks passed")
 	}
@@ -769,6 +1313,24 @@ when ODIN_DEBUG {
 			target.local_detail_amplitude_blocks >= 0,
 			"local detail amplitude must not be negative",
 		)
+		log.assert(target.shoreline_width_blocks >= 1, "shoreline width must be positive")
+		log.assert(
+			target.shoreline_slope >= 0 && target.shoreline_slope <= 1,
+			"shoreline slope range mismatch",
+		)
+		log.assert(
+			target.underwater_floor_depression_blocks >= 0,
+			"underwater floor depression must not be negative",
+		)
+		log.assert(
+			target.cliff_coast_bias >= 0 && target.cliff_coast_bias <= 1,
+			"cliff coast bias range mismatch",
+		)
+		log.assert(
+			target.swamp_shallowness >= 0 && target.swamp_shallowness <= 1,
+			"swamp shallowness range mismatch",
+		)
+		log.assert(target.seabed_roughness_blocks >= 0, "seabed roughness must not be negative")
 		log.assert(
 			target.fantasy_affinity >= 0 && target.fantasy_affinity <= 1,
 			"fantasy affinity range mismatch",

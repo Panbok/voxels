@@ -3536,7 +3536,7 @@ terrain_biome_column_sample :: proc(
 	world_x, world_z: i32,
 ) -> TerrainBiomeColumn {
 	evaluation := biomes.surface_biome_profile_evaluate(key, surface_sample, world_x, world_z)
-	target := evaluation.blended_target
+	target := evaluation.final_target
 
 	height := i32(math.floor_f32(target.surface_height_blocks))
 	height = math.clamp(height, 0, CHUNK_BLOCK_LENGTH - 1)
