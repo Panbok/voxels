@@ -120,6 +120,8 @@ SurfaceBiomeProfileEvaluation :: struct {
 	transition_strength:      f32,
 	transitioned_target:      BiomeShapeTarget,
 	sea_compression_strength: f32,
+	hydrology_sample:         HydrologyLayerSurfaceSample,
+	hydrology_target:         BiomeShapeTarget,
 	final_target:             BiomeShapeTarget,
 	cell_count:               u32,
 }
@@ -132,6 +134,8 @@ SubterraneanBiomeProfileEvaluation :: struct {
 	transition_rule:     BiomeTransitionRule,
 	transition_strength: f32,
 	transitioned_target: BiomeShapeTarget,
+	hydrology_sample:    HydrologyLayerSubterraneanSample,
+	hydrology_target:    BiomeShapeTarget,
 	final_target:        BiomeShapeTarget,
 	cell_count:          u32,
 }
@@ -665,10 +669,27 @@ surface_biome_profile_evaluate :: proc(
 	sample: SurfaceBiomeFieldSample,
 	block_x, block_z: i32,
 ) -> SurfaceBiomeProfileEvaluation {
+	hydrology_sample := hydrology_layer_surface_sample(key, block_x, block_z)
+	return surface_biome_profile_evaluate_with_hydrology(
+		key,
+		sample,
+		hydrology_sample,
+		block_x,
+		block_z,
+	)
+}
+
+surface_biome_profile_evaluate_with_hydrology :: proc(
+	key: FeatureGridKey,
+	sample: SurfaceBiomeFieldSample,
+	hydrology_sample: HydrologyLayerSurfaceSample,
+	block_x, block_z: i32,
+) -> SurfaceBiomeProfileEvaluation {
 	fields := regional_terrain_fields_sample(key, block_x, 0, block_z)
 	evaluation := SurfaceBiomeProfileEvaluation {
-		fields     = fields,
-		cell_count = sample.cell_count,
+		fields           = fields,
+		hydrology_sample = hydrology_sample,
+		cell_count       = sample.cell_count,
 	}
 
 	for i := u32(0); i < sample.cell_count; i += 1 {
@@ -707,6 +728,11 @@ surface_biome_profile_evaluate :: proc(
 	)
 	evaluation.final_target, evaluation.sea_compression_strength =
 		biome_shape_target_apply_sea_compression(evaluation.transitioned_target)
+	evaluation.hydrology_target = hydrology_layer_apply_surface(
+		evaluation.final_target,
+		evaluation.hydrology_sample,
+	)
+	evaluation.final_target = evaluation.hydrology_target
 	return evaluation
 }
 
@@ -723,11 +749,29 @@ subterranean_biome_profile_evaluate :: proc(
 	sample: SubterraneanBiomeFieldSample,
 	block_x, block_y, block_z: i32,
 ) -> SubterraneanBiomeProfileEvaluation {
+	hydrology_sample := hydrology_layer_subterranean_sample(key, block_x, block_y, block_z)
+	return subterranean_biome_profile_evaluate_with_hydrology(
+		key,
+		sample,
+		hydrology_sample,
+		block_x,
+		block_y,
+		block_z,
+	)
+}
+
+subterranean_biome_profile_evaluate_with_hydrology :: proc(
+	key: FeatureGridKey,
+	sample: SubterraneanBiomeFieldSample,
+	hydrology_sample: HydrologyLayerSubterraneanSample,
+	block_x, block_y, block_z: i32,
+) -> SubterraneanBiomeProfileEvaluation {
 	fields := regional_terrain_fields_sample(key, block_x, block_y, block_z)
 	evaluation := SubterraneanBiomeProfileEvaluation {
-			fields     = fields,
-			cell_count = sample.cell_count,
-		}
+		fields           = fields,
+		hydrology_sample = hydrology_sample,
+		cell_count       = sample.cell_count,
+	}
 
 	for i := u32(0); i < sample.cell_count; i += 1 {
 		profile := biome_profile_for(sample.cells[i].biome_id)
@@ -763,7 +807,11 @@ subterranean_biome_profile_evaluate :: proc(
 		evaluation.transition_strength,
 		sample.cell_count,
 	)
-	evaluation.final_target = evaluation.transitioned_target
+	evaluation.hydrology_target = hydrology_layer_apply_subterranean(
+		evaluation.transitioned_target,
+		evaluation.hydrology_sample,
+	)
+	evaluation.final_target = evaluation.hydrology_target
 	return evaluation
 }
 
@@ -1255,11 +1303,16 @@ when ODIN_DEBUG {
 		)
 		debug_biome_shape_target_assert_valid(surface_evaluation.blended_target)
 		debug_biome_shape_target_assert_valid(surface_evaluation.transitioned_target)
+		debug_biome_shape_target_assert_valid(surface_evaluation.hydrology_target)
 		debug_biome_shape_target_assert_valid(surface_evaluation.final_target)
 		log.assert(
 			surface_evaluation.sea_compression_strength >= 0 &&
 			surface_evaluation.sea_compression_strength <= 1,
 			"surface sea compression strength must be normalized",
+		)
+		log.assert(
+			surface_evaluation.hydrology_sample.nearest_distance_blocks >= 0,
+			"surface Hydrology Layer sample should track nearest feature distance",
 		)
 
 		subterranean_evaluation := subterranean_biome_profile_sample(key, -45, -96, 130)
@@ -1269,7 +1322,12 @@ when ODIN_DEBUG {
 		)
 		debug_biome_shape_target_assert_valid(subterranean_evaluation.blended_target)
 		debug_biome_shape_target_assert_valid(subterranean_evaluation.transitioned_target)
+		debug_biome_shape_target_assert_valid(subterranean_evaluation.hydrology_target)
 		debug_biome_shape_target_assert_valid(subterranean_evaluation.final_target)
+		log.assert(
+			subterranean_evaluation.hydrology_sample.nearest_distance_blocks >= 0,
+			"subterranean Hydrology Layer sample should track nearest feature distance",
+		)
 
 		log.debug("Biome profile and regional field contract checks passed")
 	}

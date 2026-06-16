@@ -11,8 +11,10 @@ import math "core:math"
 GenerationRegionCoord :: IVec3
 
 GenerationInfluenceMargins :: struct {
-	surface_biome_blocks:      i32,
-	subterranean_biome_blocks: i32,
+	surface_biome_blocks:              i32,
+	subterranean_biome_blocks:         i32,
+	surface_water_feature_blocks:      i32,
+	subterranean_water_feature_blocks: i32,
 }
 
 GenerationRegionSurfaceBiomeCell :: struct {
@@ -31,23 +33,33 @@ GenerationRegionSubterraneanBiomeCell :: struct {
 }
 
 GenerationRegionQuery :: struct {
-	bounds:                         BlockBounds3,
-	influence_margins:              GenerationInfluenceMargins,
-	surface_biome_owner_range:      FeatureGridOwnerRange2,
-	subterranean_biome_owner_range: FeatureGridOwnerRange3,
+	bounds:                                 BlockBounds3,
+	influence_margins:                      GenerationInfluenceMargins,
+	surface_biome_owner_range:              FeatureGridOwnerRange2,
+	subterranean_biome_owner_range:         FeatureGridOwnerRange3,
+	surface_water_feature_owner_range:      FeatureGridOwnerRange2,
+	subterranean_water_feature_owner_range: FeatureGridOwnerRange3,
 }
 
 GenerationRegion :: struct {
-	key:                            FeatureGridKey,
-	coord:                          GenerationRegionCoord,
-	bounds:                         BlockBounds3,
-	influence_margins:              GenerationInfluenceMargins,
-	surface_biome_owner_range:      FeatureGridOwnerRange2,
-	subterranean_biome_owner_range: FeatureGridOwnerRange3,
-	surface_biome_cells:            [GENERATION_REGION_SURFACE_BIOME_CELL_CAPACITY]GenerationRegionSurfaceBiomeCell,
-	surface_biome_cell_count:       u32,
-	subterranean_biome_cells:       [GENERATION_REGION_SUBTERRANEAN_BIOME_CELL_CAPACITY]GenerationRegionSubterraneanBiomeCell,
-	subterranean_biome_cell_count:  u32,
+	key:                                    FeatureGridKey,
+	coord:                                  GenerationRegionCoord,
+	bounds:                                 BlockBounds3,
+	influence_margins:                      GenerationInfluenceMargins,
+	surface_biome_owner_range:              FeatureGridOwnerRange2,
+	subterranean_biome_owner_range:         FeatureGridOwnerRange3,
+	surface_water_feature_owner_range:      FeatureGridOwnerRange2,
+	subterranean_water_feature_owner_range: FeatureGridOwnerRange3,
+	surface_biome_cells:                    [GENERATION_REGION_SURFACE_BIOME_CELL_CAPACITY]GenerationRegionSurfaceBiomeCell,
+	surface_biome_cell_count:               u32,
+	subterranean_biome_cells:               [GENERATION_REGION_SUBTERRANEAN_BIOME_CELL_CAPACITY]GenerationRegionSubterraneanBiomeCell,
+	subterranean_biome_cell_count:          u32,
+	water_feature_nodes:                    [GENERATION_REGION_WATER_FEATURE_NODE_CAPACITY]WaterFeatureNode,
+	water_feature_node_count:               u32,
+	water_feature_segments:                 [GENERATION_REGION_WATER_FEATURE_SEGMENT_CAPACITY]WaterFeatureSegment,
+	water_feature_segment_count:            u32,
+	water_feature_anchors:                  [GENERATION_REGION_WATER_FEATURE_ANCHOR_CAPACITY]WaterFeatureAnchor,
+	water_feature_anchor_count:             u32,
 }
 
 //////////////////////////////////////
@@ -60,14 +72,22 @@ GENERATION_REGION_BLOCK_LENGTH :: 512
 // sample nearest-cell and boundary data from a region without inventing edge-local features.
 GENERATION_REGION_SURFACE_BIOME_MARGIN_BLOCKS :: 608
 GENERATION_REGION_SUBTERRANEAN_BIOME_MARGIN_BLOCKS :: 456
+GENERATION_REGION_SURFACE_WATER_FEATURE_MARGIN_BLOCKS :: HYDROLOGY_SURFACE_SAMPLE_MARGIN_BLOCKS
+GENERATION_REGION_SUBTERRANEAN_WATER_FEATURE_MARGIN_BLOCKS ::
+	HYDROLOGY_SUBTERRANEAN_SAMPLE_MARGIN_BLOCKS
 
 GENERATION_REGION_DEFAULT_INFLUENCE_MARGINS :: GenerationInfluenceMargins {
-	surface_biome_blocks      = GENERATION_REGION_SURFACE_BIOME_MARGIN_BLOCKS,
-	subterranean_biome_blocks = GENERATION_REGION_SUBTERRANEAN_BIOME_MARGIN_BLOCKS,
+	surface_biome_blocks              = GENERATION_REGION_SURFACE_BIOME_MARGIN_BLOCKS,
+	subterranean_biome_blocks         = GENERATION_REGION_SUBTERRANEAN_BIOME_MARGIN_BLOCKS,
+	surface_water_feature_blocks      = GENERATION_REGION_SURFACE_WATER_FEATURE_MARGIN_BLOCKS,
+	subterranean_water_feature_blocks = GENERATION_REGION_SUBTERRANEAN_WATER_FEATURE_MARGIN_BLOCKS,
 }
 
 GENERATION_REGION_SURFACE_BIOME_CELL_CAPACITY :: 25
 GENERATION_REGION_SUBTERRANEAN_BIOME_CELL_CAPACITY :: 125
+GENERATION_REGION_WATER_FEATURE_NODE_CAPACITY :: 64
+GENERATION_REGION_WATER_FEATURE_SEGMENT_CAPACITY :: 128
+GENERATION_REGION_WATER_FEATURE_ANCHOR_CAPACITY :: 192
 
 #assert(GENERATION_REGION_BLOCK_LENGTH > SURFACE_MICRO_GRID_CONFIG.cell_size_blocks)
 #assert(GENERATION_REGION_BLOCK_LENGTH > 64)
@@ -153,6 +173,7 @@ generation_region_build_with_margins :: proc(
 	}
 	generation_region_surface_biome_cells_fill(&region)
 	generation_region_subterranean_biome_cells_fill(&region)
+	generation_region_water_features_fill(&region)
 	return region
 }
 
@@ -161,6 +182,14 @@ generation_region_influence_margins_validate :: proc(margins: GenerationInfluenc
 	log.assert(
 		margins.subterranean_biome_blocks >= 0,
 		"subterranean biome margin must not be negative",
+	)
+	log.assert(
+		margins.surface_water_feature_blocks >= 0,
+		"surface water feature margin must not be negative",
+	)
+	log.assert(
+		margins.subterranean_water_feature_blocks >= 0,
+		"subterranean water feature margin must not be negative",
 	)
 }
 
@@ -240,6 +269,178 @@ generation_region_subterranean_biome_cells_fill :: proc(region: ^GenerationRegio
 	region.subterranean_biome_cell_count = count
 }
 
+generation_region_water_features_fill :: proc(region: ^GenerationRegion) {
+	surface_bounds := generation_region_surface_bounds_from_bounds(region.bounds)
+	region.surface_water_feature_owner_range = feature_grid_owner_range_from_block_bounds(
+		surface_bounds,
+		region.influence_margins.surface_water_feature_blocks,
+		HYDROLOGY_SURFACE_GRAPH_GRID_CONFIG,
+	)
+	region.subterranean_water_feature_owner_range = feature_grid_owner_range_from_block_bounds(
+		region.bounds,
+		region.influence_margins.subterranean_water_feature_blocks,
+		HYDROLOGY_SUBTERRANEAN_GRAPH_GRID_CONFIG,
+	)
+
+	surface_node_count_required := feature_grid_owner_range_count(
+		region.surface_water_feature_owner_range,
+	)
+	subterranean_node_count_required := feature_grid_owner_range_count(
+		region.subterranean_water_feature_owner_range,
+	)
+	node_count_required := surface_node_count_required + subterranean_node_count_required
+	log.assertf(
+		node_count_required <= GENERATION_REGION_WATER_FEATURE_NODE_CAPACITY,
+		"Generation Region water feature node capacity too small: required=%d capacity=%d",
+		node_count_required,
+		GENERATION_REGION_WATER_FEATURE_NODE_CAPACITY,
+	)
+	segment_count_required :=
+		surface_node_count_required * 2 + subterranean_node_count_required * 3
+	log.assertf(
+		segment_count_required <= GENERATION_REGION_WATER_FEATURE_SEGMENT_CAPACITY,
+		"Generation Region water feature segment capacity too small: required=%d capacity=%d",
+		segment_count_required,
+		GENERATION_REGION_WATER_FEATURE_SEGMENT_CAPACITY,
+	)
+	log.assertf(
+		node_count_required + segment_count_required <=
+		GENERATION_REGION_WATER_FEATURE_ANCHOR_CAPACITY,
+		"Generation Region water feature anchor capacity too small: required=%d capacity=%d",
+		node_count_required + segment_count_required,
+		GENERATION_REGION_WATER_FEATURE_ANCHOR_CAPACITY,
+	)
+
+	for z := region.surface_water_feature_owner_range.min.z;
+	    z <= region.surface_water_feature_owner_range.max.z;
+	    z += 1 {
+		for x := region.surface_water_feature_owner_range.min.x;
+		    x <= region.surface_water_feature_owner_range.max.x;
+		    x += 1 {
+			owner := FeatureGridCoord2 {
+				x = x,
+				z = z,
+			}
+			node := water_feature_surface_node_from_owner(region.key, owner)
+			generation_region_water_feature_node_append(region, node)
+
+			x_neighbor := FeatureGridCoord2 {
+				x = x + 1,
+				z = z,
+			}
+			z_neighbor := FeatureGridCoord2 {
+				x = x,
+				z = z + 1,
+			}
+			generation_region_water_feature_segment_append(
+				region,
+				water_feature_surface_segment_from_owners(region.key, owner, x_neighbor),
+			)
+			generation_region_water_feature_segment_append(
+				region,
+				water_feature_surface_segment_from_owners(region.key, owner, z_neighbor),
+			)
+		}
+	}
+
+	for z := region.subterranean_water_feature_owner_range.min.z;
+	    z <= region.subterranean_water_feature_owner_range.max.z;
+	    z += 1 {
+		for y := region.subterranean_water_feature_owner_range.min.y;
+		    y <= region.subterranean_water_feature_owner_range.max.y;
+		    y += 1 {
+			for x := region.subterranean_water_feature_owner_range.min.x;
+			    x <= region.subterranean_water_feature_owner_range.max.x;
+			    x += 1 {
+				owner := FeatureGridCoord3 {
+					x = x,
+					y = y,
+					z = z,
+				}
+				node := water_feature_subterranean_node_from_owner(region.key, owner)
+				generation_region_water_feature_node_append(region, node)
+
+				x_neighbor := FeatureGridCoord3 {
+					x = x + 1,
+					y = y,
+					z = z,
+				}
+				y_neighbor := FeatureGridCoord3 {
+					x = x,
+					y = y + 1,
+					z = z,
+				}
+				z_neighbor := FeatureGridCoord3 {
+					x = x,
+					y = y,
+					z = z + 1,
+				}
+				generation_region_water_feature_segment_append(
+					region,
+					water_feature_subterranean_segment_from_owners(region.key, owner, x_neighbor),
+				)
+				generation_region_water_feature_segment_append(
+					region,
+					water_feature_subterranean_segment_from_owners(region.key, owner, y_neighbor),
+				)
+				generation_region_water_feature_segment_append(
+					region,
+					water_feature_subterranean_segment_from_owners(region.key, owner, z_neighbor),
+				)
+			}
+		}
+	}
+
+	for i := u32(0); i < region.water_feature_node_count; i += 1 {
+		generation_region_water_feature_anchor_append(
+			region,
+			water_feature_node_anchor(region.water_feature_nodes[i]),
+		)
+	}
+	for i := u32(0); i < region.water_feature_segment_count; i += 1 {
+		generation_region_water_feature_anchor_append(
+			region,
+			water_feature_segment_anchor(region.water_feature_segments[i]),
+		)
+	}
+}
+
+generation_region_water_feature_node_append :: proc(
+	region: ^GenerationRegion,
+	node: WaterFeatureNode,
+) {
+	log.assert(
+		region.water_feature_node_count < GENERATION_REGION_WATER_FEATURE_NODE_CAPACITY,
+		"Generation Region water feature node capacity exceeded",
+	)
+	region.water_feature_nodes[region.water_feature_node_count] = node
+	region.water_feature_node_count += 1
+}
+
+generation_region_water_feature_segment_append :: proc(
+	region: ^GenerationRegion,
+	segment: WaterFeatureSegment,
+) {
+	log.assert(
+		region.water_feature_segment_count < GENERATION_REGION_WATER_FEATURE_SEGMENT_CAPACITY,
+		"Generation Region water feature segment capacity exceeded",
+	)
+	region.water_feature_segments[region.water_feature_segment_count] = segment
+	region.water_feature_segment_count += 1
+}
+
+generation_region_water_feature_anchor_append :: proc(
+	region: ^GenerationRegion,
+	anchor: WaterFeatureAnchor,
+) {
+	log.assert(
+		region.water_feature_anchor_count < GENERATION_REGION_WATER_FEATURE_ANCHOR_CAPACITY,
+		"Generation Region water feature anchor capacity exceeded",
+	)
+	region.water_feature_anchors[region.water_feature_anchor_count] = anchor
+	region.water_feature_anchor_count += 1
+}
+
 generation_region_surface_biome_cell_from_owner :: proc(
 	key: FeatureGridKey,
 	owner: FeatureGridCoord2,
@@ -299,6 +500,16 @@ generation_region_query_make :: proc(
 			influence_margins.subterranean_biome_blocks,
 			feature_grid_config_for(.Subterranean, .Biome),
 		),
+		surface_water_feature_owner_range = feature_grid_owner_range_from_block_bounds(
+			surface_bounds,
+			influence_margins.surface_water_feature_blocks,
+			HYDROLOGY_SURFACE_GRAPH_GRID_CONFIG,
+		),
+		subterranean_water_feature_owner_range = feature_grid_owner_range_from_block_bounds(
+			bounds,
+			influence_margins.subterranean_water_feature_blocks,
+			HYDROLOGY_SUBTERRANEAN_GRAPH_GRID_CONFIG,
+		),
 	}
 }
 
@@ -324,6 +535,20 @@ generation_region_query_validate :: proc(region: ^GenerationRegion, query: Gener
 			query.subterranean_biome_owner_range,
 		),
 		"Generation Region is missing subterranean biome owners for the query margin",
+	)
+	log.assert(
+		generation_region_owner_range_contains_range_2(
+			region.surface_water_feature_owner_range,
+			query.surface_water_feature_owner_range,
+		),
+		"Generation Region is missing surface Water Feature owners for the query margin",
+	)
+	log.assert(
+		generation_region_owner_range_contains_range_3(
+			region.subterranean_water_feature_owner_range,
+			query.subterranean_water_feature_owner_range,
+		),
+		"Generation Region is missing subterranean Water Feature owners for the query margin",
 	)
 }
 
@@ -384,6 +609,78 @@ generation_region_subterranean_biome_cells_write :: proc(
 		count += 1
 	}
 	log.assert(count == count_required, "subterranean biome query did not return every owner cell")
+	return count
+}
+
+generation_region_water_feature_nodes_write :: proc(
+	region: ^GenerationRegion,
+	query: GenerationRegionQuery,
+	nodes: []WaterFeatureNode,
+) -> u32 {
+	generation_region_query_validate(region, query)
+
+	count: u32
+	for i := u32(0); i < region.water_feature_node_count; i += 1 {
+		node := region.water_feature_nodes[i]
+		if !generation_region_water_feature_owner_in_query(query, node.owner, node.kind) {
+			continue
+		}
+		log.assertf(
+			count < u32(len(nodes)),
+			"water feature node query output too small: got=%d",
+			len(nodes),
+		)
+		nodes[count] = node
+		count += 1
+	}
+	return count
+}
+
+generation_region_water_feature_segments_write :: proc(
+	region: ^GenerationRegion,
+	query: GenerationRegionQuery,
+	segments: []WaterFeatureSegment,
+) -> u32 {
+	generation_region_query_validate(region, query)
+
+	count: u32
+	for i := u32(0); i < region.water_feature_segment_count; i += 1 {
+		segment := region.water_feature_segments[i]
+		if !generation_region_water_feature_owner_in_query(query, segment.owner, segment.kind) {
+			continue
+		}
+		log.assertf(
+			count < u32(len(segments)),
+			"water feature segment query output too small: got=%d",
+			len(segments),
+		)
+		segments[count] = segment
+		count += 1
+	}
+	return count
+}
+
+generation_region_water_feature_anchors_write :: proc(
+	region: ^GenerationRegion,
+	query: GenerationRegionQuery,
+	anchors: []WaterFeatureAnchor,
+) -> u32 {
+	generation_region_query_validate(region, query)
+
+	count: u32
+	for i := u32(0); i < region.water_feature_anchor_count; i += 1 {
+		anchor := region.water_feature_anchors[i]
+		if !generation_region_water_feature_anchor_owner_in_query(query, anchor) {
+			continue
+		}
+		log.assertf(
+			count < u32(len(anchors)),
+			"water feature anchor query output too small: got=%d",
+			len(anchors),
+		)
+		anchors[count] = anchor
+		count += 1
+	}
 	return count
 }
 
@@ -547,6 +844,42 @@ generation_region_subterranean_biome_cell_find :: proc(
 	return
 }
 
+generation_region_water_feature_owner_in_query :: proc(
+	query: GenerationRegionQuery,
+	owner: FeatureGridCoord3,
+	kind: WaterFeatureKind,
+) -> bool {
+	if water_feature_kind_is_surface(kind) {
+		return generation_region_owner_range_contains_owner_2(
+			query.surface_water_feature_owner_range,
+			{x = owner.x, z = owner.z},
+		)
+	}
+	return generation_region_owner_range_contains_owner_3(
+		query.subterranean_water_feature_owner_range,
+		owner,
+	)
+}
+
+generation_region_water_feature_anchor_owner_in_query :: proc(
+	query: GenerationRegionQuery,
+	anchor: WaterFeatureAnchor,
+) -> bool {
+	switch anchor.kind {
+	case .Shoreline, .Lakebed_Breach, .River_Bank:
+		return generation_region_owner_range_contains_owner_2(
+			query.surface_water_feature_owner_range,
+			{x = anchor.owner.x, z = anchor.owner.z},
+		)
+	case .Aquifer_Breach, .Underground_River_Link, .Flooded_Cave_Link:
+		return generation_region_owner_range_contains_owner_3(
+			query.subterranean_water_feature_owner_range,
+			anchor.owner,
+		)
+	}
+	return false
+}
+
 //////////////////////////////////////
 // Generation Region Bounds Methods
 /////////////////////////////////////
@@ -678,6 +1011,12 @@ when ODIN_DEBUG {
 			"origin region subterranean biome sparse cell count mismatch",
 		)
 		log.assert(
+			origin_region.water_feature_node_count > 0 &&
+			origin_region.water_feature_segment_count > 0 &&
+			origin_region.water_feature_anchor_count > 0,
+			"origin region should store sparse Water Feature Graph data",
+		)
+		log.assert(
 			generation_region_coord_from_block(-1, -1, -1) ==
 			GenerationRegionCoord{x = -1, y = -1, z = -1},
 			"negative block coordinates must use floor division for Generation Regions",
@@ -717,6 +1056,30 @@ when ODIN_DEBUG {
 		)
 		log.assert(subterranean_cell_count == 64, "chunk subterranean biome query count mismatch")
 
+		water_nodes: [GENERATION_REGION_WATER_FEATURE_NODE_CAPACITY]WaterFeatureNode
+		water_node_count := generation_region_water_feature_nodes_write(
+			&origin_region,
+			query,
+			water_nodes[:],
+		)
+		log.assert(water_node_count > 0, "chunk Water Feature node query returned no data")
+
+		water_segments: [GENERATION_REGION_WATER_FEATURE_SEGMENT_CAPACITY]WaterFeatureSegment
+		water_segment_count := generation_region_water_feature_segments_write(
+			&origin_region,
+			query,
+			water_segments[:],
+		)
+		log.assert(water_segment_count > 0, "chunk Water Feature segment query returned no data")
+
+		water_anchors: [GENERATION_REGION_WATER_FEATURE_ANCHOR_CAPACITY]WaterFeatureAnchor
+		water_anchor_count := generation_region_water_feature_anchors_write(
+			&origin_region,
+			query,
+			water_anchors[:],
+		)
+		log.assert(water_anchor_count > 0, "chunk Water Feature anchor query returned no data")
+
 		edge_chunk_bounds := BlockBounds3 {
 			min = {x = 448, y = 448, z = 448},
 			max = {x = 512, y = 512, z = 512},
@@ -745,6 +1108,20 @@ when ODIN_DEBUG {
 			surface_sample_coord.z,
 		)
 		debug_surface_biome_samples_assert_equal(surface_direct, surface_region_sample)
+		surface_hydrology_direct := hydrology_layer_surface_sample(
+			key,
+			surface_sample_coord.x,
+			surface_sample_coord.z,
+		)
+		surface_hydrology_region := hydrology_layer_surface_sample_from_region(
+			&surface_region,
+			surface_sample_coord.x,
+			surface_sample_coord.z,
+		)
+		debug_hydrology_surface_samples_assert_equal(
+			surface_hydrology_direct,
+			surface_hydrology_region,
+		)
 
 		subterranean_sample_coord := IVec3 {
 			x = -45,
@@ -772,6 +1149,22 @@ when ODIN_DEBUG {
 		debug_subterranean_biome_samples_assert_equal(
 			subterranean_direct,
 			subterranean_region_sample,
+		)
+		subterranean_hydrology_direct := hydrology_layer_subterranean_sample(
+			key,
+			subterranean_sample_coord.x,
+			subterranean_sample_coord.y,
+			subterranean_sample_coord.z,
+		)
+		subterranean_hydrology_region := hydrology_layer_subterranean_sample_from_region(
+			&subterranean_region,
+			subterranean_sample_coord.x,
+			subterranean_sample_coord.y,
+			subterranean_sample_coord.z,
+		)
+		debug_hydrology_subterranean_samples_assert_equal(
+			subterranean_hydrology_direct,
+			subterranean_hydrology_region,
 		)
 
 		log.debug("Generation Region contract checks passed")
