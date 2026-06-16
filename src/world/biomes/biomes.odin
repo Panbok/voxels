@@ -1905,6 +1905,7 @@ when ODIN_DEBUG {
 		)
 
 		log.debug("Biome feature grid and field contract checks passed")
+		generation_region_debug_contract_checks_run()
 	}
 
 }
