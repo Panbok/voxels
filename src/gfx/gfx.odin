@@ -80,25 +80,26 @@ GraphicsState :: struct {
 
 state := struct {
 	// Memory
-	persistent_allocator: mem.Allocator,
-	transient_allocator:  mem.Allocator,
-	transient_arena:      ^mem.Arena,
+	persistent_allocator:              mem.Allocator,
+	transient_allocator:               mem.Allocator,
+	transient_arena:                   ^mem.Arena,
 
 	// Geometry
-	geometry_pool:        GeometryPool,
+	geometry_pool:                     GeometryPool,
 
 	// Graphics
-	using graphics:       GraphicsState,
+	using graphics:                    GraphicsState,
 
 	// Metrics
-	render_stats:         RenderStats,
+	render_stats:                      RenderStats,
 
 	// State
-	initialized:          bool,
-	resources_ready:      bool,
-	debug_mode:           bool,
-	enable_vsync:         bool,
-	use_wireframe_mode:   bool,
+	initialized:                       bool,
+	resources_ready:                   bool,
+	debug_mode:                        bool,
+	enable_vsync:                      bool,
+	use_wireframe_mode:                bool,
+	use_hydrology_debug_visualization: bool,
 }{}
 
 //////////////////////////////////////
@@ -184,6 +185,7 @@ shutdown :: proc() {
 	state.debug_mode = false
 	state.enable_vsync = false
 	state.use_wireframe_mode = false
+	state.use_hydrology_debug_visualization = false
 }
 
 setup_resources :: proc() {
@@ -293,6 +295,11 @@ camera_get :: proc() -> ^camera.Camera {
 
 wireframe_toggle :: proc() {
 	state.use_wireframe_mode = !state.use_wireframe_mode
+}
+
+hydrology_debug_visualization_toggle :: proc() {
+	state.use_hydrology_debug_visualization = !state.use_hydrology_debug_visualization
+	log.debugf("Hydrology debug visualization: %v", state.use_hydrology_debug_visualization)
 }
 
 view_projection_update :: proc() {
@@ -1345,10 +1352,12 @@ terrain_draw_begin :: proc(cmdbuf: ^sdl.GPUCommandBuffer, render_pass: ^sdl.GPUR
 		&state.view_projection,
 		cast(u32)size_of(matrix[4, 4]f32),
 	)
+	materials := world.TERRAIN_MATERIAL_COLORS
+	materials[7][3] = state.use_hydrology_debug_visualization ? f32(1) : f32(0)
 	sdl.PushGPUFragmentUniformData(
 		cmdbuf,
 		0,
-		&world.TERRAIN_MATERIAL_COLORS,
+		&materials,
 		cast(u32)size_of(world.TerrainMaterialColorPalette),
 	)
 

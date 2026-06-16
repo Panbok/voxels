@@ -331,11 +331,12 @@ ChunkMeshSnapshotRefSet :: struct {
 /////////////////////////////////////
 
 TerrainBinaryGreedyScratch :: struct {
-	solid_rows:          [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u64,
-	material_masks:      [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u8,
-	material_rows:       [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_MATERIAL_PALETTE_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u64,
-	face_material_masks: [CHUNK_BLOCK_LENGTH]u8,
-	face_masks:          [CHUNK_BLOCK_LENGTH][TERRAIN_MATERIAL_PALETTE_COUNT][CHUNK_BLOCK_LENGTH]u64,
+	solid_rows:           [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u64,
+	material_masks:       [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u8,
+	material_rows:        [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_MATERIAL_PALETTE_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u64,
+	hydrology_debug_rows: [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u64,
+	face_material_masks:  [CHUNK_BLOCK_LENGTH]u16,
+	face_masks:           [CHUNK_BLOCK_LENGTH][TERRAIN_MATERIAL_FACE_VARIANT_COUNT][CHUNK_BLOCK_LENGTH]u64,
 }
 
 //////////////////////////////////////
@@ -1047,6 +1048,7 @@ terrain_binary_axis_rows_build_all :: proc(
 	for axis := u32(0); axis < TERRAIN_BINARY_AXIS_COUNT; axis += 1 {
 		mem.zero_slice(scratch.solid_rows[axis][:])
 		mem.zero_slice(scratch.material_masks[axis][:])
+		mem.zero_slice(scratch.hydrology_debug_rows[axis][:])
 		for material_idx := u32(0);
 		    material_idx < TERRAIN_MATERIAL_PALETTE_COUNT;
 		    material_idx += 1 {
@@ -1063,9 +1065,12 @@ terrain_binary_axis_rows_build_all :: proc(
 					continue
 				}
 
+				material_id := view.blocks.material_id[block_index]
 				material_idx := terrain_material_palette_index(
 					view.blocks.material_id[block_index],
 				)
+				is_hydrology_debug :=
+					(u8(material_id) & TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG) != 0
 				x_row := y + z * CHUNK_BLOCK_LENGTH
 				y_row := x + z * CHUNK_BLOCK_LENGTH
 				z_row := x + y * CHUNK_BLOCK_LENGTH
@@ -1084,6 +1089,42 @@ terrain_binary_axis_rows_build_all :: proc(
 				scratch.solid_rows[2][z_row] |= z_bit
 				scratch.material_masks[2][z_row] |= u8(1) << material_idx
 				scratch.material_rows[2][material_idx][z_row] |= z_bit
+				if is_hydrology_debug {
+					scratch.hydrology_debug_rows[0][x_row] |= x_bit
+					scratch.hydrology_debug_rows[1][y_row] |= y_bit
+					scratch.hydrology_debug_rows[2][z_row] |= z_bit
+				}
+				block_index += 1
+			}
+		}
+	}
+}
+
+terrain_binary_hydrology_debug_rows_build :: proc(
+	scratch: ^TerrainBinaryGreedyScratch,
+	view: world_async.ChunkVoxelView,
+) {
+	for axis := u32(0); axis < TERRAIN_BINARY_AXIS_COUNT; axis += 1 {
+		mem.zero_slice(scratch.hydrology_debug_rows[axis][:])
+	}
+
+	block_index: u32
+	for z := u32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+		for y := u32(0); y < CHUNK_BLOCK_LENGTH; y += 1 {
+			for x := u32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+				material_id := view.blocks.material_id[block_index]
+				if view.blocks.occupancy[block_index] != .Solid ||
+				   (u8(material_id) & TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG) == 0 {
+					block_index += 1
+					continue
+				}
+
+				x_row := y + z * CHUNK_BLOCK_LENGTH
+				y_row := x + z * CHUNK_BLOCK_LENGTH
+				z_row := x + y * CHUNK_BLOCK_LENGTH
+				scratch.hydrology_debug_rows[0][x_row] |= u64(1) << x
+				scratch.hydrology_debug_rows[1][y_row] |= u64(1) << y
+				scratch.hydrology_debug_rows[2][z_row] |= u64(1) << z
 				block_index += 1
 			}
 		}
@@ -1283,6 +1324,25 @@ terrain_binary_neighbor_boundary_solid :: proc(
 	return false
 }
 
+terrain_binary_face_mask_bits_add :: proc(
+	scratch: ^TerrainBinaryGreedyScratch,
+	material_idx, v, u: u32,
+	face_bits: u64,
+) {
+	log.assertf(
+		material_idx < TERRAIN_MATERIAL_FACE_VARIANT_COUNT,
+		"face material index out of range: %d",
+		material_idx,
+	)
+	remaining_bits := face_bits
+	for remaining_bits != 0 {
+		slice := u32(bits.trailing_zeros(remaining_bits))
+		scratch.face_material_masks[slice] |= u16(1) << material_idx
+		scratch.face_masks[slice][material_idx][v] |= u64(1) << u
+		remaining_bits &~= u64(1) << slice
+	}
+}
+
 terrain_binary_face_masks_build :: proc(
 	scratch: ^TerrainBinaryGreedyScratch,
 	normal_id: u32,
@@ -1292,7 +1352,7 @@ terrain_binary_face_masks_build :: proc(
 	mem.zero_slice(scratch.face_material_masks[:])
 	for slice := u32(0); slice < CHUNK_BLOCK_LENGTH; slice += 1 {
 		for material_idx := u32(0);
-		    material_idx < TERRAIN_MATERIAL_PALETTE_COUNT;
+		    material_idx < TERRAIN_MATERIAL_FACE_VARIANT_COUNT;
 		    material_idx += 1 {
 			mem.zero_slice(scratch.face_masks[slice][material_idx][:])
 		}
@@ -1331,12 +1391,11 @@ terrain_binary_face_masks_build :: proc(
 				material_idx := u32(bits.trailing_zeros(material_mask))
 				material_row := scratch.material_rows[axis][material_idx][row_index]
 				exposed_material_bits := exposed_row & material_row
-				for exposed_material_bits != 0 {
-					slice := u32(bits.trailing_zeros(exposed_material_bits))
-					scratch.face_material_masks[slice] |= u8(1) << material_idx
-					scratch.face_masks[slice][material_idx][v] |= u64(1) << u
-					exposed_material_bits &~= u64(1) << slice
-				}
+				debug_bits := exposed_material_bits & scratch.hydrology_debug_rows[axis][row_index]
+				base_bits := exposed_material_bits & ~debug_bits
+				debug_material_idx := material_idx | u32(TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG)
+				terrain_binary_face_mask_bits_add(scratch, material_idx, v, u, base_bits)
+				terrain_binary_face_mask_bits_add(scratch, debug_material_idx, v, u, debug_bits)
 				material_mask &~= u32(1) << material_idx
 			}
 		}
@@ -1353,7 +1412,7 @@ terrain_binary_face_masks_build_from_cache :: proc(
 	mem.zero_slice(scratch.face_material_masks[:])
 	for slice := u32(0); slice < CHUNK_BLOCK_LENGTH; slice += 1 {
 		for material_idx := u32(0);
-		    material_idx < TERRAIN_MATERIAL_PALETTE_COUNT;
+		    material_idx < TERRAIN_MATERIAL_FACE_VARIANT_COUNT;
 		    material_idx += 1 {
 			mem.zero_slice(scratch.face_masks[slice][material_idx][:])
 		}
@@ -1392,12 +1451,11 @@ terrain_binary_face_masks_build_from_cache :: proc(
 				material_idx := u32(bits.trailing_zeros(material_mask))
 				material_row := cache.material_rows[axis][material_idx][row_index]
 				exposed_material_bits := exposed_row & material_row
-				for exposed_material_bits != 0 {
-					slice := u32(bits.trailing_zeros(exposed_material_bits))
-					scratch.face_material_masks[slice] |= u8(1) << material_idx
-					scratch.face_masks[slice][material_idx][v] |= u64(1) << u
-					exposed_material_bits &~= u64(1) << slice
-				}
+				debug_bits := exposed_material_bits & scratch.hydrology_debug_rows[axis][row_index]
+				base_bits := exposed_material_bits & ~debug_bits
+				debug_material_idx := material_idx | u32(TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG)
+				terrain_binary_face_mask_bits_add(scratch, material_idx, v, u, base_bits)
+				terrain_binary_face_mask_bits_add(scratch, debug_material_idx, v, u, debug_bits)
 				material_mask &~= u32(1) << material_idx
 			}
 		}
@@ -1840,11 +1898,13 @@ chunk_voxel_view_build_binary_greedy_mesh_in_bounds :: proc(
 
 chunk_binary_row_cache_build_binary_greedy_mesh :: proc(
 	cache: ^world_async.ChunkBinaryGreedyRowCache,
+	view: world_async.ChunkVoxelView,
 	boundary_policy: world_async.ChunkMeshBoundaryPolicy,
 	allocator: mem.Allocator,
 	scratch: ^TerrainBinaryGreedyScratch,
 	neighbor_snapshots: Maybe(world_async.ChunkMeshNeighborSnapshots) = nil,
 ) -> world_async.ChunkMeshOutput {
+	terrain_binary_hydrology_debug_rows_build(scratch, view)
 	vertices: []world_async.TerrainPackedVertex
 	indices: []u32
 	face_count: u32
@@ -1932,11 +1992,13 @@ chunk_binary_row_cache_build_binary_greedy_mesh :: proc(
 
 chunk_binary_row_cache_count_binary_greedy_faces_in_bounds :: proc(
 	cache: ^world_async.ChunkBinaryGreedyRowCache,
+	view: world_async.ChunkVoxelView,
 	min_bound, max_bound: world_async.BlockCoord,
 	boundary_policy: world_async.ChunkMeshBoundaryPolicy,
 	scratch: ^TerrainBinaryGreedyScratch,
 	neighbor_snapshots: Maybe(world_async.ChunkMeshNeighborSnapshots) = nil,
 ) -> u32 {
+	terrain_binary_hydrology_debug_rows_build(scratch, view)
 	vertices: []world_async.TerrainPackedVertex
 	indices: []u32
 	face_count: u32
@@ -1964,6 +2026,7 @@ chunk_binary_row_cache_count_binary_greedy_faces_in_bounds :: proc(
 
 chunk_binary_row_cache_build_binary_greedy_mesh_in_bounds :: proc(
 	cache: ^world_async.ChunkBinaryGreedyRowCache,
+	view: world_async.ChunkVoxelView,
 	min_bound, max_bound: world_async.BlockCoord,
 	boundary_policy: world_async.ChunkMeshBoundaryPolicy,
 	allocator: mem.Allocator,
@@ -1972,6 +2035,7 @@ chunk_binary_row_cache_build_binary_greedy_mesh_in_bounds :: proc(
 ) -> world_async.ChunkMeshOutput {
 	face_count := chunk_binary_row_cache_count_binary_greedy_faces_in_bounds(
 		cache,
+		view,
 		min_bound,
 		max_bound,
 		boundary_policy,
@@ -2055,6 +2119,7 @@ chunk_snapshot_build_binary_greedy_mesh :: proc(
 	   snapshot.binary_greedy_row_cache.block_version == snapshot.block_version {
 		return chunk_binary_row_cache_build_binary_greedy_mesh(
 			snapshot.binary_greedy_row_cache,
+			snapshot.voxel_view,
 			boundary_policy,
 			allocator,
 			scratch,
@@ -2084,6 +2149,7 @@ chunk_snapshot_build_subchunk_mesh :: proc(
 	   snapshot.binary_greedy_row_cache.block_version == snapshot.block_version {
 		return chunk_binary_row_cache_build_binary_greedy_mesh_in_bounds(
 			snapshot.binary_greedy_row_cache,
+			snapshot.voxel_view,
 			min_bound,
 			max_bound,
 			boundary_policy,
@@ -3355,9 +3421,12 @@ TERRAIN_DIRT_MAT_ID :: 1
 TERRAIN_STONE_MAT_ID :: 2
 TERRAIN_WET_MARSH_MAT_ID :: 4
 TERRAIN_CORRUPTED_ASH_MAT_ID :: 5
+TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG :: u8(0x08)
 TERRAIN_MATERIAL_PALETTE_COUNT :: 8
+TERRAIN_MATERIAL_FACE_VARIANT_COUNT :: 16
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == 8)
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == world_async.TERRAIN_MATERIAL_PALETTE_COUNT)
+#assert(TERRAIN_MATERIAL_FACE_VARIANT_COUNT == 16)
 TERRAIN_GENERATOR_VERSION :: u32(1)
 TERRAIN_GRASS_CAP_BLOCK_DEPTH :: 4
 TERRAIN_DIRT_LAYER_BLOCK_DEPTH :: 4
@@ -3426,9 +3495,10 @@ TerrainGridPoint :: struct {
 }
 
 TerrainBiomeColumn :: struct {
-	surface_height:      i32,
-	surface_layer_depth: i32,
-	dominant_biome_id:   biomes.BiomeID,
+	surface_height:                  i32,
+	surface_layer_depth:             i32,
+	dominant_biome_id:               biomes.BiomeID,
+	hydrology_debug_material_active: bool,
 }
 
 //////////////////////////////////////
@@ -3502,7 +3572,18 @@ terrain_heightfield_voxel_view_fill :: proc(
 				world_x,
 				world_z,
 			)
-			column := terrain_biome_column_sample(key, surface_sample, world_x, world_z)
+			hydrology_sample := biomes.hydrology_layer_surface_sample_from_region(
+				&generation_region,
+				world_x,
+				world_z,
+			)
+			column := terrain_biome_column_sample_with_hydrology(
+				key,
+				surface_sample,
+				hydrology_sample,
+				world_x,
+				world_z,
+			)
 
 			for y in 0 ..< CHUNK_BLOCK_LENGTH {
 				world_y := origin.y + i32(y)
@@ -3517,6 +3598,9 @@ terrain_heightfield_voxel_view_fill :: proc(
 					blocks_below_surface,
 					column.surface_layer_depth,
 				)
+				if column.hydrology_debug_material_active {
+					material_id = terrain_hydrology_debug_material_id(material_id)
+				}
 
 				index := chunk_block_index(u32(x), u32(y), u32(z))
 				view.blocks.occupancy[index] = .Solid
@@ -3536,6 +3620,28 @@ terrain_biome_column_sample :: proc(
 	world_x, world_z: i32,
 ) -> TerrainBiomeColumn {
 	evaluation := biomes.surface_biome_profile_evaluate(key, surface_sample, world_x, world_z)
+	return terrain_biome_column_from_profile_evaluation(evaluation)
+}
+
+terrain_biome_column_sample_with_hydrology :: proc(
+	key: biomes.FeatureGridKey,
+	surface_sample: biomes.SurfaceBiomeFieldSample,
+	hydrology_sample: biomes.HydrologyLayerSurfaceSample,
+	world_x, world_z: i32,
+) -> TerrainBiomeColumn {
+	evaluation := biomes.surface_biome_profile_evaluate_with_hydrology(
+		key,
+		surface_sample,
+		hydrology_sample,
+		world_x,
+		world_z,
+	)
+	return terrain_biome_column_from_profile_evaluation(evaluation)
+}
+
+terrain_biome_column_from_profile_evaluation :: proc(
+	evaluation: biomes.SurfaceBiomeProfileEvaluation,
+) -> TerrainBiomeColumn {
 	target := evaluation.final_target
 
 	height := i32(math.floor_f32(target.surface_height_blocks))
@@ -3548,6 +3654,7 @@ terrain_biome_column_sample :: proc(
 		surface_height = height,
 		surface_layer_depth = surface_layer_depth,
 		dominant_biome_id = target.biome_id,
+		hydrology_debug_material_active = evaluation.hydrology_sample.feature_count > 0,
 	}
 }
 
@@ -3565,6 +3672,12 @@ terrain_biome_layer_depth_ceil :: proc(depth: f32) -> i32 {
 		whole += 1
 	}
 	return whole
+}
+
+terrain_hydrology_debug_material_id :: proc(
+	material_id: world_async.BlockMaterialID,
+) -> world_async.BlockMaterialID {
+	return world_async.BlockMaterialID(u8(material_id) | TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG)
 }
 
 terrain_biome_block_material_id :: proc(
@@ -3813,6 +3926,65 @@ when ODIN_DEBUG {
 				)
 			}
 		}
+
+		chunk_voxel_view_fill_empty(&view)
+		index = chunk_block_index(5, 6, 7)
+		hydrology_debug_material_id := terrain_hydrology_debug_material_id(
+			world_async.BlockMaterialID(TERRAIN_DIRT_MAT_ID),
+		)
+		view.blocks.occupancy[index] = .Solid
+		view.blocks.material_id[index] = hydrology_debug_material_id
+
+		debug_output := chunk_voxel_view_build_binary_greedy_mesh(
+			view,
+			.Treat_Out_Of_Chunk_As_Empty,
+			allocator,
+			scratch,
+		)
+		log.assertf(
+			debug_output.face_count == 6,
+			"hydrology debug block: expected 6 faces, got %d",
+			debug_output.face_count,
+		)
+		for vertex in debug_output.vertices {
+			unpacked_vertex := terrain_unpack_vertex(vertex)
+			log.assertf(
+				unpacked_vertex.material_id == u32(u8(hydrology_debug_material_id)),
+				"hydrology debug block: expected material %d, got %d",
+				u8(hydrology_debug_material_id),
+				unpacked_vertex.material_id,
+			)
+		}
+
+		row_cache := new(world_async.ChunkBinaryGreedyRowCache, allocator)
+		log.assert(row_cache != nil, "hydrology debug row cache allocation failed")
+		terrain_binary_row_cache_fill(row_cache, view, 1)
+		debug_cache_output := chunk_binary_row_cache_build_binary_greedy_mesh(
+			row_cache,
+			view,
+			.Treat_Out_Of_Chunk_As_Empty,
+			allocator,
+			scratch,
+		)
+		log.assertf(
+			debug_cache_output.face_count == 6,
+			"hydrology debug cached block: expected 6 faces, got %d",
+			debug_cache_output.face_count,
+		)
+		for vertex in debug_cache_output.vertices {
+			unpacked_vertex := terrain_unpack_vertex(vertex)
+			log.assertf(
+				unpacked_vertex.material_id == u32(u8(hydrology_debug_material_id)),
+				"hydrology debug cached block: expected material %d, got %d",
+				u8(hydrology_debug_material_id),
+				unpacked_vertex.material_id,
+			)
+		}
+
+		chunk_voxel_view_fill_empty(&view)
+		index = chunk_block_index(2, 3, 4)
+		view.blocks.occupancy[index] = .Solid
+		view.blocks.material_id[index] = world_async.BlockMaterialID(5)
 
 		for face_index in 0 ..< 6 {
 			base := u32(face_index * 4)
@@ -4234,7 +4406,9 @@ when ODIN_DEBUG {
 				)
 
 				top_index := chunk_block_index(u32(x), u32(top_y), u32(z))
-				top_material_id := u32(u8(view.blocks.material_id[top_index]))
+				top_material_id := terrain_material_palette_index(
+					view.blocks.material_id[top_index],
+				)
 				expected_top_material_id := u32(
 					u8(terrain_biome_surface_material_id(column.dominant_biome_id)),
 				)
@@ -4263,7 +4437,7 @@ when ODIN_DEBUG {
 						y,
 					)
 
-					material_id := u32(u8(view.blocks.material_id[index]))
+					material_id := terrain_material_palette_index(view.blocks.material_id[index])
 					log.assertf(
 						material_id == expected_top_material_id,
 						"biome heightfield column %d,%d: expected surface material %d, got %d",
@@ -4322,7 +4496,8 @@ when ODIN_DEBUG {
 				u8(terrain_biome_surface_material_id(column.dominant_biome_id)),
 			)
 			log.assertf(
-				vertex.material_id == expected_top_material_id,
+				(vertex.material_id & (TERRAIN_MATERIAL_PALETTE_COUNT - 1)) ==
+				expected_top_material_id,
 				"heightfield face %d: expected top block material %d, got %d",
 				face_index,
 				expected_top_material_id,
