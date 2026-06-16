@@ -1,5 +1,6 @@
 package world
 
+import biomes "world:biomes"
 import world_async "async:world"
 import "core:log"
 import math "core:math"
@@ -147,6 +148,10 @@ init :: proc(config: InitConfig) {
 	state.mesh_release_result = config.mesh_release_result
 	state.chunk_mesh_upload = config.chunk_mesh_upload
 	state.chunk_geometry_release = config.chunk_geometry_release
+
+	when ODIN_DEBUG {
+		biomes.debug_contract_checks_run()
+	}
 
 	buffer, buffer_err := mem.make_aligned(
 		[]u8,
