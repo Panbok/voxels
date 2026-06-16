@@ -331,12 +331,13 @@ ChunkMeshSnapshotRefSet :: struct {
 /////////////////////////////////////
 
 TerrainBinaryGreedyScratch :: struct {
-	solid_rows:           [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u64,
-	material_masks:       [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u8,
-	material_rows:        [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_MATERIAL_PALETTE_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u64,
-	hydrology_debug_rows: [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u64,
-	face_material_masks:  [CHUNK_BLOCK_LENGTH]u16,
-	face_masks:           [CHUNK_BLOCK_LENGTH][TERRAIN_MATERIAL_FACE_VARIANT_COUNT][CHUNK_BLOCK_LENGTH]u64,
+	solid_rows:              [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u64,
+	material_masks:          [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u8,
+	material_rows:           [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_MATERIAL_PALETTE_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u64,
+	hydrology_debug_rows:    [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u64,
+	cave_network_debug_rows: [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u64,
+	face_material_masks:     [CHUNK_BLOCK_LENGTH]u64,
+	face_masks:              [CHUNK_BLOCK_LENGTH][TERRAIN_MATERIAL_FACE_VARIANT_COUNT][CHUNK_BLOCK_LENGTH]u64,
 }
 
 //////////////////////////////////////
@@ -1049,6 +1050,7 @@ terrain_binary_axis_rows_build_all :: proc(
 		mem.zero_slice(scratch.solid_rows[axis][:])
 		mem.zero_slice(scratch.material_masks[axis][:])
 		mem.zero_slice(scratch.hydrology_debug_rows[axis][:])
+		mem.zero_slice(scratch.cave_network_debug_rows[axis][:])
 		for material_idx := u32(0);
 		    material_idx < TERRAIN_MATERIAL_PALETTE_COUNT;
 		    material_idx += 1 {
@@ -1071,6 +1073,8 @@ terrain_binary_axis_rows_build_all :: proc(
 				)
 				is_hydrology_debug :=
 					(u8(material_id) & TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG) != 0
+				is_cave_network_debug :=
+					(u8(material_id) & TERRAIN_CAVE_NETWORK_DEBUG_MATERIAL_FLAG) != 0
 				x_row := y + z * CHUNK_BLOCK_LENGTH
 				y_row := x + z * CHUNK_BLOCK_LENGTH
 				z_row := x + y * CHUNK_BLOCK_LENGTH
@@ -1094,18 +1098,24 @@ terrain_binary_axis_rows_build_all :: proc(
 					scratch.hydrology_debug_rows[1][y_row] |= y_bit
 					scratch.hydrology_debug_rows[2][z_row] |= z_bit
 				}
+				if is_cave_network_debug {
+					scratch.cave_network_debug_rows[0][x_row] |= x_bit
+					scratch.cave_network_debug_rows[1][y_row] |= y_bit
+					scratch.cave_network_debug_rows[2][z_row] |= z_bit
+				}
 				block_index += 1
 			}
 		}
 	}
 }
 
-terrain_binary_hydrology_debug_rows_build :: proc(
+terrain_binary_debug_rows_build :: proc(
 	scratch: ^TerrainBinaryGreedyScratch,
 	view: world_async.ChunkVoxelView,
 ) {
 	for axis := u32(0); axis < TERRAIN_BINARY_AXIS_COUNT; axis += 1 {
 		mem.zero_slice(scratch.hydrology_debug_rows[axis][:])
+		mem.zero_slice(scratch.cave_network_debug_rows[axis][:])
 	}
 
 	block_index: u32
@@ -1113,8 +1123,7 @@ terrain_binary_hydrology_debug_rows_build :: proc(
 		for y := u32(0); y < CHUNK_BLOCK_LENGTH; y += 1 {
 			for x := u32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
 				material_id := view.blocks.material_id[block_index]
-				if view.blocks.occupancy[block_index] != .Solid ||
-				   (u8(material_id) & TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG) == 0 {
+				if view.blocks.occupancy[block_index] != .Solid {
 					block_index += 1
 					continue
 				}
@@ -1122,9 +1131,19 @@ terrain_binary_hydrology_debug_rows_build :: proc(
 				x_row := y + z * CHUNK_BLOCK_LENGTH
 				y_row := x + z * CHUNK_BLOCK_LENGTH
 				z_row := x + y * CHUNK_BLOCK_LENGTH
-				scratch.hydrology_debug_rows[0][x_row] |= u64(1) << x
-				scratch.hydrology_debug_rows[1][y_row] |= u64(1) << y
-				scratch.hydrology_debug_rows[2][z_row] |= u64(1) << z
+				x_bit := u64(1) << x
+				y_bit := u64(1) << y
+				z_bit := u64(1) << z
+				if (u8(material_id) & TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG) != 0 {
+					scratch.hydrology_debug_rows[0][x_row] |= x_bit
+					scratch.hydrology_debug_rows[1][y_row] |= y_bit
+					scratch.hydrology_debug_rows[2][z_row] |= z_bit
+				}
+				if (u8(material_id) & TERRAIN_CAVE_NETWORK_DEBUG_MATERIAL_FLAG) != 0 {
+					scratch.cave_network_debug_rows[0][x_row] |= x_bit
+					scratch.cave_network_debug_rows[1][y_row] |= y_bit
+					scratch.cave_network_debug_rows[2][z_row] |= z_bit
+				}
 				block_index += 1
 			}
 		}
@@ -1337,9 +1356,37 @@ terrain_binary_face_mask_bits_add :: proc(
 	remaining_bits := face_bits
 	for remaining_bits != 0 {
 		slice := u32(bits.trailing_zeros(remaining_bits))
-		scratch.face_material_masks[slice] |= u16(1) << material_idx
+		scratch.face_material_masks[slice] |= u64(1) << material_idx
 		scratch.face_masks[slice][material_idx][v] |= u64(1) << u
 		remaining_bits &~= u64(1) << slice
+	}
+}
+
+terrain_binary_face_mask_debug_variants_add :: proc(
+	scratch: ^TerrainBinaryGreedyScratch,
+	axis, row_index, material_idx, v, u: u32,
+	exposed_material_bits: u64,
+) {
+	hydrology_row := scratch.hydrology_debug_rows[axis][row_index]
+	cave_network_row := scratch.cave_network_debug_rows[axis][row_index]
+	for combo := u32(0); combo < TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_COUNT; combo += 1 {
+		variant_bits := exposed_material_bits
+		if (combo & TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_HYDROLOGY) != 0 {
+			variant_bits &= hydrology_row
+		} else {
+			variant_bits &~= hydrology_row
+		}
+		if (combo & TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_CAVE_NETWORK) != 0 {
+			variant_bits &= cave_network_row
+		} else {
+			variant_bits &~= cave_network_row
+		}
+		if variant_bits == 0 {
+			continue
+		}
+
+		debug_material_idx := material_idx | terrain_debug_material_flags_from_combo(combo)
+		terrain_binary_face_mask_bits_add(scratch, debug_material_idx, v, u, variant_bits)
 	}
 }
 
@@ -1391,11 +1438,15 @@ terrain_binary_face_masks_build :: proc(
 				material_idx := u32(bits.trailing_zeros(material_mask))
 				material_row := scratch.material_rows[axis][material_idx][row_index]
 				exposed_material_bits := exposed_row & material_row
-				debug_bits := exposed_material_bits & scratch.hydrology_debug_rows[axis][row_index]
-				base_bits := exposed_material_bits & ~debug_bits
-				debug_material_idx := material_idx | u32(TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG)
-				terrain_binary_face_mask_bits_add(scratch, material_idx, v, u, base_bits)
-				terrain_binary_face_mask_bits_add(scratch, debug_material_idx, v, u, debug_bits)
+				terrain_binary_face_mask_debug_variants_add(
+					scratch,
+					axis,
+					row_index,
+					material_idx,
+					v,
+					u,
+					exposed_material_bits,
+				)
 				material_mask &~= u32(1) << material_idx
 			}
 		}
@@ -1451,11 +1502,15 @@ terrain_binary_face_masks_build_from_cache :: proc(
 				material_idx := u32(bits.trailing_zeros(material_mask))
 				material_row := cache.material_rows[axis][material_idx][row_index]
 				exposed_material_bits := exposed_row & material_row
-				debug_bits := exposed_material_bits & scratch.hydrology_debug_rows[axis][row_index]
-				base_bits := exposed_material_bits & ~debug_bits
-				debug_material_idx := material_idx | u32(TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG)
-				terrain_binary_face_mask_bits_add(scratch, material_idx, v, u, base_bits)
-				terrain_binary_face_mask_bits_add(scratch, debug_material_idx, v, u, debug_bits)
+				terrain_binary_face_mask_debug_variants_add(
+					scratch,
+					axis,
+					row_index,
+					material_idx,
+					v,
+					u,
+					exposed_material_bits,
+				)
 				material_mask &~= u32(1) << material_idx
 			}
 		}
@@ -1525,7 +1580,7 @@ terrain_binary_face_masks_process :: proc(
 	emit: bool,
 ) {
 	for slice := u32(0); slice < CHUNK_BLOCK_LENGTH; slice += 1 {
-		material_mask := u32(scratch.face_material_masks[slice])
+		material_mask := scratch.face_material_masks[slice]
 		for material_mask != 0 {
 			material_idx := u32(bits.trailing_zeros(material_mask))
 			terrain_binary_greedy_material_process(
@@ -1538,7 +1593,7 @@ terrain_binary_face_masks_process :: proc(
 				face_cursor,
 				emit,
 			)
-			material_mask &~= u32(1) << material_idx
+			material_mask &~= u64(1) << material_idx
 		}
 	}
 }
@@ -1661,7 +1716,7 @@ terrain_binary_face_masks_process_bounds :: proc(
 	slice_min, slice_max, u_min, u_max, v_min, v_max :=
 		terrain_binary_axis_bounds_from_chunk_bounds(normal_id, min_bound, max_bound)
 	for slice := slice_min; slice < slice_max; slice += 1 {
-		material_mask := u32(scratch.face_material_masks[slice])
+		material_mask := scratch.face_material_masks[slice]
 		for material_mask != 0 {
 			material_idx := u32(bits.trailing_zeros(material_mask))
 			terrain_binary_greedy_material_process_bounds(
@@ -1678,7 +1733,7 @@ terrain_binary_face_masks_process_bounds :: proc(
 				face_cursor,
 				emit,
 			)
-			material_mask &~= u32(1) << material_idx
+			material_mask &~= u64(1) << material_idx
 		}
 	}
 }
@@ -1904,7 +1959,7 @@ chunk_binary_row_cache_build_binary_greedy_mesh :: proc(
 	scratch: ^TerrainBinaryGreedyScratch,
 	neighbor_snapshots: Maybe(world_async.ChunkMeshNeighborSnapshots) = nil,
 ) -> world_async.ChunkMeshOutput {
-	terrain_binary_hydrology_debug_rows_build(scratch, view)
+	terrain_binary_debug_rows_build(scratch, view)
 	vertices: []world_async.TerrainPackedVertex
 	indices: []u32
 	face_count: u32
@@ -1998,7 +2053,7 @@ chunk_binary_row_cache_count_binary_greedy_faces_in_bounds :: proc(
 	scratch: ^TerrainBinaryGreedyScratch,
 	neighbor_snapshots: Maybe(world_async.ChunkMeshNeighborSnapshots) = nil,
 ) -> u32 {
-	terrain_binary_hydrology_debug_rows_build(scratch, view)
+	terrain_binary_debug_rows_build(scratch, view)
 	vertices: []world_async.TerrainPackedVertex
 	indices: []u32
 	face_count: u32
@@ -3422,11 +3477,15 @@ TERRAIN_STONE_MAT_ID :: 2
 TERRAIN_WET_MARSH_MAT_ID :: 4
 TERRAIN_CORRUPTED_ASH_MAT_ID :: 5
 TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG :: u8(0x08)
+TERRAIN_CAVE_NETWORK_DEBUG_MATERIAL_FLAG :: u8(0x10)
+TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_HYDROLOGY :: u32(0x1)
+TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_CAVE_NETWORK :: u32(0x2)
+TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_COUNT :: u32(4)
 TERRAIN_MATERIAL_PALETTE_COUNT :: 8
-TERRAIN_MATERIAL_FACE_VARIANT_COUNT :: 16
+TERRAIN_MATERIAL_FACE_VARIANT_COUNT :: 32
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == 8)
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == world_async.TERRAIN_MATERIAL_PALETTE_COUNT)
-#assert(TERRAIN_MATERIAL_FACE_VARIANT_COUNT == 16)
+#assert(TERRAIN_MATERIAL_FACE_VARIANT_COUNT == 32)
 TERRAIN_GENERATOR_VERSION :: u32(1)
 TERRAIN_GRASS_CAP_BLOCK_DEPTH :: 4
 TERRAIN_DIRT_LAYER_BLOCK_DEPTH :: 4
@@ -3501,6 +3560,8 @@ TerrainBiomeColumn :: struct {
 	hydrology_debug_material_active: bool,
 }
 
+TerrainCaveDebugColumnMask :: [CHUNK_BLOCK_LENGTH]u64
+
 //////////////////////////////////////
 // Terrain Methods
 /////////////////////////////////////
@@ -3563,6 +3624,8 @@ terrain_heightfield_voxel_view_fill :: proc(
 		key,
 		biomes.generation_region_coord_from_block(origin.x, origin.y, origin.z),
 	)
+	cave_debug_columns: TerrainCaveDebugColumnMask
+	terrain_cave_debug_column_mask_build(&cave_debug_columns, &generation_region, origin)
 	for z in 0 ..< CHUNK_BLOCK_LENGTH {
 		for x in 0 ..< CHUNK_BLOCK_LENGTH {
 			world_x := origin.x + i32(x)
@@ -3584,6 +3647,7 @@ terrain_heightfield_voxel_view_fill :: proc(
 				world_x,
 				world_z,
 			)
+			cave_debug_material_active := (cave_debug_columns[z] & (u64(1) << u32(x))) != 0
 
 			for y in 0 ..< CHUNK_BLOCK_LENGTH {
 				world_y := origin.y + i32(y)
@@ -3601,6 +3665,9 @@ terrain_heightfield_voxel_view_fill :: proc(
 				if column.hydrology_debug_material_active {
 					material_id = terrain_hydrology_debug_material_id(material_id)
 				}
+				if cave_debug_material_active {
+					material_id = terrain_cave_anchor_debug_material_id(material_id)
+				}
 
 				index := chunk_block_index(u32(x), u32(y), u32(z))
 				view.blocks.occupancy[index] = .Solid
@@ -3608,6 +3675,174 @@ terrain_heightfield_voxel_view_fill :: proc(
 			}
 		}
 	}
+}
+
+terrain_cave_debug_column_mask_build :: proc(
+	mask: ^TerrainCaveDebugColumnMask,
+	region: ^biomes.GenerationRegion,
+	chunk_origin: world_async.BlockCoord,
+) {
+	for z := u32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+		mask[z] = 0
+	}
+
+	for i := u32(0); i < region.cave_network_node_count; i += 1 {
+		node := region.cave_network_nodes[i]
+		terrain_cave_debug_column_mask_add_circle(
+			mask,
+			chunk_origin,
+			node.x,
+			node.z,
+			node.radius_blocks * 0.32 + biomes.CAVE_NETWORK_DEBUG_SURFACE_FALLOFF_BLOCKS,
+		)
+	}
+
+	for i := u32(0); i < region.cave_network_edge_count; i += 1 {
+		edge := region.cave_network_edges[i]
+		terrain_cave_debug_column_mask_add_segment(
+			mask,
+			chunk_origin,
+			edge.from_x,
+			edge.from_z,
+			edge.to_x,
+			edge.to_z,
+			math.max(f32(3), edge.radius_blocks * 0.24) +
+			biomes.CAVE_NETWORK_DEBUG_SURFACE_FALLOFF_BLOCKS,
+		)
+	}
+
+	for i := u32(0); i < region.cave_anchor_count; i += 1 {
+		anchor := region.cave_anchors[i]
+		terrain_cave_debug_column_mask_add_circle(
+			mask,
+			chunk_origin,
+			anchor.x,
+			anchor.z,
+			math.max(f32(4), anchor.influence_radius_blocks * 0.45) +
+			biomes.CAVE_NETWORK_DEBUG_SURFACE_FALLOFF_BLOCKS,
+		)
+	}
+}
+
+terrain_cave_debug_column_mask_add_circle :: proc(
+	mask: ^TerrainCaveDebugColumnMask,
+	chunk_origin: world_async.BlockCoord,
+	center_x, center_z, radius_blocks: f32,
+) {
+	radius := math.max(f32(0), radius_blocks)
+	local_min_x, local_max_x, local_min_z, local_max_z, intersects :=
+		terrain_cave_debug_column_bounds(chunk_origin, center_x, center_z, radius)
+	if !intersects {
+		return
+	}
+
+	radius_sq := radius * radius
+	for z := local_min_z; z <= local_max_z; z += 1 {
+		world_z := f32(chunk_origin.z + z) + 0.5
+		for x := local_min_x; x <= local_max_x; x += 1 {
+			world_x := f32(chunk_origin.x + x) + 0.5
+			dx := world_x - center_x
+			dz := world_z - center_z
+			if dx * dx + dz * dz <= radius_sq {
+				mask[z] |= u64(1) << u32(x)
+			}
+		}
+	}
+}
+
+terrain_cave_debug_column_mask_add_segment :: proc(
+	mask: ^TerrainCaveDebugColumnMask,
+	chunk_origin: world_async.BlockCoord,
+	from_x, from_z, to_x, to_z, radius_blocks: f32,
+) {
+	radius := math.max(f32(0), radius_blocks)
+	local_min_x, local_max_x, local_min_z, local_max_z, intersects :=
+		terrain_cave_debug_column_bounds_from_extents(
+			chunk_origin,
+			math.min(from_x, to_x) - radius,
+			math.max(from_x, to_x) + radius,
+			math.min(from_z, to_z) - radius,
+			math.max(from_z, to_z) + radius,
+		)
+	if !intersects {
+		return
+	}
+
+	radius_sq := radius * radius
+	for z := local_min_z; z <= local_max_z; z += 1 {
+		world_z := f32(chunk_origin.z + z) + 0.5
+		for x := local_min_x; x <= local_max_x; x += 1 {
+			world_x := f32(chunk_origin.x + x) + 0.5
+			if terrain_cave_debug_distance_sq_to_segment_2(
+				   world_x,
+				   world_z,
+				   from_x,
+				   from_z,
+				   to_x,
+				   to_z,
+			   ) <=
+			   radius_sq {
+				mask[z] |= u64(1) << u32(x)
+			}
+		}
+	}
+}
+
+terrain_cave_debug_column_bounds :: proc(
+	chunk_origin: world_async.BlockCoord,
+	center_x, center_z, radius_blocks: f32,
+) -> (
+	local_min_x, local_max_x, local_min_z, local_max_z: i32,
+	intersects: bool,
+) {
+	return terrain_cave_debug_column_bounds_from_extents(
+		chunk_origin,
+		center_x - radius_blocks,
+		center_x + radius_blocks,
+		center_z - radius_blocks,
+		center_z + radius_blocks,
+	)
+}
+
+terrain_cave_debug_column_bounds_from_extents :: proc(
+	chunk_origin: world_async.BlockCoord,
+	min_world_x, max_world_x, min_world_z, max_world_z: f32,
+) -> (
+	local_min_x, local_max_x, local_min_z, local_max_z: i32,
+	intersects: bool,
+) {
+	min_x := i32(math.floor_f32(min_world_x)) - chunk_origin.x
+	max_x := i32(math.floor_f32(max_world_x)) - chunk_origin.x
+	min_z := i32(math.floor_f32(min_world_z)) - chunk_origin.z
+	max_z := i32(math.floor_f32(max_world_z)) - chunk_origin.z
+
+	if max_x < 0 || max_z < 0 || min_x >= CHUNK_BLOCK_LENGTH || min_z >= CHUNK_BLOCK_LENGTH {
+		return 0, 0, 0, 0, false
+	}
+
+	local_min_x = math.clamp(min_x, 0, CHUNK_BLOCK_LENGTH - 1)
+	local_max_x = math.clamp(max_x, 0, CHUNK_BLOCK_LENGTH - 1)
+	local_min_z = math.clamp(min_z, 0, CHUNK_BLOCK_LENGTH - 1)
+	local_max_z = math.clamp(max_z, 0, CHUNK_BLOCK_LENGTH - 1)
+	intersects = true
+	return
+}
+
+terrain_cave_debug_distance_sq_to_segment_2 :: proc(x, z, from_x, from_z, to_x, to_z: f32) -> f32 {
+	seg_x := to_x - from_x
+	seg_z := to_z - from_z
+	len_sq := seg_x * seg_x + seg_z * seg_z
+	if len_sq <= 0 {
+		dx := x - from_x
+		dz := z - from_z
+		return dx * dx + dz * dz
+	}
+	t := math.clamp(((x - from_x) * seg_x + (z - from_z) * seg_z) / len_sq, f32(0), f32(1))
+	nearest_x := from_x + seg_x * t
+	nearest_z := from_z + seg_z * t
+	dx := x - nearest_x
+	dz := z - nearest_z
+	return dx * dx + dz * dz
 }
 
 terrain_generation_key_make :: proc(seed: u32) -> biomes.FeatureGridKey {
@@ -3678,6 +3913,29 @@ terrain_hydrology_debug_material_id :: proc(
 	material_id: world_async.BlockMaterialID,
 ) -> world_async.BlockMaterialID {
 	return world_async.BlockMaterialID(u8(material_id) | TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG)
+}
+
+terrain_cave_network_debug_material_id :: proc(
+	material_id: world_async.BlockMaterialID,
+) -> world_async.BlockMaterialID {
+	return world_async.BlockMaterialID(u8(material_id) | TERRAIN_CAVE_NETWORK_DEBUG_MATERIAL_FLAG)
+}
+
+terrain_cave_anchor_debug_material_id :: proc(
+	material_id: world_async.BlockMaterialID,
+) -> world_async.BlockMaterialID {
+	return terrain_cave_network_debug_material_id(material_id)
+}
+
+terrain_debug_material_flags_from_combo :: proc(combo: u32) -> u32 {
+	flags := u32(0)
+	if (combo & TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_HYDROLOGY) != 0 {
+		flags |= u32(TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG)
+	}
+	if (combo & TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_CAVE_NETWORK) != 0 {
+		flags |= u32(TERRAIN_CAVE_NETWORK_DEBUG_MATERIAL_FLAG)
+	}
+	return flags
 }
 
 terrain_biome_block_material_id :: proc(
@@ -3977,6 +4235,37 @@ when ODIN_DEBUG {
 				unpacked_vertex.material_id == u32(u8(hydrology_debug_material_id)),
 				"hydrology debug cached block: expected material %d, got %d",
 				u8(hydrology_debug_material_id),
+				unpacked_vertex.material_id,
+			)
+		}
+
+		chunk_voxel_view_fill_empty(&view)
+		index = chunk_block_index(8, 9, 10)
+		cave_debug_material_id := terrain_cave_anchor_debug_material_id(
+			terrain_cave_network_debug_material_id(
+				world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID),
+			),
+		)
+		view.blocks.occupancy[index] = .Solid
+		view.blocks.material_id[index] = cave_debug_material_id
+
+		cave_debug_output := chunk_voxel_view_build_binary_greedy_mesh(
+			view,
+			.Treat_Out_Of_Chunk_As_Empty,
+			allocator,
+			scratch,
+		)
+		log.assertf(
+			cave_debug_output.face_count == 6,
+			"cave debug block: expected 6 faces, got %d",
+			cave_debug_output.face_count,
+		)
+		for vertex in cave_debug_output.vertices {
+			unpacked_vertex := terrain_unpack_vertex(vertex)
+			log.assertf(
+				unpacked_vertex.material_id == u32(u8(cave_debug_material_id)),
+				"cave debug block: expected material %d, got %d",
+				u8(cave_debug_material_id),
 				unpacked_vertex.material_id,
 			)
 		}

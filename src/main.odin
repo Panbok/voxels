@@ -386,6 +386,10 @@ process_events :: proc() {
 					gfx.hydrology_debug_visualization_toggle()
 				}
 
+				if event.key.scancode == sdl.Scancode.F2 && !event.key.repeat {
+					gfx.cave_debug_visualization_toggle()
+				}
+
 				if event.key.scancode == sdl.Scancode.L && !event.key.repeat {
 					state.auto_move_on = !state.auto_move_on
 				}

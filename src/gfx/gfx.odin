@@ -100,6 +100,7 @@ state := struct {
 	enable_vsync:                      bool,
 	use_wireframe_mode:                bool,
 	use_hydrology_debug_visualization: bool,
+	use_cave_debug_visualization:      bool,
 }{}
 
 //////////////////////////////////////
@@ -186,6 +187,7 @@ shutdown :: proc() {
 	state.enable_vsync = false
 	state.use_wireframe_mode = false
 	state.use_hydrology_debug_visualization = false
+	state.use_cave_debug_visualization = false
 }
 
 setup_resources :: proc() {
@@ -300,6 +302,11 @@ wireframe_toggle :: proc() {
 hydrology_debug_visualization_toggle :: proc() {
 	state.use_hydrology_debug_visualization = !state.use_hydrology_debug_visualization
 	log.debugf("Hydrology debug visualization: %v", state.use_hydrology_debug_visualization)
+}
+
+cave_debug_visualization_toggle :: proc() {
+	state.use_cave_debug_visualization = !state.use_cave_debug_visualization
+	log.debugf("Cave debug visualization: %v", state.use_cave_debug_visualization)
 }
 
 view_projection_update :: proc() {
@@ -1353,6 +1360,7 @@ terrain_draw_begin :: proc(cmdbuf: ^sdl.GPUCommandBuffer, render_pass: ^sdl.GPUR
 		cast(u32)size_of(matrix[4, 4]f32),
 	)
 	materials := world.TERRAIN_MATERIAL_COLORS
+	materials[6][3] = state.use_cave_debug_visualization ? f32(1) : f32(0)
 	materials[7][3] = state.use_hydrology_debug_visualization ? f32(1) : f32(0)
 	sdl.PushGPUFragmentUniformData(
 		cmdbuf,
