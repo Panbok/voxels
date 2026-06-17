@@ -161,35 +161,49 @@ generation_region_surface_bounds_from_bounds :: proc(bounds: BlockBounds3) -> Bl
 // Generation Region Build Methods
 /////////////////////////////////////
 
-generation_region_build :: proc(
-	key: FeatureGridKey,
-	coord: GenerationRegionCoord,
-) -> GenerationRegion {
-	return generation_region_build_with_margins(
-		key,
-		coord,
-		GENERATION_REGION_DEFAULT_INFLUENCE_MARGINS,
-	)
-}
-
-generation_region_build_with_margins :: proc(
+generation_region_build_with_margins_into :: proc(
+	region: ^GenerationRegion,
 	key: FeatureGridKey,
 	coord: GenerationRegionCoord,
 	influence_margins: GenerationInfluenceMargins,
-) -> GenerationRegion {
+) {
 	generation_region_influence_margins_validate(influence_margins)
 
-	region := GenerationRegion {
+	region^ = GenerationRegion {
 		key               = key,
 		coord             = coord,
 		bounds            = generation_region_bounds_from_coord(coord),
 		influence_margins = influence_margins,
 	}
-	generation_region_surface_biome_cells_fill(&region)
-	generation_region_subterranean_biome_cells_fill(&region)
-	generation_region_water_features_fill(&region)
-	generation_region_cave_networks_fill(&region)
+	generation_region_surface_biome_cells_fill(region)
+	generation_region_subterranean_biome_cells_fill(region)
+	generation_region_water_features_fill(region)
+	generation_region_cave_networks_fill(region)
+}
+
+generation_region_build_for_terrain_fill :: proc(
+	key: FeatureGridKey,
+	coord: GenerationRegionCoord,
+) -> GenerationRegion {
+	region := GenerationRegion{}
+	generation_region_build_for_terrain_fill_into(&region, key, coord)
 	return region
+}
+
+generation_region_build_for_terrain_fill_into :: proc(
+	region: ^GenerationRegion,
+	key: FeatureGridKey,
+	coord: GenerationRegionCoord,
+) {
+	region^ = GenerationRegion {
+		key               = key,
+		coord             = coord,
+		bounds            = generation_region_bounds_from_coord(coord),
+		influence_margins = GENERATION_REGION_DEFAULT_INFLUENCE_MARGINS,
+	}
+	generation_region_surface_biome_cells_fill(region)
+	generation_region_water_features_fill(region)
+	generation_region_cave_networks_fill(region)
 }
 
 generation_region_influence_margins_validate :: proc(margins: GenerationInfluenceMargins) {
@@ -348,14 +362,22 @@ generation_region_water_features_fill :: proc(region: ^GenerationRegion) {
 				x = x,
 				z = z + 1,
 			}
-			generation_region_water_feature_segment_append(
-				region,
-				water_feature_surface_segment_from_owners(region.key, owner, x_neighbor),
+			x_segment, x_segment_exists := water_feature_surface_segment_from_owners(
+				region.key,
+				owner,
+				x_neighbor,
 			)
-			generation_region_water_feature_segment_append(
-				region,
-				water_feature_surface_segment_from_owners(region.key, owner, z_neighbor),
+			if x_segment_exists {
+				generation_region_water_feature_segment_append(region, x_segment)
+			}
+			z_segment, z_segment_exists := water_feature_surface_segment_from_owners(
+				region.key,
+				owner,
+				z_neighbor,
 			)
+			if z_segment_exists {
+				generation_region_water_feature_segment_append(region, z_segment)
+			}
 		}
 	}
 
@@ -391,18 +413,30 @@ generation_region_water_features_fill :: proc(region: ^GenerationRegion) {
 					y = y,
 					z = z + 1,
 				}
-				generation_region_water_feature_segment_append(
-					region,
-					water_feature_subterranean_segment_from_owners(region.key, owner, x_neighbor),
+				x_segment, x_segment_exists := water_feature_subterranean_segment_from_owners(
+					region.key,
+					owner,
+					x_neighbor,
 				)
-				generation_region_water_feature_segment_append(
-					region,
-					water_feature_subterranean_segment_from_owners(region.key, owner, y_neighbor),
+				if x_segment_exists {
+					generation_region_water_feature_segment_append(region, x_segment)
+				}
+				y_segment, y_segment_exists := water_feature_subterranean_segment_from_owners(
+					region.key,
+					owner,
+					y_neighbor,
 				)
-				generation_region_water_feature_segment_append(
-					region,
-					water_feature_subterranean_segment_from_owners(region.key, owner, z_neighbor),
+				if y_segment_exists {
+					generation_region_water_feature_segment_append(region, y_segment)
+				}
+				z_segment, z_segment_exists := water_feature_subterranean_segment_from_owners(
+					region.key,
+					owner,
+					z_neighbor,
 				)
+				if z_segment_exists {
+					generation_region_water_feature_segment_append(region, z_segment)
+				}
 			}
 		}
 	}
@@ -948,18 +982,19 @@ surface_biome_field_sample_from_region :: proc(
 	)
 
 	config := feature_grid_config_for(.Surface, .Biome)
+	sample_x, sample_z := surface_biome_field_warped_sample_position(region.key, block_x, block_z)
+	owner_block_x := i32(math.floor_f32(sample_x))
+	owner_block_z := i32(math.floor_f32(sample_z))
 	owners: [FEATURE_GRID_WORLEY_NEIGHBOR_COUNT_2]FeatureGridCoord2
 	owner_count := feature_grid_neighbor_owners_from_block(
-		block_x,
-		block_z,
+		owner_block_x,
+		owner_block_z,
 		FEATURE_GRID_WORLEY_NEIGHBOR_RADIUS,
 		config,
 		owners[:],
 	)
 
 	sample := SurfaceBiomeFieldSample{}
-	sample_x := f32(block_x) + 0.5
-	sample_z := f32(block_z) + 0.5
 	for i := u32(0); i < owner_count; i += 1 {
 		region_cell, found := generation_region_surface_biome_cell_find(region, owners[i])
 		log.assertf(
@@ -1241,7 +1276,13 @@ when ODIN_DEBUG {
 		key := feature_grid_key_make(0x123456789abcdef0, 1)
 		next_version_key := feature_grid_key_make(key.world_seed, key.generator_version + 1)
 
-		origin_region := generation_region_build(key, {x = 0, y = 0, z = 0})
+		origin_region := new(GenerationRegion)
+		generation_region_build_with_margins_into(
+			origin_region,
+			key,
+			{x = 0, y = 0, z = 0},
+			GENERATION_REGION_DEFAULT_INFLUENCE_MARGINS,
+		)
 		log.assert(origin_region.bounds.min == IVec3{}, "origin region min bounds mismatch")
 		log.assert(
 			origin_region.bounds.max ==
@@ -1278,7 +1319,13 @@ when ODIN_DEBUG {
 			"negative block coordinates must use floor division for Generation Regions",
 		)
 
-		next_version_region := generation_region_build(next_version_key, origin_region.coord)
+		next_version_region := new(GenerationRegion)
+		generation_region_build_with_margins_into(
+			next_version_region,
+			next_version_key,
+			origin_region.coord,
+			GENERATION_REGION_DEFAULT_INFLUENCE_MARGINS,
+		)
 		log.assert(
 			origin_region.surface_biome_cells[0].feature.id !=
 			next_version_region.surface_biome_cells[0].feature.id,
@@ -1294,11 +1341,11 @@ when ODIN_DEBUG {
 			"chunk-like bounds should resolve to the origin Generation Region",
 		)
 		query := generation_region_query_make_default(chunk_bounds)
-		generation_region_query_validate(&origin_region, query)
+		generation_region_query_validate(origin_region, query)
 
 		surface_cells: [GENERATION_REGION_SURFACE_BIOME_CELL_CAPACITY]GenerationRegionSurfaceBiomeCell
 		surface_cell_count := generation_region_surface_biome_cells_write(
-			&origin_region,
+			origin_region,
 			query,
 			surface_cells[:],
 		)
@@ -1306,7 +1353,7 @@ when ODIN_DEBUG {
 
 		subterranean_cells: [GENERATION_REGION_SUBTERRANEAN_BIOME_CELL_CAPACITY]GenerationRegionSubterraneanBiomeCell
 		subterranean_cell_count := generation_region_subterranean_biome_cells_write(
-			&origin_region,
+			origin_region,
 			query,
 			subterranean_cells[:],
 		)
@@ -1314,7 +1361,7 @@ when ODIN_DEBUG {
 
 		water_nodes: [GENERATION_REGION_WATER_FEATURE_NODE_CAPACITY]WaterFeatureNode
 		water_node_count := generation_region_water_feature_nodes_write(
-			&origin_region,
+			origin_region,
 			query,
 			water_nodes[:],
 		)
@@ -1322,7 +1369,7 @@ when ODIN_DEBUG {
 
 		water_segments: [GENERATION_REGION_WATER_FEATURE_SEGMENT_CAPACITY]WaterFeatureSegment
 		water_segment_count := generation_region_water_feature_segments_write(
-			&origin_region,
+			origin_region,
 			query,
 			water_segments[:],
 		)
@@ -1330,7 +1377,7 @@ when ODIN_DEBUG {
 
 		water_anchors: [GENERATION_REGION_WATER_FEATURE_ANCHOR_CAPACITY]WaterFeatureAnchor
 		water_anchor_count := generation_region_water_feature_anchors_write(
-			&origin_region,
+			origin_region,
 			query,
 			water_anchors[:],
 		)
@@ -1338,7 +1385,7 @@ when ODIN_DEBUG {
 
 		cave_nodes: [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]CaveNetworkNode
 		cave_node_count := generation_region_cave_network_nodes_write(
-			&origin_region,
+			origin_region,
 			query,
 			cave_nodes[:],
 		)
@@ -1346,7 +1393,7 @@ when ODIN_DEBUG {
 
 		cave_edges: [GENERATION_REGION_CAVE_NETWORK_EDGE_CAPACITY]CaveNetworkEdge
 		cave_edge_count := generation_region_cave_network_edges_write(
-			&origin_region,
+			origin_region,
 			query,
 			cave_edges[:],
 		)
@@ -1354,7 +1401,7 @@ when ODIN_DEBUG {
 
 		cave_anchors: [GENERATION_REGION_CAVE_ANCHOR_CAPACITY]CaveAnchor
 		cave_anchor_count := generation_region_cave_anchors_write(
-			&origin_region,
+			origin_region,
 			query,
 			cave_anchors[:],
 		)
@@ -1365,7 +1412,7 @@ when ODIN_DEBUG {
 			max = {x = 512, y = 512, z = 512},
 		}
 		edge_query := generation_region_query_make_default(edge_chunk_bounds)
-		generation_region_query_validate(&origin_region, edge_query)
+		generation_region_query_validate(origin_region, edge_query)
 
 		surface_sample_coord := IVec2 {
 			x = 17,
@@ -1376,14 +1423,20 @@ when ODIN_DEBUG {
 			0,
 			surface_sample_coord.z,
 		)
-		surface_region := generation_region_build(key, surface_region_coord)
+		surface_region := new(GenerationRegion)
+		generation_region_build_with_margins_into(
+			surface_region,
+			key,
+			surface_region_coord,
+			GENERATION_REGION_DEFAULT_INFLUENCE_MARGINS,
+		)
 		surface_direct := surface_biome_field_sample(
 			key,
 			surface_sample_coord.x,
 			surface_sample_coord.z,
 		)
 		surface_region_sample := surface_biome_field_sample_from_region(
-			&surface_region,
+			surface_region,
 			surface_sample_coord.x,
 			surface_sample_coord.z,
 		)
@@ -1394,7 +1447,7 @@ when ODIN_DEBUG {
 			surface_sample_coord.z,
 		)
 		surface_hydrology_region := hydrology_layer_surface_sample_from_region(
-			&surface_region,
+			surface_region,
 			surface_sample_coord.x,
 			surface_sample_coord.z,
 		)
@@ -1413,7 +1466,13 @@ when ODIN_DEBUG {
 			subterranean_sample_coord.y,
 			subterranean_sample_coord.z,
 		)
-		subterranean_region := generation_region_build(key, subterranean_region_coord)
+		subterranean_region := new(GenerationRegion)
+		generation_region_build_with_margins_into(
+			subterranean_region,
+			key,
+			subterranean_region_coord,
+			GENERATION_REGION_DEFAULT_INFLUENCE_MARGINS,
+		)
 		subterranean_direct := subterranean_biome_field_sample(
 			key,
 			subterranean_sample_coord.x,
@@ -1421,7 +1480,7 @@ when ODIN_DEBUG {
 			subterranean_sample_coord.z,
 		)
 		subterranean_region_sample := subterranean_biome_field_sample_from_region(
-			&subterranean_region,
+			subterranean_region,
 			subterranean_sample_coord.x,
 			subterranean_sample_coord.y,
 			subterranean_sample_coord.z,
@@ -1437,7 +1496,7 @@ when ODIN_DEBUG {
 			subterranean_sample_coord.z,
 		)
 		subterranean_hydrology_region := hydrology_layer_subterranean_sample_from_region(
-			&subterranean_region,
+			subterranean_region,
 			subterranean_sample_coord.x,
 			subterranean_sample_coord.y,
 			subterranean_sample_coord.z,
@@ -1448,7 +1507,7 @@ when ODIN_DEBUG {
 		)
 
 		cave_debug_sample := cave_network_debug_surface_sample_from_region(
-			&surface_region,
+			surface_region,
 			surface_sample_coord.x,
 			surface_sample_coord.z,
 		)

@@ -165,6 +165,16 @@ REGIONAL_TERRAIN_HEAT_SALT :: u64(0x2f8a7bd152946e33)
 REGIONAL_TERRAIN_COLD_SALT :: u64(0x9b879d623e4c11af)
 REGIONAL_TERRAIN_PRESSURE_SALT :: u64(0x47c1b7e93d524a05)
 
+SURFACE_TERRAIN_RELIEF_LOW_CELL_BLOCKS :: 384
+SURFACE_TERRAIN_RELIEF_MID_CELL_BLOCKS :: 128
+SURFACE_TERRAIN_RELIEF_HIGH_CELL_BLOCKS :: 48
+SURFACE_TERRAIN_RELIEF_RIDGE_CELL_BLOCKS :: 160
+SURFACE_TERRAIN_TERRACE_STEP_BLOCKS :: f32(5.0)
+SURFACE_TERRAIN_RELIEF_LOW_SALT :: u64(0x2d7a9f4b13568ce1)
+SURFACE_TERRAIN_RELIEF_MID_SALT :: u64(0x83c1b6dfe927405a)
+SURFACE_TERRAIN_RELIEF_HIGH_SALT :: u64(0xf04e672a39dc815b)
+SURFACE_TERRAIN_RELIEF_RIDGE_SALT :: u64(0x6a5bd190e7382cf4)
+
 //////////////////////////////////////
 // Sea Compression Constants
 /////////////////////////////////////
@@ -368,6 +378,45 @@ regional_terrain_field_value_noise_2 :: proc(
 	)
 }
 
+regional_terrain_field_value_noise_3 :: proc(
+	key: FeatureGridKey,
+	block_x, block_y, block_z: i32,
+	cell_size_blocks: i32,
+	salt: u64,
+) -> f32 {
+	log.assert(cell_size_blocks > 0, "regional 3D field cell size must be positive")
+
+	cell_x := math.floor_div(block_x, cell_size_blocks)
+	cell_y := math.floor_div(block_y, cell_size_blocks)
+	cell_z := math.floor_div(block_z, cell_size_blocks)
+	origin_x := cell_x * cell_size_blocks
+	origin_y := cell_y * cell_size_blocks
+	origin_z := cell_z * cell_size_blocks
+	unit_x := f32(block_x - origin_x) / f32(cell_size_blocks)
+	unit_y := f32(block_y - origin_y) / f32(cell_size_blocks)
+	unit_z := f32(block_z - origin_z) / f32(cell_size_blocks)
+	t_x := math.smoothstep(f32(0), f32(1), unit_x)
+	t_y := math.smoothstep(f32(0), f32(1), unit_y)
+	t_z := math.smoothstep(f32(0), f32(1), unit_z)
+
+	v000 := regional_terrain_field_corner_value_3(key, salt, cell_x, cell_y, cell_z)
+	v100 := regional_terrain_field_corner_value_3(key, salt, cell_x + 1, cell_y, cell_z)
+	v010 := regional_terrain_field_corner_value_3(key, salt, cell_x, cell_y + 1, cell_z)
+	v110 := regional_terrain_field_corner_value_3(key, salt, cell_x + 1, cell_y + 1, cell_z)
+	v001 := regional_terrain_field_corner_value_3(key, salt, cell_x, cell_y, cell_z + 1)
+	v101 := regional_terrain_field_corner_value_3(key, salt, cell_x + 1, cell_y, cell_z + 1)
+	v011 := regional_terrain_field_corner_value_3(key, salt, cell_x, cell_y + 1, cell_z + 1)
+	v111 := regional_terrain_field_corner_value_3(key, salt, cell_x + 1, cell_y + 1, cell_z + 1)
+
+	x00 := regional_terrain_field_lerp(v000, v100, t_x)
+	x10 := regional_terrain_field_lerp(v010, v110, t_x)
+	x01 := regional_terrain_field_lerp(v001, v101, t_x)
+	x11 := regional_terrain_field_lerp(v011, v111, t_x)
+	y0 := regional_terrain_field_lerp(x00, x10, t_y)
+	y1 := regional_terrain_field_lerp(x01, x11, t_y)
+	return regional_terrain_field_lerp(y0, y1, t_z)
+}
+
 regional_terrain_field_corner_value :: proc(
 	key: FeatureGridKey,
 	salt: u64,
@@ -377,6 +426,20 @@ regional_terrain_field_corner_value :: proc(
 	h = feature_grid_hash_combine(h, REGIONAL_TERRAIN_FIELD_DOMAIN_SALT)
 	h = feature_grid_hash_combine(h, salt)
 	h = feature_grid_hash_combine(h, feature_grid_hash_i32(cell_x))
+	h = feature_grid_hash_combine(h, feature_grid_hash_i32(cell_z))
+	return feature_grid_signed_unit_f32(h, salt)
+}
+
+regional_terrain_field_corner_value_3 :: proc(
+	key: FeatureGridKey,
+	salt: u64,
+	cell_x, cell_y, cell_z: i32,
+) -> f32 {
+	h := feature_grid_key_hash(key)
+	h = feature_grid_hash_combine(h, REGIONAL_TERRAIN_FIELD_DOMAIN_SALT)
+	h = feature_grid_hash_combine(h, salt)
+	h = feature_grid_hash_combine(h, feature_grid_hash_i32(cell_x))
+	h = feature_grid_hash_combine(h, feature_grid_hash_i32(cell_y))
 	h = feature_grid_hash_combine(h, feature_grid_hash_i32(cell_z))
 	return feature_grid_signed_unit_f32(h, salt)
 }
@@ -402,18 +465,18 @@ biome_profile_for :: proc(biome_id: BiomeID) -> BiomeProfile {
 	case .Temperate_Hills:
 		return {
 			biome_id = biome_id,
-			base_height_blocks = 26,
-			continental_height_blocks = 30,
-			elevation_height_blocks = 18,
+			base_height_blocks = 38,
+			continental_height_blocks = 52,
+			elevation_height_blocks = 36,
 			erosion_height_blocks = -8,
-			relief_height_blocks = 8,
-			relief_amplitude_blocks = 6,
+			relief_height_blocks = 24,
+			relief_amplitude_blocks = 18,
 			ruggedness_response = 0.65,
 			cliff_bias = 0.10,
 			terrace_strength = 0.05,
 			cave_openness = 0.20,
 			surface_layer_depth_blocks = 4,
-			local_detail_amplitude_blocks = 3,
+			local_detail_amplitude_blocks = 5,
 			shoreline_width_blocks = 14,
 			shoreline_slope = 0.45,
 			underwater_floor_depression_blocks = 2,
@@ -430,18 +493,18 @@ biome_profile_for :: proc(biome_id: BiomeID) -> BiomeProfile {
 	case .Basalt_Spire_Highlands:
 		return {
 			biome_id = biome_id,
-			base_height_blocks = 38,
-			continental_height_blocks = 42,
-			elevation_height_blocks = 34,
+			base_height_blocks = 66,
+			continental_height_blocks = 76,
+			elevation_height_blocks = 70,
 			erosion_height_blocks = -6,
-			relief_height_blocks = 18,
-			relief_amplitude_blocks = 14,
+			relief_height_blocks = 48,
+			relief_amplitude_blocks = 36,
 			ruggedness_response = 1.75,
 			cliff_bias = 0.72,
 			terrace_strength = 0.42,
 			cave_openness = 0.24,
 			surface_layer_depth_blocks = 2,
-			local_detail_amplitude_blocks = 7,
+			local_detail_amplitude_blocks = 12,
 			shoreline_width_blocks = 8,
 			shoreline_slope = 0.72,
 			underwater_floor_depression_blocks = 5,
@@ -486,18 +549,18 @@ biome_profile_for :: proc(biome_id: BiomeID) -> BiomeProfile {
 	case .Corrupted_Ash_Forest:
 		return {
 			biome_id = biome_id,
-			base_height_blocks = 24,
-			continental_height_blocks = 24,
-			elevation_height_blocks = 16,
+			base_height_blocks = 38,
+			continental_height_blocks = 48,
+			elevation_height_blocks = 40,
 			erosion_height_blocks = -4,
-			relief_height_blocks = 9,
-			relief_amplitude_blocks = 7,
+			relief_height_blocks = 28,
+			relief_amplitude_blocks = 22,
 			ruggedness_response = 0.95,
 			cliff_bias = 0.32,
 			terrace_strength = 0.18,
 			cave_openness = 0.34,
 			surface_layer_depth_blocks = 3,
-			local_detail_amplitude_blocks = 5,
+			local_detail_amplitude_blocks = 7,
 			shoreline_width_blocks = 14,
 			shoreline_slope = 0.34,
 			underwater_floor_depression_blocks = 3,
@@ -725,6 +788,13 @@ surface_biome_profile_evaluate_with_hydrology :: proc(
 		evaluation.transition_rule,
 		evaluation.transition_strength,
 		sample.cell_count,
+	)
+	evaluation.transitioned_target = biome_shape_target_apply_surface_relief(
+		key,
+		evaluation.transitioned_target,
+		fields,
+		block_x,
+		block_z,
 	)
 	evaluation.final_target, evaluation.sea_compression_strength =
 		biome_shape_target_apply_sea_compression(evaluation.transitioned_target)
@@ -1097,6 +1167,69 @@ biome_transition_rule_apply :: proc(
 		result.underwater_floor_depression_blocks +
 		rule.underwater_depression_boost_blocks * transition_strength,
 	)
+	return result
+}
+
+biome_shape_target_apply_surface_relief :: proc(
+	key: FeatureGridKey,
+	target: BiomeShapeTarget,
+	fields: RegionalTerrainFields,
+	block_x, block_z: i32,
+) -> BiomeShapeTarget {
+	result := target
+	low := regional_terrain_field_value_noise_2(
+		key,
+		block_x,
+		block_z,
+		SURFACE_TERRAIN_RELIEF_LOW_CELL_BLOCKS,
+		SURFACE_TERRAIN_RELIEF_LOW_SALT,
+	)
+	mid := regional_terrain_field_value_noise_2(
+		key,
+		block_x,
+		block_z,
+		SURFACE_TERRAIN_RELIEF_MID_CELL_BLOCKS,
+		SURFACE_TERRAIN_RELIEF_MID_SALT,
+	)
+	high := regional_terrain_field_value_noise_2(
+		key,
+		block_x,
+		block_z,
+		SURFACE_TERRAIN_RELIEF_HIGH_CELL_BLOCKS,
+		SURFACE_TERRAIN_RELIEF_HIGH_SALT,
+	)
+	ridge_noise := regional_terrain_field_value_noise_2(
+		key,
+		block_x,
+		block_z,
+		SURFACE_TERRAIN_RELIEF_RIDGE_CELL_BLOCKS,
+		SURFACE_TERRAIN_RELIEF_RIDGE_SALT,
+	)
+	ridge := 1.0 - math.abs(ridge_noise)
+	ridge_peak := ridge * ridge
+	erosion_damp := 1.0 - fields.erosion * 0.35
+	relief_signal := low * 0.55 + mid * 0.30 + high * 0.15
+	local_signal := high * (0.35 + target.ruggedness_response * 0.35)
+	ridge_lift :=
+		ridge_peak *
+		target.relief_amplitude_blocks *
+		(0.45 + target.ruggedness_response) *
+		(0.35 + target.cliff_bias * 2.40)
+
+	result.surface_height_blocks +=
+		target.relief_amplitude_blocks * relief_signal * erosion_damp +
+		target.local_detail_amplitude_blocks * local_signal +
+		ridge_lift
+
+	if result.terrace_strength > 0.01 {
+		step := SURFACE_TERRAIN_TERRACE_STEP_BLOCKS
+		stepped_height := math.floor_f32(result.surface_height_blocks / step + 0.5) * step
+		result.surface_height_blocks = regional_terrain_field_lerp(
+			result.surface_height_blocks,
+			stepped_height,
+			math.clamp(result.terrace_strength * 0.55, f32(0), f32(0.85)),
+		)
+	}
 	return result
 }
 

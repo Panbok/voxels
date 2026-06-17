@@ -35,13 +35,13 @@ CaveNetworkEdgeKind :: enum u8 {
 	Tunnel,
 	// Canyon is a wider passage used for major-region connections.
 	Canyon,
-	// Worm_Path is a sinuous passage type reserved for later density shaping.
+	// Worm_Path is a sinuous ordinary passage with stronger local meander.
 	Worm_Path,
 	// Flooded_Passage links water-bearing cave rooms and underground hydrology.
 	Flooded_Passage,
 	// Fracture is a narrow or jagged connector, often used by crystal cave regions.
 	Fracture,
-	// Collapsed_Corridor is a partially blocked passage type reserved for later shaping.
+	// Collapsed_Corridor is a flatter, pinched ordinary passage.
 	Collapsed_Corridor,
 	// Vertical_Shaft is a passage with dominant vertical displacement.
 	Vertical_Shaft,
@@ -107,7 +107,10 @@ CaveNetworkEdge :: struct {
 	kind:                    CaveNetworkEdgeKind,
 	from_node_id:            FeatureID,
 	to_node_id:              FeatureID,
+	from_biome_id:           BiomeID,
+	to_biome_id:             BiomeID,
 	from_x, from_y, from_z:  f32,
+	bend_x, bend_y, bend_z:  f32,
 	to_x, to_y, to_z:        f32,
 	radius_blocks:           f32,
 	influence_radius_blocks: f32,
@@ -152,11 +155,27 @@ CAVE_NETWORK_NODE_ROLE_SALT :: u64(0x92a4e7c51b6d308f)
 CAVE_NETWORK_EDGE_ID_SALT :: u64(0xd36e5b0a481fc297)
 CAVE_NETWORK_EDGE_KIND_SALT :: u64(0x6c58e21bd4a0739f)
 CAVE_NETWORK_EDGE_ROLL_SALT :: u64(0x17e2b9d643a8c50f)
+CAVE_NETWORK_EDGE_BEND_X_SALT :: u64(0xd947a38c12f06be5)
+CAVE_NETWORK_EDGE_BEND_Y_SALT :: u64(0x74e219c63db805fa)
+CAVE_NETWORK_EDGE_BEND_Z_SALT :: u64(0x2c80ad4f9e16b735)
 CAVE_NETWORK_ANCHOR_ID_SALT :: u64(0xa8c51e42d0f3796b)
 CAVE_NETWORK_WATER_ANCHOR_ID_SALT :: u64(0x5f12d7a83be0469c)
 CAVE_NETWORK_RADIUS_SALT :: u64(0xc47e1f902a6db358)
-CAVE_NETWORK_SAMPLE_MARGIN_BLOCKS :: 512
+CAVE_NETWORK_SURFACE_DEPTH_SALT :: u64(0xb5a74e29d6381c0f)
+CAVE_NETWORK_SURFACE_ANCHOR_SALT :: u64(0x3f82b1d670a49ec5)
+CAVE_NETWORK_SURFACE_ANCHOR_RADIUS_SALT :: u64(0x9ad41f8c7e63250b)
+CAVE_NETWORK_SURFACE_ANCHOR_OFFSET_SALT :: u64(0x24a91cb087de35f6)
+CAVE_NETWORK_SAMPLE_MARGIN_BLOCKS :: 256
 CAVE_NETWORK_DEBUG_SURFACE_FALLOFF_BLOCKS :: f32(6)
+CAVE_NETWORK_SURFACE_ADJACENT_OFFSET_BLOCKS :: f32(128)
+CAVE_NETWORK_SURFACE_CLEARANCE_BLOCKS :: f32(12)
+CAVE_NETWORK_SURFACE_MIN_DEPTH_BLOCKS :: f32(72)
+CAVE_NETWORK_SURFACE_MAX_DEPTH_BLOCKS :: f32(152)
+CAVE_NETWORK_SURFACE_OWNER_RADIUS_SCALE :: f32(0.45)
+CAVE_NETWORK_SURFACE_ANCHOR_EMIT_ROLL_MAX :: f32(0.42)
+CAVE_NETWORK_SURFACE_CAVE_MOUTH_ROLL_MAX :: f32(0.68)
+CAVE_NETWORK_SURFACE_MOUTH_OFFSET_MIN_SCALE :: f32(0.36)
+CAVE_NETWORK_SURFACE_MOUTH_OFFSET_MAX_SCALE :: f32(0.78)
 
 //////////////////////////////////////
 // Cave Network Feature Methods
@@ -180,6 +199,26 @@ cave_network_node_from_owner :: proc(
 	z :=
 		feature_grid_cell_center(owner.z, cell_size) +
 		feature_grid_signed_unit_f32(hash, FEATURE_GRID_JITTER_Z_SALT) * jitter_radius
+	surface_evaluation := surface_biome_profile_sample(
+		key,
+		i32(math.floor_f32(x)),
+		i32(math.floor_f32(z)),
+	)
+	surface_ceiling_y :=
+		surface_evaluation.final_target.surface_height_blocks -
+		CAVE_NETWORK_SURFACE_CLEARANCE_BLOCKS
+	if owner.y >= 0 {
+		depth_roll := feature_grid_unit_f32(hash, CAVE_NETWORK_SURFACE_DEPTH_SALT)
+		surface_depth := regional_terrain_field_lerp(
+			CAVE_NETWORK_SURFACE_MIN_DEPTH_BLOCKS,
+			CAVE_NETWORK_SURFACE_MAX_DEPTH_BLOCKS,
+			depth_roll,
+		)
+		y = surface_ceiling_y - surface_depth
+	} else {
+		y -= CAVE_NETWORK_SURFACE_ADJACENT_OFFSET_BLOCKS
+		y = math.min(y, surface_ceiling_y - CAVE_NETWORK_SURFACE_MIN_DEPTH_BLOCKS)
+	}
 
 	biome_id, _, _, _ := subterranean_biome_identity_select(key, owner)
 	fields := regional_terrain_fields_sample(
@@ -211,6 +250,9 @@ cave_network_node_from_owner :: proc(
 	)
 	radius_roll := feature_grid_unit_f32(hash, CAVE_NETWORK_RADIUS_SALT)
 	radius := cave_network_node_radius_blocks(biome_id, role, profile.cave_openness, radius_roll)
+	if owner.y >= 0 {
+		radius = math.max(f32(5), radius * CAVE_NETWORK_SURFACE_OWNER_RADIUS_SCALE)
+	}
 
 	return {
 		id = id,
@@ -222,7 +264,7 @@ cave_network_node_from_owner :: proc(
 		y = y,
 		z = z,
 		radius_blocks = radius,
-		connection_radius_blocks = math.max(f32(8), radius * 0.45),
+		connection_radius_blocks = math.max(f32(4), radius * 0.45),
 		major_region = cave_region_role_requires_connectivity(role),
 	}
 }
@@ -253,16 +295,47 @@ cave_network_edge_from_nodes :: proc(from_node, to_node: CaveNetworkNode) -> Cav
 	if kind == .Flooded_Passage || kind == .Canyon {
 		radius *= 1.20
 	}
+	id := cave_network_edge_id_from_nodes(from_node.id, to_node.id, kind)
+	dx := to_node.x - from_node.x
+	dy := to_node.y - from_node.y
+	dz := to_node.z - from_node.z
+	length_xz := math.sqrt_f32(dx * dx + dz * dz)
+	length_3 := math.sqrt_f32(dx * dx + dy * dy + dz * dz)
+	bend_scale := math.min(math.max(length_3 * 0.22, f32(14)), f32(110))
+	normal_x := f32(0)
+	normal_z := f32(0)
+	if length_xz > 0.001 {
+		normal_x = -dz / length_xz
+		normal_z = dx / length_xz
+	}
+	vertical_scale := f32(0.32)
+	if kind == .Vertical_Shaft {
+		vertical_scale = 0.12
+	}
 
 	return {
-		id = cave_network_edge_id_from_nodes(from_node.id, to_node.id, kind),
+		id = id,
 		owner = from_node.owner,
 		kind = kind,
 		from_node_id = from_node.id,
 		to_node_id = to_node.id,
+		from_biome_id = from_node.biome_id,
+		to_biome_id = to_node.biome_id,
 		from_x = from_node.x,
 		from_y = from_node.y,
 		from_z = from_node.z,
+		bend_x = (from_node.x + to_node.x) * 0.5 +
+		normal_x *
+			feature_grid_signed_unit_f32(u64(id), CAVE_NETWORK_EDGE_BEND_X_SALT) *
+			bend_scale,
+		bend_y = (from_node.y + to_node.y) * 0.5 +
+		feature_grid_signed_unit_f32(u64(id), CAVE_NETWORK_EDGE_BEND_Y_SALT) *
+			bend_scale *
+			vertical_scale,
+		bend_z = (from_node.z + to_node.z) * 0.5 +
+		normal_z *
+			feature_grid_signed_unit_f32(u64(id), CAVE_NETWORK_EDGE_BEND_Z_SALT) *
+			bend_scale,
 		to_x = to_node.x,
 		to_y = to_node.y,
 		to_z = to_node.z,
@@ -297,11 +370,16 @@ cave_anchor_from_node :: proc(key: FeatureGridKey, node: CaveNetworkNode) -> Cav
 	x := node.x
 	y := node.y
 	z := node.z
+	if kind == .Cave_Mouth {
+		offset_x, offset_z := cave_anchor_surface_mouth_offset_from_node(node)
+		x += offset_x
+		z += offset_z
+	}
 	if kind == .Cave_Mouth || kind == .Sinkhole {
 		surface_evaluation := surface_biome_profile_sample(
 			key,
-			i32(math.floor_f32(node.x)),
-			i32(math.floor_f32(node.z)),
+			i32(math.floor_f32(x)),
+			i32(math.floor_f32(z)),
 		)
 		y = surface_evaluation.final_target.surface_height_blocks
 	}
@@ -314,9 +392,59 @@ cave_anchor_from_node :: proc(key: FeatureGridKey, node: CaveNetworkNode) -> Cav
 		x = x,
 		y = y,
 		z = z,
-		influence_radius_blocks = math.max(f32(8), node.radius_blocks * 0.55),
+		influence_radius_blocks = cave_anchor_influence_radius_from_node(node, kind),
 		guaranteed_connection = node.major_region,
 	}
+}
+
+cave_anchor_surface_mouth_offset_from_node :: proc(
+	node: CaveNetworkNode,
+) -> (
+	offset_x, offset_z: f32,
+) {
+	hash := feature_grid_hash_combine(u64(node.id), CAVE_NETWORK_SURFACE_ANCHOR_OFFSET_SALT)
+	dir_x := feature_grid_signed_unit_f32(hash, CAVE_NETWORK_EDGE_BEND_X_SALT)
+	dir_z := feature_grid_signed_unit_f32(hash, CAVE_NETWORK_EDGE_BEND_Z_SALT)
+	dir_len := math.sqrt_f32(dir_x * dir_x + dir_z * dir_z)
+	if dir_len <= 0.001 {
+		dir_x = 0
+		dir_z = 1
+		dir_len = 1
+	}
+	dir_x /= dir_len
+	dir_z /= dir_len
+	radius := cave_anchor_influence_radius_from_node(node, .Cave_Mouth)
+	distance_roll := feature_grid_unit_f32(hash, CAVE_NETWORK_SURFACE_ANCHOR_RADIUS_SALT)
+	distance :=
+		radius *
+		regional_terrain_field_lerp(
+			CAVE_NETWORK_SURFACE_MOUTH_OFFSET_MIN_SCALE,
+			CAVE_NETWORK_SURFACE_MOUTH_OFFSET_MAX_SCALE,
+			distance_roll,
+		)
+	return dir_x * distance, dir_z * distance
+}
+
+cave_anchor_influence_radius_from_node :: proc(
+	node: CaveNetworkNode,
+	kind: CaveAnchorKind,
+) -> f32 {
+	radius := math.max(f32(8), node.radius_blocks * 0.55)
+	if kind == .Cave_Mouth || kind == .Sinkhole {
+		roll := feature_grid_unit_f32(u64(node.id), CAVE_NETWORK_SURFACE_ANCHOR_RADIUS_SALT)
+		radius = math.max(f32(6), radius + cave_anchor_surface_radius_adjust_blocks(kind, roll))
+	}
+	return radius
+}
+
+cave_anchor_surface_radius_adjust_blocks :: proc(kind: CaveAnchorKind, roll: f32) -> f32 {
+	#partial switch kind {
+	case .Cave_Mouth:
+		return regional_terrain_field_lerp(-2.0, 4.0, roll)
+	case .Sinkhole:
+		return regional_terrain_field_lerp(-1.5, 3.0, roll)
+	}
+	return 0
 }
 
 cave_anchor_from_water_anchor :: proc(anchor: WaterFeatureAnchor) -> CaveAnchor {
@@ -405,7 +533,13 @@ cave_network_node_kind_select :: proc(
 	if role == .Water_Linked_Region || hydrology_sample.flooded_region_influence > 0.45 {
 		return .Underground_Lake
 	}
-	if role == .Connector || hydrology_sample.channel_influence > 0.35 {
+	if role == .Connector {
+		if cave_network_hydrology_should_force_water_route(hydrology_sample) {
+			return .River_Junction
+		}
+		return .Gateway
+	}
+	if hydrology_sample.channel_influence > 0.35 {
 		return .River_Junction
 	}
 	if role == .Major_Region {
@@ -430,6 +564,16 @@ cave_network_node_kind_select :: proc(
 		return .River_Junction
 	}
 	return .Chamber
+}
+
+cave_network_hydrology_should_force_water_route :: proc(
+	hydrology_sample: HydrologyLayerSubterraneanSample,
+) -> bool {
+	return(
+		hydrology_sample.channel_influence > 0.22 ||
+		hydrology_sample.flooded_region_influence > 0.28 ||
+		hydrology_sample.aquifer_influence > 0.38 \
+	)
 }
 
 cave_network_node_radius_blocks :: proc(
@@ -466,21 +610,56 @@ cave_network_edge_kind_select :: proc(from_node, to_node: CaveNetworkNode) -> Ca
 	if dy > dx && dy > dz {
 		return .Vertical_Shaft
 	}
-	if from_node.role == .Water_Linked_Region ||
-	   to_node.role == .Water_Linked_Region ||
-	   from_node.kind == .Underground_Lake ||
-	   to_node.kind == .Underground_Lake ||
-	   from_node.kind == .River_Junction ||
-	   to_node.kind == .River_Junction {
+	from_water := cave_network_node_prefers_flooded_route(from_node)
+	to_water := cave_network_node_prefers_flooded_route(to_node)
+	if from_water && to_water {
 		return .Flooded_Passage
+	}
+	roll := cave_network_edge_kind_roll(from_node.id, to_node.id)
+	if from_water || to_water {
+		if roll < 0.34 {
+			return .Flooded_Passage
+		}
+		if roll < 0.70 {
+			return .Worm_Path
+		}
+		return .Collapsed_Corridor
 	}
 	if from_node.biome_id == .Crystal_Geode_Network || to_node.biome_id == .Crystal_Geode_Network {
 		return .Fracture
 	}
+	if from_node.kind == .Gateway || to_node.kind == .Gateway {
+		if roll < 0.62 {
+			return .Worm_Path
+		}
+		return .Collapsed_Corridor
+	}
 	if from_node.major_region || to_node.major_region {
-		return .Canyon
+		if from_node.kind != .Gateway && to_node.kind != .Gateway {
+			return .Canyon
+		}
+	}
+	if roll < 0.10 {
+		return .Worm_Path
+	}
+	if roll < 0.16 {
+		return .Collapsed_Corridor
 	}
 	return .Tunnel
+}
+
+cave_network_node_prefers_flooded_route :: proc(node: CaveNetworkNode) -> bool {
+	return(
+		node.role == .Water_Linked_Region ||
+		node.kind == .Underground_Lake ||
+		node.kind == .River_Junction \
+	)
+}
+
+cave_network_edge_kind_roll :: proc(from_node_id, to_node_id: FeatureID) -> f32 {
+	h := feature_grid_hash_combine(u64(from_node_id), CAVE_NETWORK_EDGE_KIND_SALT)
+	h = feature_grid_hash_combine(h, u64(to_node_id))
+	return feature_grid_unit_f32(h, CAVE_NETWORK_EDGE_KIND_SALT)
 }
 
 cave_network_edge_should_exist :: proc(
@@ -512,6 +691,16 @@ cave_region_role_requires_connectivity :: proc(role: CaveRegionRole) -> bool {
 }
 
 cave_anchor_kind_from_node :: proc(node: CaveNetworkNode) -> CaveAnchorKind {
+	if node.owner.y >= 0 {
+		if node.kind == .Vertical_Shaft {
+			return .Sinkhole
+		}
+		roll := feature_grid_unit_f32(u64(node.id), CAVE_NETWORK_SURFACE_ANCHOR_SALT)
+		if roll < CAVE_NETWORK_SURFACE_CAVE_MOUTH_ROLL_MAX {
+			return .Cave_Mouth
+		}
+		return .Sinkhole
+	}
 	if node.kind == .Magma_Pocket {
 		return .Magma_Vent
 	}
@@ -536,6 +725,14 @@ cave_anchor_kind_from_node :: proc(node: CaveNetworkNode) -> CaveAnchorKind {
 cave_node_should_emit_anchor :: proc(node: CaveNetworkNode) -> bool {
 	if node.role == .Sealed_Secret {
 		return false
+	}
+	if node.owner.y >= 0 {
+		roll := feature_grid_unit_f32(u64(node.id), CAVE_NETWORK_SURFACE_ANCHOR_SALT)
+		return(
+			node.major_region ||
+			node.kind == .Vertical_Shaft ||
+			roll < CAVE_NETWORK_SURFACE_ANCHOR_EMIT_ROLL_MAX \
+		)
 	}
 	return node.major_region || node.kind == .Vertical_Shaft || node.kind == .Magma_Pocket
 }
@@ -604,13 +801,16 @@ cave_network_debug_surface_sample_from_region :: proc(
 
 	for i := u32(0); i < region.cave_network_edge_count; i += 1 {
 		edge := region.cave_network_edges[i]
-		distance := hydrology_distance_to_segment_2(
-			x,
-			z,
-			edge.from_x,
-			edge.from_z,
-			edge.to_x,
-			edge.to_z,
+		distance := math.min(
+			hydrology_distance_to_segment_2(
+				x,
+				z,
+				edge.from_x,
+				edge.from_z,
+				edge.bend_x,
+				edge.bend_z,
+			),
+			hydrology_distance_to_segment_2(x, z, edge.bend_x, edge.bend_z, edge.to_x, edge.to_z),
 		)
 		influence := cave_network_debug_surface_influence(
 			distance,
@@ -697,11 +897,210 @@ when ODIN_DEBUG {
 			owner,
 			{x = owner.x + 1, y = owner.y, z = owner.z},
 		)
+		neighbor_node := cave_network_node_from_owner(
+			key,
+			{x = owner.x + 1, y = owner.y, z = owner.z},
+		)
 		log.assert(edge.from_node_id == node.id, "Cave Network edge must keep source node ID")
+		log.assert(
+			edge.from_biome_id == node.biome_id,
+			"Cave Network edge must keep source subterranean biome ID",
+		)
+		log.assert(
+			edge.to_biome_id == neighbor_node.biome_id,
+			"Cave Network edge must keep target subterranean biome ID",
+		)
 		log.assert(edge.radius_blocks > 0, "Cave Network edge radius must be positive")
 		if node.major_region {
 			log.assert(exists, "major Cave Network node must emit a guaranteed edge")
 		}
+		dry_connector_kind := cave_network_node_kind_select(
+			.Fungal_Vaults,
+			.Connector,
+			{},
+			{},
+			0.5,
+		)
+		water_connector_kind := cave_network_node_kind_select(
+			.Fungal_Vaults,
+			.Connector,
+			{},
+			{channel_influence = 0.4},
+			0.5,
+		)
+		log.assert(
+			dry_connector_kind == .Gateway,
+			"dry Cave Network connectors should become biome gateways, not river junctions",
+		)
+		log.assert(
+			water_connector_kind == .River_Junction,
+			"water-influenced Cave Network connectors should remain river junctions",
+		)
+		log.assert(
+			CAVE_NETWORK_SURFACE_ANCHOR_EMIT_ROLL_MAX >= 0.40 &&
+			CAVE_NETWORK_SURFACE_ANCHOR_EMIT_ROLL_MAX < CAVE_NETWORK_SURFACE_CAVE_MOUTH_ROLL_MAX,
+			"surface Cave Network anchors should stay sparse while Cave Mouth bias is tuned separately",
+		)
+		log.assert(
+			CAVE_NETWORK_SURFACE_CAVE_MOUTH_ROLL_MAX > 0.5 &&
+			CAVE_NETWORK_SURFACE_CAVE_MOUTH_ROLL_MAX < 0.75,
+			"surface Cave Network anchors should bias toward cave mouths without eliminating sinkholes",
+		)
+		gateway_from := CaveNetworkNode {
+			id                       = FeatureID(0x501),
+			kind                     = .Biome_Hub,
+			role                     = .Major_Region,
+			biome_id                 = .Fungal_Vaults,
+			connection_radius_blocks = 12,
+			major_region             = true,
+		}
+		gateway_to := CaveNetworkNode {
+			id                       = FeatureID(0x502),
+			kind                     = .Gateway,
+			role                     = .Connector,
+			biome_id                 = .Fungal_Vaults,
+			connection_radius_blocks = 7,
+			x                        = 64,
+		}
+		log.assert(
+			cave_network_edge_kind_select(gateway_from, gateway_to) != .Canyon,
+			"dry Cave Network gateways should not force canyon passages from major rooms",
+		)
+		log.assert(
+			cave_network_edge_kind_select(gateway_from, gateway_to) != .Tunnel,
+			"dry Cave Network gateways should use irregular transition passages",
+		)
+		water_from := CaveNetworkNode {
+			id                       = FeatureID(0x701),
+			kind                     = .Underground_Lake,
+			role                     = .Water_Linked_Region,
+			biome_id                 = .Buried_Aquifer_Caves,
+			connection_radius_blocks = 10,
+			major_region             = true,
+		}
+		water_to := CaveNetworkNode {
+			id                       = FeatureID(0x702),
+			kind                     = .River_Junction,
+			role                     = .Water_Linked_Region,
+			biome_id                 = .Buried_Aquifer_Caves,
+			connection_radius_blocks = 8,
+			x                        = 64,
+			major_region             = true,
+		}
+		log.assert(
+			cave_network_edge_kind_select(water_from, water_to) == .Flooded_Passage,
+			"water-to-water Cave Network routes should stay flooded",
+		)
+		mixed_non_flooded_seen := false
+		for candidate := u64(1); candidate < 96; candidate += 1 {
+			water_from.id = FeatureID(candidate)
+			kind := cave_network_edge_kind_select(water_from, gateway_to)
+			if kind == .Worm_Path || kind == .Collapsed_Corridor {
+				mixed_non_flooded_seen = true
+				break
+			}
+		}
+		log.assert(
+			mixed_non_flooded_seen,
+			"mixed water/dry Cave Network routes should not all collapse to flooded passages",
+		)
+		log.assert(
+			cave_network_edge_kind_roll(FeatureID(1), FeatureID(2)) !=
+			cave_network_edge_kind_roll(FeatureID(2), FeatureID(1)),
+			"Cave Network ordinary edge kind roll should preserve edge direction entropy",
+		)
+		ordinary_from := CaveNetworkNode {
+			id                       = FeatureID(10),
+			kind                     = .Chamber,
+			role                     = .Pocket,
+			biome_id                 = .Fungal_Vaults,
+			connection_radius_blocks = 5,
+		}
+		ordinary_to := CaveNetworkNode {
+			id                       = FeatureID(11),
+			kind                     = .Chamber,
+			role                     = .Pocket,
+			biome_id                 = .Fungal_Vaults,
+			connection_radius_blocks = 5,
+			x                        = 64,
+		}
+		worm_seen := false
+		collapsed_seen := false
+		for candidate := u64(1); candidate < 96; candidate += 1 {
+			ordinary_from.id = FeatureID(candidate)
+			kind := cave_network_edge_kind_select(ordinary_from, ordinary_to)
+			if kind == .Worm_Path {
+				worm_seen = true
+			}
+			if kind == .Collapsed_Corridor {
+				collapsed_seen = true
+			}
+		}
+		log.assert(
+			worm_seen && collapsed_seen,
+			"Cave Network ordinary edge selection should make worm and collapsed passages reachable",
+		)
+		log.assert(
+			cave_anchor_surface_radius_adjust_blocks(.Cave_Mouth, 1.0) >
+			cave_anchor_surface_radius_adjust_blocks(.Cave_Mouth, 0.0),
+			"Cave Mouth anchor radius profile should support wider and smaller openings",
+		)
+		log.assert(
+			cave_anchor_surface_radius_adjust_blocks(.Sinkhole, 1.0) >
+			cave_anchor_surface_radius_adjust_blocks(.Sinkhole, 0.0),
+			"Sinkhole anchor radius profile should support wider and smaller throats",
+		)
+		anchor_radius_node := CaveNetworkNode {
+			id                       = FeatureID(0xabc),
+			kind                     = .Chamber,
+			role                     = .Pocket,
+			biome_id                 = .Fungal_Vaults,
+			radius_blocks            = 16,
+			connection_radius_blocks = 6,
+		}
+		log.assert(
+			cave_anchor_influence_radius_from_node(
+				anchor_radius_node,
+				.Subterranean_Biome_Gateway,
+			) ==
+			math.max(f32(8), anchor_radius_node.radius_blocks * 0.55),
+			"non-surface cave anchors should keep the base influence radius",
+		)
+		mouth_offset_node := CaveNetworkNode {
+			id = FeatureID(0xabe),
+			owner = {x = 0, y = -1, z = 0},
+			kind = .Entrance,
+			role = .Pocket,
+			biome_id = .Fungal_Vaults,
+			x = 16,
+			y = -72,
+			z = 16,
+			radius_blocks = 12,
+			connection_radius_blocks = 5,
+		}
+		mouth_offset_anchor := cave_anchor_from_node(key, mouth_offset_node)
+		mouth_offset_dx := mouth_offset_anchor.x - mouth_offset_node.x
+		mouth_offset_dz := mouth_offset_anchor.z - mouth_offset_node.z
+		log.assert(
+			mouth_offset_anchor.kind == .Cave_Mouth &&
+			mouth_offset_dx * mouth_offset_dx + mouth_offset_dz * mouth_offset_dz > 4,
+			"Cave Mouth anchors should offset laterally from their node instead of opening straight above it",
+		)
+		sinkhole_offset_node := mouth_offset_node
+		sinkhole_offset_node.id = FeatureID(0xabf)
+		sinkhole_offset_node.owner = {
+			x = 0,
+			y = 0,
+			z = 0,
+		}
+		sinkhole_offset_node.kind = .Vertical_Shaft
+		sinkhole_offset_anchor := cave_anchor_from_node(key, sinkhole_offset_node)
+		log.assert(
+			sinkhole_offset_anchor.kind == .Sinkhole &&
+			sinkhole_offset_anchor.x == sinkhole_offset_node.x &&
+			sinkhole_offset_anchor.z == sinkhole_offset_node.z,
+			"Sinkhole anchors should keep vertical breach alignment while Cave Mouths offset laterally",
+		)
 
 		anchor := cave_anchor_from_node(key, node)
 		log.assert(anchor.id != FeatureID(0), "Cave Anchor ID must be non-zero")

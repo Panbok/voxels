@@ -6,6 +6,7 @@ import math "core:math"
 import bits "core:math/bits"
 import "core:mem"
 import mem_tlsf "core:mem/tlsf"
+import "core:sync"
 import time "core:time"
 import biomes "world:biomes"
 
@@ -45,6 +46,20 @@ StreamingState :: struct {
 	streaming_target_count:      u32,
 	next_streaming_target_index: u32,
 	next_mesh_scan_index:        u32,
+}
+
+TerrainGenerationRegionCacheSlot :: struct {
+	valid:     bool,
+	key:       biomes.FeatureGridKey,
+	coord:     biomes.GenerationRegionCoord,
+	region:    biomes.GenerationRegion,
+	last_used: u64,
+}
+
+TerrainGenerationRegionCache :: struct {
+	mutex: sync.Mutex,
+	slots: [TERRAIN_GENERATION_REGION_CACHE_CAPACITY]TerrainGenerationRegionCacheSlot,
+	clock: u64,
 }
 
 //////////////////////////////////////
@@ -92,31 +107,32 @@ InitConfig :: struct {
 
 state := struct {
 	// Memory
-	persistent_allocator:           mem.Allocator,
-	chunk_block_storage_buffer:     []u8,
-	chunk_block_storage_tlsf:       mem_tlsf.Allocator,
-	chunk_block_storage_allocator:  mem.Allocator,
-	chunk_mesh_row_cache_buffer:    []u8,
-	chunk_mesh_row_cache_tlsf:      mem_tlsf.Allocator,
-	chunk_mesh_row_cache_allocator: mem.Allocator,
+	persistent_allocator:            mem.Allocator,
+	chunk_block_storage_buffer:      []u8,
+	chunk_block_storage_tlsf:        mem_tlsf.Allocator,
+	chunk_block_storage_allocator:   mem.Allocator,
+	chunk_mesh_row_cache_buffer:     []u8,
+	chunk_mesh_row_cache_tlsf:       mem_tlsf.Allocator,
+	chunk_mesh_row_cache_allocator:  mem.Allocator,
 
 	// Callbacks
-	generation_request:             GenerationRequestProc,
-	generation_poll_results:        GenerationPollResultsProc,
-	mesh_request:                   MeshRequestProc,
-	mesh_poll_results:              MeshPollResultsProc,
-	mesh_release_result:            MeshReleaseResultProc,
-	chunk_mesh_upload:              ChunkMeshUploadProc,
-	chunk_geometry_release:         ChunkGeometryReleaseProc,
+	generation_request:              GenerationRequestProc,
+	generation_poll_results:         GenerationPollResultsProc,
+	mesh_request:                    MeshRequestProc,
+	mesh_poll_results:               MeshPollResultsProc,
+	mesh_release_result:             MeshReleaseResultProc,
+	chunk_mesh_upload:               ChunkMeshUploadProc,
+	chunk_geometry_release:          ChunkGeometryReleaseProc,
 
 	// Storage
-	chunk_store:                    ChunkStore,
+	chunk_store:                     ChunkStore,
 
 	// Streaming
-	using streaming:                StreamingState,
+	using streaming:                 StreamingState,
+	terrain_generation_region_cache: TerrainGenerationRegionCache,
 
 	// State
-	initialized:                    bool,
+	initialized:                     bool,
 }{}
 
 
@@ -148,6 +164,7 @@ init :: proc(config: InitConfig) {
 	state.mesh_release_result = config.mesh_release_result
 	state.chunk_mesh_upload = config.chunk_mesh_upload
 	state.chunk_geometry_release = config.chunk_geometry_release
+	state.terrain_generation_region_cache = {}
 
 	when ODIN_DEBUG {
 		biomes.debug_contract_checks_run()
@@ -276,7 +293,7 @@ DEBUG_CHUNK_SOLID_Z1 :: 24
 
 // This must exceed raw block bytes for CHUNK_STORE_CAPACITY because TLSF and #soa
 // allocations need their own bookkeeping/alignment headroom.
-CHUNK_BLOCK_STORAGE_POOL_BYTES :: 192 * mem.Megabyte
+CHUNK_BLOCK_STORAGE_POOL_BYTES :: 320 * mem.Megabyte
 CHUNK_MESH_ROW_CACHE_POOL_BYTES :: 128 * mem.Megabyte
 
 //////////////////////////////////////
@@ -290,17 +307,32 @@ CHUNK_MESH_BUDGET_PER_FRAME :: 2
 // Streaming Constants
 /////////////////////////////////////
 
-CHUNK_STREAMING_RADIUS_XZ :: 5
+CHUNK_STREAMING_RADIUS_XZ :: 3
+CHUNK_STREAMING_NARROW_LAYER_RADIUS_XZ :: 2
+CHUNK_STREAMING_RADIUS_Y_DOWN :: 2
+CHUNK_STREAMING_RADIUS_Y_UP :: 1
 CHUNK_UNLOAD_RADIUS_XZ :: CHUNK_STREAMING_RADIUS_XZ + 1
+CHUNK_UNLOAD_RADIUS_Y_DOWN :: CHUNK_STREAMING_RADIUS_Y_DOWN
+CHUNK_UNLOAD_RADIUS_Y_UP :: CHUNK_STREAMING_RADIUS_Y_UP
+CHUNK_STREAMING_LAYER_COUNT :: CHUNK_STREAMING_RADIUS_Y_DOWN + CHUNK_STREAMING_RADIUS_Y_UP + 1
 CHUNK_STREAMING_TARGET_CAPACITY ::
-	(CHUNK_STREAMING_RADIUS_XZ * 2 + 1) * (CHUNK_STREAMING_RADIUS_XZ * 2 + 1)
-CHUNK_UNLOAD_CAPACITY :: (CHUNK_UNLOAD_RADIUS_XZ * 2 + 1) * (CHUNK_UNLOAD_RADIUS_XZ * 2 + 1)
+	(CHUNK_STREAMING_RADIUS_XZ * 2 + 1) *
+	(CHUNK_STREAMING_RADIUS_XZ * 2 + 1) *
+	CHUNK_STREAMING_LAYER_COUNT
+CHUNK_UNLOAD_CAPACITY ::
+	(CHUNK_UNLOAD_RADIUS_XZ * 2 + 1) *
+	(CHUNK_UNLOAD_RADIUS_XZ * 2 + 1) *
+	(CHUNK_UNLOAD_RADIUS_Y_DOWN + CHUNK_UNLOAD_RADIUS_Y_UP + 1)
 #assert(CHUNK_UNLOAD_RADIUS_XZ >= CHUNK_STREAMING_RADIUS_XZ)
+#assert(CHUNK_UNLOAD_RADIUS_Y_DOWN >= CHUNK_STREAMING_RADIUS_Y_DOWN)
+#assert(CHUNK_UNLOAD_RADIUS_Y_UP >= CHUNK_STREAMING_RADIUS_Y_UP)
 
 // Until chunk/geometry eviction exists, store capacity must stay within the fixed arenas.
-CHUNK_STORE_CAPACITY :: 256
+CHUNK_STORE_CAPACITY :: 384
 #assert(CHUNK_STREAMING_TARGET_CAPACITY > 0)
 #assert(CHUNK_STORE_CAPACITY >= CHUNK_UNLOAD_CAPACITY)
+
+TERRAIN_GENERATION_REGION_CACHE_CAPACITY :: 16
 
 //////////////////////////////////////
 // Chunk Mesh Job Constants
@@ -1333,7 +1365,7 @@ terrain_binary_neighbor_boundary_solid :: proc(
 
 		neighbor_snapshot, neighbor_ok := neighbor.?
 		if !neighbor_ok {
-			return false
+			return true
 		}
 
 		return chunk_voxel_view_is_solid_local(neighbor_snapshot.voxel_view, x, y, z)
@@ -1390,8 +1422,179 @@ terrain_binary_face_mask_debug_variants_add :: proc(
 	}
 }
 
+terrain_binary_face_block_coord :: proc(axis, row_index, axis_coord: u32) -> (x, y, z: u32) {
+	switch axis {
+	case 0:
+		return axis_coord, row_index % CHUNK_BLOCK_LENGTH, row_index / CHUNK_BLOCK_LENGTH
+	case 1:
+		return row_index % CHUNK_BLOCK_LENGTH, axis_coord, row_index / CHUNK_BLOCK_LENGTH
+	case 2:
+		return row_index % CHUNK_BLOCK_LENGTH, row_index / CHUNK_BLOCK_LENGTH, axis_coord
+	}
+
+	log.assertf(false, "unhandled binary greedy axis: %d", axis)
+	return
+}
+
+terrain_binary_cave_face_material_index :: proc(normal_id, material_idx: u32) -> u32 {
+	if material_idx == TERRAIN_AQUIFER_WALL_MAT_ID {
+		if normal_id == 2 {
+			return TERRAIN_WET_MARSH_MAT_ID
+		}
+		if normal_id == 3 {
+			return TERRAIN_STONE_MAT_ID
+		}
+	}
+	if material_idx == TERRAIN_CRYSTAL_MAT_ID && normal_id == 2 {
+		return TERRAIN_STONE_MAT_ID
+	}
+	return material_idx
+}
+
+terrain_binary_shoreline_cap_face_material_index :: proc(
+	view: world_async.ChunkVoxelView,
+	neighbor_snapshots: Maybe(world_async.ChunkMeshNeighborSnapshots),
+	normal_id, axis, row_index, axis_coord, material_idx: u32,
+) -> u32 {
+	if material_idx != TERRAIN_GRASS_MAT_ID || normal_id == 3 {
+		return material_idx
+	}
+
+	x, y, z := terrain_binary_face_block_coord(axis, row_index, axis_coord)
+	below_material_idx := material_idx
+	if y > 0 {
+		below_index := chunk_block_index(x, y - 1, z)
+		if view.blocks.occupancy[below_index] != .Solid {
+			return material_idx
+		}
+		below_material_idx = terrain_material_palette_index(view.blocks.material_id[below_index])
+	} else {
+		neighbors, neighbors_ok := neighbor_snapshots.?
+		if !neighbors_ok {
+			return material_idx
+		}
+		minus_y, minus_y_ok := neighbors.minus_y.?
+		if !minus_y_ok {
+			return material_idx
+		}
+		below_index := chunk_block_index(x, CHUNK_BLOCK_LOCAL_MAX, z)
+		if minus_y.voxel_view.blocks.occupancy[below_index] != .Solid {
+			return material_idx
+		}
+		below_material_idx = terrain_material_palette_index(
+			minus_y.voxel_view.blocks.material_id[below_index],
+		)
+	}
+
+	if below_material_idx == TERRAIN_WET_MARSH_MAT_ID {
+		return below_material_idx
+	}
+	return material_idx
+}
+
+terrain_binary_face_mask_material_variants_add :: proc(
+	scratch: ^TerrainBinaryGreedyScratch,
+	view: world_async.ChunkVoxelView,
+	neighbor_snapshots: Maybe(world_async.ChunkMeshNeighborSnapshots),
+	normal_id, axis, row_index, material_idx, v, u: u32,
+	exposed_material_bits: u64,
+) {
+	if exposed_material_bits == 0 {
+		return
+	}
+	cave_material_idx := terrain_binary_cave_face_material_index(normal_id, material_idx)
+	if cave_material_idx != material_idx {
+		terrain_binary_face_mask_debug_variants_add(
+			scratch,
+			axis,
+			row_index,
+			cave_material_idx,
+			v,
+			u,
+			exposed_material_bits,
+		)
+		return
+	}
+	if material_idx != TERRAIN_GRASS_MAT_ID || normal_id == 3 {
+		terrain_binary_face_mask_debug_variants_add(
+			scratch,
+			axis,
+			row_index,
+			material_idx,
+			v,
+			u,
+			exposed_material_bits,
+		)
+		return
+	}
+
+	if normal_id == 2 && axis == 1 {
+		wet_below_bits :=
+			(scratch.material_rows[1][TERRAIN_WET_MARSH_MAT_ID][row_index] << 1) &
+			exposed_material_bits
+		if wet_below_bits == 0 {
+			terrain_binary_face_mask_debug_variants_add(
+				scratch,
+				axis,
+				row_index,
+				material_idx,
+				v,
+				u,
+				exposed_material_bits,
+			)
+			return
+		}
+		grass_bits := exposed_material_bits & ~wet_below_bits
+		terrain_binary_face_mask_debug_variants_add(
+			scratch,
+			axis,
+			row_index,
+			material_idx,
+			v,
+			u,
+			grass_bits,
+		)
+		terrain_binary_face_mask_debug_variants_add(
+			scratch,
+			axis,
+			row_index,
+			TERRAIN_WET_MARSH_MAT_ID,
+			v,
+			u,
+			wet_below_bits,
+		)
+		return
+	}
+
+	remaining_bits := exposed_material_bits
+	for remaining_bits != 0 {
+		axis_coord := u32(bits.trailing_zeros(remaining_bits))
+		face_bit := u64(1) << axis_coord
+		face_material_idx := terrain_binary_shoreline_cap_face_material_index(
+			view,
+			neighbor_snapshots,
+			normal_id,
+			axis,
+			row_index,
+			axis_coord,
+			material_idx,
+		)
+		terrain_binary_face_mask_debug_variants_add(
+			scratch,
+			axis,
+			row_index,
+			face_material_idx,
+			v,
+			u,
+			face_bit,
+		)
+		remaining_bits &~= face_bit
+	}
+}
+
 terrain_binary_face_masks_build :: proc(
 	scratch: ^TerrainBinaryGreedyScratch,
+	view: world_async.ChunkVoxelView,
 	normal_id: u32,
 	boundary_policy: world_async.ChunkMeshBoundaryPolicy,
 	neighbor_snapshots: Maybe(world_async.ChunkMeshNeighborSnapshots) = nil,
@@ -1438,8 +1641,11 @@ terrain_binary_face_masks_build :: proc(
 				material_idx := u32(bits.trailing_zeros(material_mask))
 				material_row := scratch.material_rows[axis][material_idx][row_index]
 				exposed_material_bits := exposed_row & material_row
-				terrain_binary_face_mask_debug_variants_add(
+				terrain_binary_face_mask_material_variants_add(
 					scratch,
+					view,
+					neighbor_snapshots,
+					normal_id,
 					axis,
 					row_index,
 					material_idx,
@@ -1456,6 +1662,7 @@ terrain_binary_face_masks_build :: proc(
 terrain_binary_face_masks_build_from_cache :: proc(
 	scratch: ^TerrainBinaryGreedyScratch,
 	cache: ^world_async.ChunkBinaryGreedyRowCache,
+	view: world_async.ChunkVoxelView,
 	normal_id: u32,
 	boundary_policy: world_async.ChunkMeshBoundaryPolicy,
 	neighbor_snapshots: Maybe(world_async.ChunkMeshNeighborSnapshots) = nil,
@@ -1502,8 +1709,11 @@ terrain_binary_face_masks_build_from_cache :: proc(
 				material_idx := u32(bits.trailing_zeros(material_mask))
 				material_row := cache.material_rows[axis][material_idx][row_index]
 				exposed_material_bits := exposed_row & material_row
-				terrain_binary_face_mask_debug_variants_add(
+				terrain_binary_face_mask_material_variants_add(
 					scratch,
+					view,
+					neighbor_snapshots,
+					normal_id,
 					axis,
 					row_index,
 					material_idx,
@@ -1750,7 +1960,13 @@ chunk_voxel_view_count_binary_greedy_faces :: proc(
 	face_count: u32
 
 	for normal_id := u32(0); normal_id < 6; normal_id += 1 {
-		terrain_binary_face_masks_build(scratch, normal_id, boundary_policy, neighbor_snapshots)
+		terrain_binary_face_masks_build(
+			scratch,
+			view,
+			normal_id,
+			boundary_policy,
+			neighbor_snapshots,
+		)
 		terrain_binary_face_masks_process(
 			scratch,
 			normal_id,
@@ -1776,7 +1992,13 @@ chunk_voxel_view_build_binary_greedy_mesh :: proc(
 	indices: []u32
 	face_count: u32
 	for normal_id := u32(0); normal_id < 6; normal_id += 1 {
-		terrain_binary_face_masks_build(scratch, normal_id, boundary_policy, neighbor_snapshots)
+		terrain_binary_face_masks_build(
+			scratch,
+			view,
+			normal_id,
+			boundary_policy,
+			neighbor_snapshots,
+		)
 		terrain_binary_face_masks_process(
 			scratch,
 			normal_id,
@@ -1825,7 +2047,13 @@ chunk_voxel_view_build_binary_greedy_mesh :: proc(
 
 	face_cursor: u32
 	for normal_id := u32(0); normal_id < 6; normal_id += 1 {
-		terrain_binary_face_masks_build(scratch, normal_id, boundary_policy, neighbor_snapshots)
+		terrain_binary_face_masks_build(
+			scratch,
+			view,
+			normal_id,
+			boundary_policy,
+			neighbor_snapshots,
+		)
 		terrain_binary_face_masks_process(
 			scratch,
 			normal_id,
@@ -1858,7 +2086,13 @@ chunk_voxel_view_count_binary_greedy_faces_in_bounds :: proc(
 	face_count: u32
 
 	for normal_id := u32(0); normal_id < 6; normal_id += 1 {
-		terrain_binary_face_masks_build(scratch, normal_id, boundary_policy, neighbor_snapshots)
+		terrain_binary_face_masks_build(
+			scratch,
+			view,
+			normal_id,
+			boundary_policy,
+			neighbor_snapshots,
+		)
 		terrain_binary_face_masks_process_bounds(
 			scratch,
 			normal_id,
@@ -1930,7 +2164,13 @@ chunk_voxel_view_build_binary_greedy_mesh_in_bounds :: proc(
 	terrain_binary_axis_rows_build_all(scratch, view)
 	face_cursor: u32
 	for normal_id := u32(0); normal_id < 6; normal_id += 1 {
-		terrain_binary_face_masks_build(scratch, normal_id, boundary_policy, neighbor_snapshots)
+		terrain_binary_face_masks_build(
+			scratch,
+			view,
+			normal_id,
+			boundary_policy,
+			neighbor_snapshots,
+		)
 		terrain_binary_face_masks_process_bounds(
 			scratch,
 			normal_id,
@@ -1967,6 +2207,7 @@ chunk_binary_row_cache_build_binary_greedy_mesh :: proc(
 		terrain_binary_face_masks_build_from_cache(
 			scratch,
 			cache,
+			view,
 			normal_id,
 			boundary_policy,
 			neighbor_snapshots,
@@ -2022,6 +2263,7 @@ chunk_binary_row_cache_build_binary_greedy_mesh :: proc(
 		terrain_binary_face_masks_build_from_cache(
 			scratch,
 			cache,
+			view,
 			normal_id,
 			boundary_policy,
 			neighbor_snapshots,
@@ -2061,6 +2303,7 @@ chunk_binary_row_cache_count_binary_greedy_faces_in_bounds :: proc(
 		terrain_binary_face_masks_build_from_cache(
 			scratch,
 			cache,
+			view,
 			normal_id,
 			boundary_policy,
 			neighbor_snapshots,
@@ -2139,6 +2382,7 @@ chunk_binary_row_cache_build_binary_greedy_mesh_in_bounds :: proc(
 		terrain_binary_face_masks_build_from_cache(
 			scratch,
 			cache,
+			view,
 			normal_id,
 			boundary_policy,
 			neighbor_snapshots,
@@ -3237,11 +3481,7 @@ mesh_request_budgeted :: proc() -> u32 {
 			continue
 		}
 		if state.streaming_target_count > 0 &&
-		   !streaming_coord_inside_square_radius(
-				   state.streaming_center_coord,
-				   chunk.coord,
-				   CHUNK_STREAMING_RADIUS_XZ,
-			   ) {
+		   !streaming_coord_inside_window(state.streaming_center_coord, chunk.coord, 0) {
 			continue
 		}
 		if !streaming_mesh_dependencies_ready(chunk.coord) {
@@ -3349,26 +3589,40 @@ streaming_center_from_observer :: proc(observer_world_position: Vec3) -> world_a
 	return center
 }
 
-streaming_coord_inside_square_radius :: proc(
+streaming_layer_radius_xz_from_dy :: proc(dy: i32) -> i32 {
+	if dy == 0 || dy == -1 {
+		return i32(CHUNK_STREAMING_RADIUS_XZ)
+	}
+	return i32(CHUNK_STREAMING_NARROW_LAYER_RADIUS_XZ)
+}
+
+streaming_coord_inside_window :: proc(
 	center, coord: world_async.ChunkCoord,
-	radius: u32,
+	unload_padding: i32,
 ) -> bool {
 	dx := coord.x - center.x
+	dy := coord.y - center.y
 	dz := coord.z - center.z
-	r := i32(radius)
-
-	return coord.y == center.y && dx >= -r && dx <= r && dz >= -r && dz <= r
+	if dy < -i32(CHUNK_STREAMING_RADIUS_Y_DOWN) || dy > i32(CHUNK_STREAMING_RADIUS_Y_UP) {
+		return false
+	}
+	radius := streaming_layer_radius_xz_from_dy(dy) + unload_padding
+	return abs(dx) <= radius && abs(dz) <= radius
 }
 
 streaming_target_less :: proc(center, a, b: world_async.ChunkCoord) -> bool {
 	adx := a.x - center.x
+	ady := a.y - center.y
 	adz := a.z - center.z
 	bdx := b.x - center.x
+	bdy := b.y - center.y
 	bdz := b.z - center.z
 
+	if abs(ady) != abs(bdy) {return abs(ady) < abs(bdy)}
 	ad := adx * adx + adz * adz
 	bd := bdx * bdx + bdz * bdz
 	if ad != bd {return ad < bd}
+	if a.y != b.y {return a.y < b.y}
 	if a.z != b.z {return a.z < b.z}
 	return a.x < b.x
 }
@@ -3377,11 +3631,7 @@ streaming_evict_outside_unload_radius :: proc() -> u32 {
 	evicted_count: u32
 	for i := u32(0); i < state.chunk_store.chunk_count; {
 		chunk := chunk_store_get_by_index(i)
-		if streaming_coord_inside_square_radius(
-			state.streaming_center_coord,
-			chunk.coord,
-			CHUNK_UNLOAD_RADIUS_XZ,
-		) {
+		if streaming_coord_inside_window(state.streaming_center_coord, chunk.coord, 1) {
 			i += 1
 			continue
 		}
@@ -3402,38 +3652,48 @@ streaming_evict_outside_unload_radius :: proc() -> u32 {
 }
 
 streaming_mesh_dependency_ready :: proc(coord: world_async.ChunkCoord) -> bool {
-	if !streaming_coord_inside_square_radius(
-		state.streaming_center_coord,
-		coord,
-		CHUNK_STREAMING_RADIUS_XZ,
-	) {
+	if !streaming_coord_inside_window(state.streaming_center_coord, coord, 0) {
 		return true
 	}
 	return chunk_store_coord_is_generated(coord)
 }
 
 streaming_mesh_dependencies_ready :: proc(coord: world_async.ChunkCoord) -> bool {
-	return(
-		streaming_mesh_dependency_ready(world_async.ChunkCoord{coord.x + 1, coord.y, coord.z}) &&
-		streaming_mesh_dependency_ready(world_async.ChunkCoord{coord.x - 1, coord.y, coord.z}) &&
-		streaming_mesh_dependency_ready(world_async.ChunkCoord{coord.x, coord.y, coord.z + 1}) &&
-		streaming_mesh_dependency_ready(world_async.ChunkCoord{coord.x, coord.y, coord.z - 1}) \
-	)
+	if !streaming_mesh_dependency_ready(world_async.ChunkCoord{coord.x + 1, coord.y, coord.z}) ||
+	   !streaming_mesh_dependency_ready(world_async.ChunkCoord{coord.x - 1, coord.y, coord.z}) ||
+	   !streaming_mesh_dependency_ready(world_async.ChunkCoord{coord.x, coord.y, coord.z + 1}) ||
+	   !streaming_mesh_dependency_ready(world_async.ChunkCoord{coord.x, coord.y, coord.z - 1}) {
+		return false
+	}
+
+	if coord.y < state.streaming_center_coord.y &&
+	   !streaming_mesh_dependency_ready(world_async.ChunkCoord{coord.x, coord.y + 1, coord.z}) {
+		return false
+	}
+	if coord.y > state.streaming_center_coord.y &&
+	   !streaming_mesh_dependency_ready(world_async.ChunkCoord{coord.x, coord.y - 1, coord.z}) {
+		return false
+	}
+	return true
 }
 
 streaming_window_rebuild_targets :: proc(center: world_async.ChunkCoord) {
 	state.streaming_center_coord = center
 	state.streaming_target_count = 0
 
-	radius := i32(CHUNK_STREAMING_RADIUS_XZ)
-	for dz := -radius; dz <= radius; dz += 1 {
-		for dx := -radius; dx <= radius; dx += 1 {
-			state.streaming_targets[state.streaming_target_count] = {
-				center.x + dx,
-				0,
-				center.z + dz,
+	for dy := -i32(CHUNK_STREAMING_RADIUS_Y_DOWN);
+	    dy <= i32(CHUNK_STREAMING_RADIUS_Y_UP);
+	    dy += 1 {
+		radius := streaming_layer_radius_xz_from_dy(dy)
+		for dz := -radius; dz <= radius; dz += 1 {
+			for dx := -radius; dx <= radius; dx += 1 {
+				state.streaming_targets[state.streaming_target_count] = {
+					center.x + dx,
+					center.y + dy,
+					center.z + dz,
+				}
+				state.streaming_target_count += 1
 			}
-			state.streaming_target_count += 1
 		}
 	}
 
@@ -3474,8 +3734,11 @@ TERRAIN_PACK_MATERIAL_MASK :: 0xFF
 TERRAIN_GRASS_MAT_ID :: 0
 TERRAIN_DIRT_MAT_ID :: 1
 TERRAIN_STONE_MAT_ID :: 2
-TERRAIN_WET_MARSH_MAT_ID :: 4
+TERRAIN_WET_MARSH_MAT_ID :: 3
+TERRAIN_WATER_MAT_ID :: 4
 TERRAIN_CORRUPTED_ASH_MAT_ID :: 5
+TERRAIN_AQUIFER_WALL_MAT_ID :: 6
+TERRAIN_CRYSTAL_MAT_ID :: 7
 TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG :: u8(0x08)
 TERRAIN_CAVE_NETWORK_DEBUG_MATERIAL_FLAG :: u8(0x10)
 TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_HYDROLOGY :: u32(0x1)
@@ -3486,9 +3749,236 @@ TERRAIN_MATERIAL_FACE_VARIANT_COUNT :: 32
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == 8)
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == world_async.TERRAIN_MATERIAL_PALETTE_COUNT)
 #assert(TERRAIN_MATERIAL_FACE_VARIANT_COUNT == 32)
-TERRAIN_GENERATOR_VERSION :: u32(1)
+TERRAIN_GENERATOR_VERSION :: u32(2)
 TERRAIN_GRASS_CAP_BLOCK_DEPTH :: 4
 TERRAIN_DIRT_LAYER_BLOCK_DEPTH :: 4
+TERRAIN_SURFACE_MATERIAL_BLEND_SALT :: u64(0x475c91d2e03af86b)
+TERRAIN_SHORE_MATERIAL_BLEND_SALT :: u64(0xa65f9d2c8b7140e3)
+TERRAIN_SHORE_MATERIAL_DITHER_AMPLITUDE :: f32(0.25)
+TERRAIN_SHORE_CAP_THIN_BAND_FRACTION :: f32(0.56)
+TERRAIN_LOCAL_WATER_FILL_INFLUENCE_MIN :: f32(0.30)
+#assert(TERRAIN_SHORE_MATERIAL_DITHER_AMPLITUDE >= 0)
+#assert(TERRAIN_SHORE_MATERIAL_DITHER_AMPLITUDE <= 0.35)
+#assert(TERRAIN_SHORE_CAP_THIN_BAND_FRACTION > 0)
+#assert(TERRAIN_SHORE_CAP_THIN_BAND_FRACTION <= 1)
+#assert(TERRAIN_LOCAL_WATER_FILL_INFLUENCE_MIN > 0)
+#assert(TERRAIN_LOCAL_WATER_FILL_INFLUENCE_MIN < 0.35)
+TERRAIN_CAVE_ROUGHNESS_SALT :: u64(0x96b17e2d4c5f803a)
+TERRAIN_CAVE_DETAIL_SALT :: u64(0x2f68a915c7d34e0b)
+TERRAIN_CAVE_FIELD_SPAGHETTI_A_SALT :: u64(0x5b8124f7c90e63da)
+TERRAIN_CAVE_FIELD_SPAGHETTI_B_SALT :: u64(0x91c4ad6e2f58b037)
+TERRAIN_CAVE_FIELD_CHAMBER_SALT :: u64(0x3e74b6c15a9280fd)
+TERRAIN_CAVE_FIELD_DETAIL_SALT :: u64(0xce58f10ab739462d)
+TERRAIN_CAVE_VERTICAL_CUSHION_SALT :: u64(0x7a1df4836bc905e2)
+TERRAIN_CAVE_ROOM_DETAIL_SALT :: u64(0x29f6c14a87b35d02)
+TERRAIN_CAVE_PASSAGE_RIB_SALT :: u64(0x83d14f70ca56e92b)
+TERRAIN_CAVE_BRANCH_SALT :: u64(0xf2306de74a9c58b1)
+TERRAIN_CAVE_CURVE_SALT :: u64(0x4d9b7a52e168c03f)
+TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS :: #config(TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS, false)
+TERRAIN_SURFACE_HEIGHT_TOP_SOFT_START_BLOCKS :: f32(94)
+TERRAIN_SURFACE_HEIGHT_TOP_LIMIT_BLOCKS :: f32(118)
+TERRAIN_SURFACE_HEIGHT_BOTTOM_SOFT_START_BLOCKS :: f32(-78)
+TERRAIN_SURFACE_HEIGHT_BOTTOM_LIMIT_BLOCKS :: f32(-116)
+TERRAIN_CAVE_BOTTOM_CUSHION_START_BLOCKS :: f32(-124)
+TERRAIN_CAVE_BOTTOM_CUSHION_END_BLOCKS :: f32(-100)
+TERRAIN_CAVE_TOP_CUSHION_START_BLOCKS :: f32(106)
+TERRAIN_CAVE_TOP_CUSHION_END_BLOCKS :: f32(126)
+TERRAIN_CAVE_FIELD_SAMPLE_STEP_BLOCKS :: i32(12)
+TERRAIN_CAVE_FIELD_STAMP_CAPACITY_PER_CHUNK :: u32(18)
+TERRAIN_CAVE_FIELD_PATH_STAMP_RESERVE_PER_CHUNK :: u32(3)
+TERRAIN_CAVE_FIELD_OPEN_STRENGTH_MIN :: f32(0.54)
+TERRAIN_CAVE_FIELD_PATH_OPEN_STRENGTH_MIN :: f32(0.30)
+TERRAIN_CAVE_FIELD_PATH_LONG_AXIS_SCALE :: f32(1.28)
+TERRAIN_CAVE_FIELD_PATH_CROSS_AXIS_SCALE :: f32(0.78)
+TERRAIN_CAVE_FIELD_PATH_Y_SCALE :: f32(0.54)
+TERRAIN_CAVE_FIELD_PATH_SEGMENT_RADIUS_SCALE :: f32(0.62)
+TERRAIN_CAVE_FIELD_PATH_SEGMENT_HALF_LENGTH_SCALE :: f32(1.24)
+TERRAIN_CAVE_FIELD_PATH_ROUTE_VERTICAL_SCALE :: f32(0.55)
+TERRAIN_CAVE_FIELD_PATH_SELECTION_BIAS :: f32(1.18)
+TERRAIN_CAVE_FIELD_ROUTE_PATH_OPEN_STRENGTH_MIN :: f32(0.22)
+TERRAIN_CAVE_FIELD_ROUTE_PATH_DISTANCE_MARGIN_BLOCKS :: f32(6)
+TERRAIN_CAVE_FIELD_ROUTE_POCKET_DISTANCE_MARGIN_BLOCKS :: f32(16)
+TERRAIN_CAVE_FIELD_ROUTE_POCKET_ROOM_SCALE :: f32(0.64)
+TERRAIN_CAVE_FIELD_ROUTE_POCKET_THROAT_RADIUS_SCALE :: f32(0.46)
+TERRAIN_CAVE_FIELD_CHAMBER_XZ_SCALE :: f32(1.12)
+TERRAIN_CAVE_FIELD_CHAMBER_Y_MIN_SCALE :: f32(0.62)
+TERRAIN_CAVE_FIELD_CHAMBER_Y_MAX_SCALE :: f32(1.08)
+TERRAIN_CAVE_FIELD_NETWORK_CONNECTED_MARGIN_BLOCKS :: f32(8)
+TERRAIN_CAVE_FIELD_NETWORK_PATH_MARGIN_BLOCKS :: f32(14)
+TERRAIN_CAVE_FIELD_NETWORK_BRIDGE_MARGIN_BLOCKS :: f32(34)
+TERRAIN_CAVE_FIELD_NETWORK_BRIDGE_MIN_RADIUS :: f32(6)
+TERRAIN_CAVE_FIELD_NETWORK_BRIDGE_RADIUS_SCALE :: f32(0.42)
+TERRAIN_CAVE_NODE_ISOLATED_CULL_RADIUS_BLOCKS :: f32(14)
+TERRAIN_CAVE_NODE_BRIDGE_MAX_DISTANCE_BLOCKS :: f32(150)
+TERRAIN_CAVE_NODE_BRIDGE_RADIUS_SCALE :: f32(0.36)
+TERRAIN_CAVE_NODE_PROFILE_ROOM_MIN_RADIUS_BLOCKS :: f32(9)
+TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_SCALE :: f32(0.72)
+TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_XZ :: f32(18)
+TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_Y :: f32(14)
+TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_MAX_XZ :: f32(13)
+TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_MAX_Y :: f32(10)
+TERRAIN_CAVE_MOUTH_LOWER_WIDTH_BOOST :: f32(0.30)
+TERRAIN_CAVE_MOUTH_SIDE_SHOULDER_START :: f32(0.34)
+TERRAIN_CAVE_MOUTH_SIDE_SHOULDER_INV_RANGE :: f32(1.852)
+TERRAIN_CAVE_MOUTH_SIDE_SHOULDER_STRENGTH :: f32(0.36)
+TERRAIN_CAVE_MOUTH_CENTER_RELIEF_STRENGTH :: f32(0.14)
+TERRAIN_CAVE_MOUTH_LOWER_JAW_RELIEF_STRENGTH :: f32(0.10)
+TERRAIN_CAVE_MOUTH_UPPER_LIP_RIB_STRENGTH :: f32(0.08)
+TERRAIN_CAVE_MOUTH_SIDE_ALCOVE_RELIEF_STRENGTH :: f32(0.13)
+TERRAIN_CAVE_MOUTH_SIDE_ALCOVE_SMALL_SCALE :: f32(0.50)
+TERRAIN_CAVE_MOUTH_SIDE_ALCOVE_LARGE_SCALE :: f32(1.36)
+TERRAIN_CAVE_MOUTH_SMALL_RADIUS_BLOCKS :: f32(7.0)
+TERRAIN_CAVE_MOUTH_LARGE_RADIUS_BLOCKS :: f32(12.0)
+TERRAIN_CAVE_MOUTH_SMALL_REACH_SCALE :: f32(1.55)
+TERRAIN_CAVE_MOUTH_LARGE_REACH_SCALE :: f32(2.35)
+TERRAIN_CAVE_MOUTH_SMALL_WIDTH_SCALE :: f32(0.86)
+TERRAIN_CAVE_MOUTH_LARGE_WIDTH_SCALE :: f32(1.18)
+TERRAIN_CAVE_MOUTH_TRANSITION_RUN_SCALE :: f32(2.25)
+TERRAIN_CAVE_MOUTH_TRANSITION_DROP_SCALE :: f32(1.45)
+TERRAIN_CAVE_MOUTH_TRANSITION_SIDE_SCALE :: f32(0.55)
+TERRAIN_CAVE_MOUTH_SMALL_SLOPED_BEND_EXTENSION_SCALE :: f32(0.95)
+TERRAIN_CAVE_MOUTH_SLOPED_BEND_EXTENSION_SCALE :: f32(0.12)
+TERRAIN_CAVE_MOUTH_CURVED_BEND_EXTENSION_SCALE :: f32(0.42)
+TERRAIN_CAVE_MOUTH_SPIRAL_BEND_EXTENSION_SCALE :: f32(0.46)
+TERRAIN_CAVE_MOUTH_VESTIBULE_MIN_SUPPORT :: f32(0.25)
+TERRAIN_SINKHOLE_SIDE_LEDGE_RELIEF_STRENGTH :: f32(0.13)
+TERRAIN_SINKHOLE_RIM_LIP_STRENGTH :: f32(0.08)
+TERRAIN_SINKHOLE_SPIRAL_OFFSET_SCALE :: f32(0.42)
+TERRAIN_CAVE_ROUGH_ELLIPSOID_EDGE_SCALE :: f32(0.24)
+TERRAIN_CAVE_ROUGH_ELLIPSOID_CORE_SCALE :: f32(0.08)
+TERRAIN_CAVE_ROOM_LOBE_SWELL_SCALE :: f32(0.08)
+TERRAIN_CAVE_ROOM_LOBE_BACK_SWELL_SCALE :: f32(0.04)
+TERRAIN_CAVE_ROOM_SIDE_NOTCH_SCALE :: f32(0.30)
+TERRAIN_CAVE_ROOM_CEILING_RIB_SCALE :: f32(0.14)
+TERRAIN_CAVE_ROOM_COORD_WARP_SCALE :: f32(0.22)
+TERRAIN_CAVE_ROOM_VERTICAL_WARP_SCALE :: f32(0.10)
+TERRAIN_CAVE_ROOM_SCALLOP_SCALE :: f32(0.12)
+TERRAIN_CAVE_ROOM_INTERNAL_STRUCTURE_MIN_RADIUS :: f32(4.5)
+#assert(TERRAIN_CAVE_MOUTH_LOWER_WIDTH_BOOST > 0.22)
+#assert(TERRAIN_CAVE_MOUTH_SIDE_SHOULDER_START < 0.38)
+#assert(TERRAIN_CAVE_MOUTH_CENTER_RELIEF_STRENGTH < 0.18)
+#assert(TERRAIN_CAVE_MOUTH_LOWER_JAW_RELIEF_STRENGTH < TERRAIN_CAVE_MOUTH_SIDE_SHOULDER_STRENGTH)
+#assert(TERRAIN_CAVE_MOUTH_UPPER_LIP_RIB_STRENGTH < TERRAIN_CAVE_MOUTH_CENTER_RELIEF_STRENGTH)
+#assert(TERRAIN_CAVE_MOUTH_SIDE_ALCOVE_RELIEF_STRENGTH < TERRAIN_CAVE_MOUTH_SIDE_SHOULDER_STRENGTH)
+#assert(TERRAIN_CAVE_MOUTH_SIDE_ALCOVE_SMALL_SCALE < 1.0)
+#assert(TERRAIN_CAVE_MOUTH_SIDE_ALCOVE_LARGE_SCALE > 1.0)
+#assert(TERRAIN_CAVE_MOUTH_SMALL_REACH_SCALE < TERRAIN_CAVE_MOUTH_LARGE_REACH_SCALE)
+#assert(TERRAIN_CAVE_MOUTH_SMALL_WIDTH_SCALE < TERRAIN_CAVE_MOUTH_LARGE_WIDTH_SCALE)
+#assert(
+	TERRAIN_CAVE_MOUTH_SLOPED_BEND_EXTENSION_SCALE <
+	TERRAIN_CAVE_MOUTH_SMALL_SLOPED_BEND_EXTENSION_SCALE,
+)
+#assert(
+	TERRAIN_CAVE_MOUTH_SLOPED_BEND_EXTENSION_SCALE <
+	TERRAIN_CAVE_MOUTH_CURVED_BEND_EXTENSION_SCALE,
+)
+#assert(
+	TERRAIN_CAVE_MOUTH_CURVED_BEND_EXTENSION_SCALE <
+	TERRAIN_CAVE_MOUTH_SPIRAL_BEND_EXTENSION_SCALE,
+)
+#assert(TERRAIN_CAVE_MOUTH_VESTIBULE_MIN_SUPPORT > 0)
+#assert(TERRAIN_SINKHOLE_SIDE_LEDGE_RELIEF_STRENGTH > TERRAIN_SINKHOLE_RIM_LIP_STRENGTH)
+#assert(TERRAIN_SINKHOLE_SIDE_LEDGE_RELIEF_STRENGTH < 0.14)
+#assert(TERRAIN_SINKHOLE_SPIRAL_OFFSET_SCALE < 0.5)
+#assert(TERRAIN_CAVE_ROUGH_ELLIPSOID_EDGE_SCALE > TERRAIN_CAVE_ROUGH_ELLIPSOID_CORE_SCALE)
+#assert(TERRAIN_CAVE_ROUGH_ELLIPSOID_EDGE_SCALE < 0.35)
+#assert(TERRAIN_CAVE_ROOM_SIDE_NOTCH_SCALE > TERRAIN_CAVE_ROOM_LOBE_SWELL_SCALE)
+#assert(TERRAIN_CAVE_ROOM_CEILING_RIB_SCALE < TERRAIN_CAVE_ROOM_SIDE_NOTCH_SCALE)
+#assert(TERRAIN_CAVE_ROOM_COORD_WARP_SCALE < TERRAIN_CAVE_ROOM_SIDE_NOTCH_SCALE)
+#assert(TERRAIN_CAVE_ROOM_VERTICAL_WARP_SCALE < TERRAIN_CAVE_ROOM_COORD_WARP_SCALE)
+#assert(TERRAIN_CAVE_ROOM_SCALLOP_SCALE < TERRAIN_CAVE_ROOM_COORD_WARP_SCALE)
+#assert(TERRAIN_CAVE_ROOM_INTERNAL_STRUCTURE_MIN_RADIUS > 3)
+#assert(TERRAIN_CAVE_FIELD_PATH_STAMP_RESERVE_PER_CHUNK > 0)
+#assert(
+	TERRAIN_CAVE_FIELD_PATH_STAMP_RESERVE_PER_CHUNK < TERRAIN_CAVE_FIELD_STAMP_CAPACITY_PER_CHUNK,
+)
+#assert(TERRAIN_CAVE_FIELD_PATH_LONG_AXIS_SCALE > TERRAIN_CAVE_FIELD_CHAMBER_XZ_SCALE)
+#assert(TERRAIN_CAVE_FIELD_PATH_CROSS_AXIS_SCALE < TERRAIN_CAVE_FIELD_CHAMBER_XZ_SCALE)
+#assert(TERRAIN_CAVE_FIELD_PATH_Y_SCALE < TERRAIN_CAVE_FIELD_CHAMBER_Y_MIN_SCALE)
+#assert(TERRAIN_CAVE_FIELD_PATH_SEGMENT_RADIUS_SCALE < TERRAIN_CAVE_FIELD_PATH_CROSS_AXIS_SCALE)
+#assert(
+	TERRAIN_CAVE_FIELD_PATH_SEGMENT_HALF_LENGTH_SCALE < TERRAIN_CAVE_FIELD_PATH_LONG_AXIS_SCALE,
+)
+#assert(TERRAIN_CAVE_FIELD_PATH_ROUTE_VERTICAL_SCALE > 0)
+#assert(TERRAIN_CAVE_FIELD_PATH_ROUTE_VERTICAL_SCALE < 0.75)
+#assert(TERRAIN_CAVE_FIELD_PATH_SELECTION_BIAS > 1.0)
+#assert(TERRAIN_CAVE_FIELD_PATH_SELECTION_BIAS < 1.35)
+#assert(TERRAIN_CAVE_FIELD_PATH_OPEN_STRENGTH_MIN < TERRAIN_CAVE_FIELD_OPEN_STRENGTH_MIN)
+#assert(TERRAIN_CAVE_FIELD_PATH_OPEN_STRENGTH_MIN > 0.25)
+#assert(
+	TERRAIN_CAVE_FIELD_ROUTE_PATH_OPEN_STRENGTH_MIN < TERRAIN_CAVE_FIELD_PATH_OPEN_STRENGTH_MIN,
+)
+#assert(TERRAIN_CAVE_FIELD_ROUTE_PATH_OPEN_STRENGTH_MIN > 0.15)
+#assert(
+	TERRAIN_CAVE_FIELD_ROUTE_PATH_DISTANCE_MARGIN_BLOCKS <
+	TERRAIN_CAVE_FIELD_NETWORK_CONNECTED_MARGIN_BLOCKS,
+)
+#assert(
+	TERRAIN_CAVE_FIELD_ROUTE_POCKET_DISTANCE_MARGIN_BLOCKS >
+	TERRAIN_CAVE_FIELD_ROUTE_PATH_DISTANCE_MARGIN_BLOCKS,
+)
+#assert(
+	TERRAIN_CAVE_FIELD_ROUTE_POCKET_DISTANCE_MARGIN_BLOCKS <
+	TERRAIN_CAVE_FIELD_NETWORK_BRIDGE_MARGIN_BLOCKS,
+)
+#assert(TERRAIN_CAVE_FIELD_ROUTE_POCKET_ROOM_SCALE > 0.5)
+#assert(TERRAIN_CAVE_FIELD_ROUTE_POCKET_ROOM_SCALE < 0.8)
+#assert(TERRAIN_CAVE_FIELD_ROUTE_POCKET_THROAT_RADIUS_SCALE > 0.3)
+#assert(TERRAIN_CAVE_FIELD_ROUTE_POCKET_THROAT_RADIUS_SCALE < 0.6)
+#assert(
+	TERRAIN_CAVE_FIELD_NETWORK_CONNECTED_MARGIN_BLOCKS <
+	TERRAIN_CAVE_FIELD_NETWORK_BRIDGE_MARGIN_BLOCKS,
+)
+#assert(
+	TERRAIN_CAVE_FIELD_NETWORK_PATH_MARGIN_BLOCKS <
+	TERRAIN_CAVE_FIELD_NETWORK_BRIDGE_MARGIN_BLOCKS,
+)
+#assert(TERRAIN_CAVE_FIELD_NETWORK_BRIDGE_RADIUS_SCALE < 0.5)
+#assert(
+	TERRAIN_CAVE_NODE_ISOLATED_CULL_RADIUS_BLOCKS > TERRAIN_CAVE_FIELD_NETWORK_BRIDGE_MIN_RADIUS,
+)
+#assert(TERRAIN_CAVE_NODE_BRIDGE_RADIUS_SCALE < 0.5)
+#assert(
+	TERRAIN_CAVE_NODE_PROFILE_ROOM_MIN_RADIUS_BLOCKS >
+	TERRAIN_CAVE_FIELD_NETWORK_BRIDGE_MIN_RADIUS,
+)
+#assert(TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_SCALE < 1)
+#assert(TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_MAX_XZ < TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_XZ)
+#assert(TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_MAX_Y < TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_Y)
+TERRAIN_FUNGAL_ROOM_LOWER_XZ_SCALE :: f32(1.12)
+TERRAIN_FUNGAL_ROOM_LOWER_Y_SCALE :: f32(0.58)
+TERRAIN_FUNGAL_ROOM_LOWER_Y_OFFSET_SCALE :: f32(-0.10)
+TERRAIN_FUNGAL_ROOM_DOME_XZ_SCALE :: f32(0.78)
+TERRAIN_FUNGAL_ROOM_DOME_Y_SCALE :: f32(0.68)
+TERRAIN_FUNGAL_ROOM_DOME_Y_OFFSET_SCALE :: f32(0.42)
+TERRAIN_FUNGAL_ROOM_ALCOVE_OFFSET_SCALE :: f32(0.62)
+TERRAIN_FUNGAL_ROOM_ALCOVE_XZ_SCALE :: f32(0.44)
+TERRAIN_FUNGAL_ROOM_ALCOVE_Y_SCALE :: f32(0.36)
+TERRAIN_FUNGAL_ROOM_ALCOVE_Y_OFFSET_SCALE :: f32(0.02)
+#assert(TERRAIN_FUNGAL_ROOM_LOWER_XZ_SCALE > 1)
+#assert(TERRAIN_FUNGAL_ROOM_LOWER_Y_SCALE < TERRAIN_FUNGAL_ROOM_DOME_Y_SCALE)
+#assert(TERRAIN_FUNGAL_ROOM_ALCOVE_OFFSET_SCALE > 0.5)
+TERRAIN_CRYSTAL_ROOM_MAIN_XZ_SCALE :: f32(0.72)
+TERRAIN_CRYSTAL_ROOM_MAIN_Y_SCALE :: f32(1.12)
+TERRAIN_CRYSTAL_ROOM_FISSURE_RADIUS_SCALE :: f32(0.30)
+TERRAIN_CRYSTAL_ROOM_FISSURE_LOWER_Y_SCALE :: f32(0.26)
+TERRAIN_CRYSTAL_ROOM_FISSURE_UPPER_Y_SCALE :: f32(0.34)
+#assert(TERRAIN_CRYSTAL_ROOM_MAIN_XZ_SCALE < 1)
+#assert(TERRAIN_CRYSTAL_ROOM_MAIN_Y_SCALE > 1)
+#assert(TERRAIN_CRYSTAL_ROOM_FISSURE_RADIUS_SCALE > 0)
+TERRAIN_AQUIFER_ROOM_BASIN_XZ_SCALE :: f32(1.10)
+TERRAIN_AQUIFER_ROOM_BASIN_Y_SCALE :: f32(0.38)
+TERRAIN_AQUIFER_ROOM_BASIN_Y_OFFSET_SCALE :: f32(-0.22)
+TERRAIN_AQUIFER_ROOM_SHELF_OFFSET_SCALE :: f32(0.42)
+TERRAIN_AQUIFER_ROOM_SHELF_XZ_SCALE :: f32(0.66)
+TERRAIN_AQUIFER_ROOM_SHELF_Y_SCALE :: f32(0.36)
+TERRAIN_AQUIFER_ROOM_SHELF_Y_OFFSET_SCALE :: f32(0.20)
+TERRAIN_AQUIFER_ROOM_WATER_XZ_SCALE :: f32(0.92)
+TERRAIN_AQUIFER_ROOM_WATER_Y_SCALE :: f32(0.16)
+TERRAIN_AQUIFER_ROOM_WATER_Y_OFFSET_SCALE :: f32(-0.46)
+#assert(TERRAIN_AQUIFER_ROOM_BASIN_XZ_SCALE > 1)
+#assert(TERRAIN_AQUIFER_ROOM_BASIN_Y_SCALE < 0.5)
+#assert(TERRAIN_AQUIFER_ROOM_WATER_Y_OFFSET_SCALE < TERRAIN_AQUIFER_ROOM_BASIN_Y_OFFSET_SCALE)
 TERRAIN_BINARY_AXIS_COUNT :: 3
 TERRAIN_BINARY_AXIS_ROW_COUNT :: CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH
 #assert(TERRAIN_BINARY_AXIS_COUNT == world_async.TERRAIN_BINARY_AXIS_COUNT)
@@ -3520,9 +4010,9 @@ TERRAIN_MATERIAL_COLORS := TerrainMaterialColorPalette {
 	{0.45, 0.45, 0.48, 1.0}, // Stone
 	{0.70, 0.68, 0.55, 1.0}, // Sand
 	{0.25, 0.45, 0.85, 1.0}, // Water
-	{0.80, 0.35, 0.25, 1.0}, // Lava / Red Sand / Terracotta
-	{0.85, 0.78, 0.36, 1.0}, // Gold / Sandstone / Hay
-	{0.85, 0.85, 0.85, 1.0}, // Snow / Ice / White Concrete
+	{0.24, 0.22, 0.24, 1.0}, // Corrupted Ash
+	{0.85, 0.78, 0.36, 1.0}, // Aquifer wall
+	{0.85, 0.85, 0.85, 1.0}, // Crystal
 }
 
 //////////////////////////////////////
@@ -3530,6 +4020,46 @@ TERRAIN_MATERIAL_COLORS := TerrainMaterialColorPalette {
 /////////////////////////////////////
 
 TerrainMaterialColorPalette :: [8]Vec4
+
+TerrainCaveMouthTransitionStyle :: enum {
+	Sloped_Tube,
+	Curved_Ramp,
+	Spiral_Ramp,
+}
+
+TerrainCaveMouthTransitionScales :: struct {
+	run_scale:          f32,
+	drop_scale:         f32,
+	side_scale:         f32,
+	vestibule_scale:    f32,
+	bend_t:             f32,
+	bend_return_scale:  f32,
+	deep_radius_scale:  f32,
+	near_curve_boost:   f32,
+	near_meander_boost: f32,
+	deep_curve_boost:   f32,
+	deep_meander_boost: f32,
+	deep_lift_boost:    f32,
+}
+
+TerrainCaveMouthTransitionPlan :: struct {
+	style:                           TerrainCaveMouthTransitionStyle,
+	size_support:                    f32,
+	dir_x, dir_z:                    f32,
+	side_x, side_z:                  f32,
+	transition_run:                  f32,
+	transition_drop:                 f32,
+	near_radius:                     f32,
+	side_offset:                     f32,
+	landing_x, landing_y, landing_z: f32,
+	bend_x, bend_y, bend_z:          f32,
+	near_run_blocks:                 f32,
+	near_drop_blocks:                f32,
+	bend_run_blocks:                 f32,
+	bend_drop_blocks:                f32,
+	handoff_run_blocks:              f32,
+	handoff_drop_blocks:             f32,
+}
 
 TerrainUnpackedVertex :: struct {
 	block_x, block_y, block_z: u32,
@@ -3549,15 +4079,69 @@ TerrainFaceDesc :: struct {
 	normal_id:                             u32,
 }
 
+TerrainCaveSegmentShape :: struct {
+	radius_x_scale:        f32,
+	radius_y_scale:        f32,
+	radius_z_scale:        f32,
+	radius_noise_scale:    f32,
+	radius_neck_scale:     f32,
+	radius_swell_scale:    f32,
+	radius_endpoint_scale: f32,
+	meander_scale:         f32,
+	lift_scale:            f32,
+	curve_scale:           f32,
+}
+
+TerrainCaveFieldSample :: struct {
+	open_strength:         f32,
+	path_open_strength:    f32,
+	chamber_open_strength: f32,
+	spaghetti_strength:    f32,
+	chamber_strength:      f32,
+	path_axis_x:           bool,
+}
+
+TerrainCaveFieldNetworkSample :: struct {
+	found:        bool,
+	connected:    bool,
+	bridgeable:   bool,
+	distance:     f32,
+	route_radius: f32,
+	nearest_x:    f32,
+	nearest_y:    f32,
+	nearest_z:    f32,
+	route_dir_x:  f32,
+	route_dir_y:  f32,
+	route_dir_z:  f32,
+}
+
+TerrainCaveNodeConnectivity :: struct {
+	has_edge:               bool,
+	has_anchor:             bool,
+	should_carve:           bool,
+	should_bridge:          bool,
+	nearest_route_found:    bool,
+	nearest_route_distance: f32,
+	nearest_route_radius:   f32,
+	nearest_x:              f32,
+	nearest_y:              f32,
+	nearest_z:              f32,
+}
+
 TerrainGridPoint :: struct {
 	x, y, z: u32,
 }
 
 TerrainBiomeColumn :: struct {
 	surface_height:                  i32,
+	surface_height_blocks:           f32,
 	surface_layer_depth:             i32,
 	dominant_biome_id:               biomes.BiomeID,
+	surface_material_id:             world_async.BlockMaterialID,
+	subsurface_material_id:          world_async.BlockMaterialID,
 	hydrology_debug_material_active: bool,
+	water_fill_active:               bool,
+	water_level_blocks:              f32,
 }
 
 TerrainCaveDebugColumnMask :: [CHUNK_BLOCK_LENGTH]u64
@@ -3620,12 +4204,17 @@ terrain_heightfield_voxel_view_fill :: proc(
 
 	origin := chunk_origin_from_coord(chunk)
 	key := terrain_generation_key_make(seed)
-	generation_region := biomes.generation_region_build(
-		key,
-		biomes.generation_region_coord_from_block(origin.x, origin.y, origin.z),
+	generation_region_coord := biomes.generation_region_coord_from_block(
+		origin.x,
+		origin.y,
+		origin.z,
 	)
+	generation_region := terrain_generation_region_for_fill(key, generation_region_coord)
 	cave_debug_columns: TerrainCaveDebugColumnMask
-	terrain_cave_debug_column_mask_build(&cave_debug_columns, &generation_region, origin)
+	if TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
+		terrain_cave_debug_column_mask_build(&cave_debug_columns, &generation_region, origin)
+	}
+	column_targets: [CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH]TerrainBiomeColumn
 	for z in 0 ..< CHUNK_BLOCK_LENGTH {
 		for x in 0 ..< CHUNK_BLOCK_LENGTH {
 			world_x := origin.x + i32(x)
@@ -3647,26 +4236,28 @@ terrain_heightfield_voxel_view_fill :: proc(
 				world_x,
 				world_z,
 			)
-			cave_debug_material_active := (cave_debug_columns[z] & (u64(1) << u32(x))) != 0
+			column_targets[x + z * CHUNK_BLOCK_LENGTH] = column
+			cave_debug_material_active := false
+			if TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
+				cave_debug_material_active = (cave_debug_columns[z] & (u64(1) << u32(x))) != 0
+			}
 
 			for y in 0 ..< CHUNK_BLOCK_LENGTH {
 				world_y := origin.y + i32(y)
 
-				if world_y > column.surface_height {
+				if !terrain_density_surface_is_solid(column, world_y) {
 					continue
 				}
 
 				blocks_below_surface := column.surface_height - world_y
-				material_id := terrain_biome_block_material_id(
-					column.dominant_biome_id,
-					blocks_below_surface,
-					column.surface_layer_depth,
-				)
-				if column.hydrology_debug_material_active {
-					material_id = terrain_hydrology_debug_material_id(material_id)
-				}
-				if cave_debug_material_active {
-					material_id = terrain_cave_anchor_debug_material_id(material_id)
+				material_id := terrain_biome_block_material_id(column, blocks_below_surface)
+				if TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
+					if column.hydrology_debug_material_active {
+						material_id = terrain_hydrology_debug_material_id(material_id)
+					}
+					if cave_debug_material_active {
+						material_id = terrain_cave_anchor_debug_material_id(material_id)
+					}
 				}
 
 				index := chunk_block_index(u32(x), u32(y), u32(z))
@@ -3675,6 +4266,3232 @@ terrain_heightfield_voxel_view_fill :: proc(
 			}
 		}
 	}
+	terrain_density_subterranean_biome_caves_apply(
+		view,
+		&generation_region,
+		origin,
+		column_targets[:],
+	)
+	terrain_density_cave_network_apply(view, &generation_region, origin, column_targets[:])
+	terrain_water_volume_fill(view, origin, column_targets[:])
+}
+
+terrain_density_surface_is_solid :: proc(column: TerrainBiomeColumn, world_y: i32) -> bool {
+	return column.surface_height_blocks - f32(world_y) >= 0
+}
+
+terrain_density_subterranean_biome_caves_apply :: proc(
+	view: ^world_async.ChunkVoxelView,
+	region: ^biomes.GenerationRegion,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+) {
+	key := region.key
+	log.assertf(
+		len(columns) == CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH,
+		"terrain density column target count mismatch: %d",
+		len(columns),
+	)
+	if f32(chunk_origin.y) > TERRAIN_CAVE_TOP_CUSHION_END_BLOCKS ||
+	   f32(chunk_origin.y + CHUNK_BLOCK_LENGTH) < TERRAIN_CAVE_BOTTOM_CUSHION_START_BLOCKS {
+		return
+	}
+	if chunk_origin.y >= 0 {
+		return
+	}
+
+	stamp_count: u32
+	for z := TERRAIN_CAVE_FIELD_SAMPLE_STEP_BLOCKS / 2;
+	    z < CHUNK_BLOCK_LENGTH && stamp_count < TERRAIN_CAVE_FIELD_STAMP_CAPACITY_PER_CHUNK;
+	    z += TERRAIN_CAVE_FIELD_SAMPLE_STEP_BLOCKS {
+		world_z := chunk_origin.z + z
+		for y := TERRAIN_CAVE_FIELD_SAMPLE_STEP_BLOCKS / 2;
+		    y < CHUNK_BLOCK_LENGTH && stamp_count < TERRAIN_CAVE_FIELD_STAMP_CAPACITY_PER_CHUNK;
+		    y += TERRAIN_CAVE_FIELD_SAMPLE_STEP_BLOCKS {
+			world_y := chunk_origin.y + y
+			vertical_support := terrain_density_cave_vertical_support(f32(world_y))
+			if vertical_support <= 0 {
+				continue
+			}
+			for x := TERRAIN_CAVE_FIELD_SAMPLE_STEP_BLOCKS / 2;
+			    x < CHUNK_BLOCK_LENGTH &&
+			    stamp_count < TERRAIN_CAVE_FIELD_STAMP_CAPACITY_PER_CHUNK;
+			    x += TERRAIN_CAVE_FIELD_SAMPLE_STEP_BLOCKS {
+				column := columns[x + z * CHUNK_BLOCK_LENGTH]
+				depth_below_surface := column.surface_height_blocks - f32(world_y)
+				if depth_below_surface < 18 {
+					continue
+				}
+
+				world_x := chunk_origin.x + x
+				field_sample := terrain_density_subterranean_cave_field_sample(
+					key,
+					world_x,
+					world_y,
+					world_z,
+					depth_below_surface,
+				)
+				if !terrain_density_cave_field_sample_is_candidate(
+					field_sample,
+					vertical_support,
+				) {
+					continue
+				}
+				open_strength := field_sample.open_strength * vertical_support
+				path_candidate := terrain_density_cave_field_sample_prefers_path(
+					field_sample,
+					vertical_support,
+				)
+
+				subterranean_sample := biomes.subterranean_biome_field_sample(
+					key,
+					world_x,
+					world_y,
+					world_z,
+				)
+				biome_id := subterranean_sample.cells[0].biome_id
+				radius := biomes.regional_terrain_field_lerp(f32(3.5), f32(10.5), open_strength)
+				if biome_id == .Fungal_Vaults {
+					radius *= 1.25
+				} else if biome_id == .Crystal_Geode_Network {
+					radius *= 0.82
+				} else if biome_id == .Buried_Aquifer_Caves {
+					radius *= 1.05
+				}
+				radius_x := radius * TERRAIN_CAVE_FIELD_CHAMBER_XZ_SCALE
+				radius_y :=
+					radius *
+					biomes.regional_terrain_field_lerp(
+						TERRAIN_CAVE_FIELD_CHAMBER_Y_MIN_SCALE,
+						TERRAIN_CAVE_FIELD_CHAMBER_Y_MAX_SCALE,
+						open_strength,
+					)
+				radius_z := radius * TERRAIN_CAVE_FIELD_CHAMBER_XZ_SCALE
+				network_sample := terrain_density_cave_field_network_sample(
+					region,
+					f32(world_x) + 0.5,
+					f32(world_y) + 0.5,
+					f32(world_z) + 0.5,
+					radius,
+					path_candidate,
+				)
+				if !network_sample.found ||
+				   (!network_sample.connected && !network_sample.bridgeable) {
+					continue
+				}
+				if !path_candidate &&
+				   terrain_density_cave_field_sample_prefers_route_path(
+					   field_sample,
+					   vertical_support,
+					   network_sample,
+				   ) {
+					path_candidate = true
+				}
+				if !path_candidate &&
+				   stamp_count >=
+					   TERRAIN_CAVE_FIELD_STAMP_CAPACITY_PER_CHUNK -
+						   TERRAIN_CAVE_FIELD_PATH_STAMP_RESERVE_PER_CHUNK {
+					continue
+				}
+				route_pocket_candidate :=
+					!path_candidate &&
+					terrain_density_cave_field_sample_prefers_route_pocket(
+						field_sample,
+						vertical_support,
+						network_sample,
+					)
+				if path_candidate {
+					path_shape := terrain_density_cave_field_path_shape()
+					path_half_length := radius * TERRAIN_CAVE_FIELD_PATH_SEGMENT_HALF_LENGTH_SCALE
+					path_radius := radius * TERRAIN_CAVE_FIELD_PATH_SEGMENT_RADIUS_SCALE
+					center_x := f32(world_x) + 0.5
+					center_y := f32(world_y) + 0.5
+					center_z := f32(world_z) + 0.5
+					dir_x, dir_y, dir_z, _ := terrain_density_cave_field_path_direction(
+						field_sample,
+						network_sample,
+					)
+					terrain_density_carve_rough_segment_shaped(
+						view,
+						key,
+						chunk_origin,
+						columns,
+						center_x - dir_x * path_half_length,
+						center_y - dir_y * path_half_length,
+						center_z - dir_z * path_half_length,
+						center_x + dir_x * path_half_length,
+						center_y + dir_y * path_half_length,
+						center_z + dir_z * path_half_length,
+						path_radius,
+						path_shape,
+						TERRAIN_CAVE_FIELD_DETAIL_SALT,
+						biome_id,
+					)
+					stamp_count += 1
+					continue
+				}
+				if route_pocket_candidate {
+					center_x := f32(world_x) + 0.5
+					center_y := f32(world_y) + 0.5
+					center_z := f32(world_z) + 0.5
+					pocket_shape := terrain_density_cave_passage_shape(.Collapsed_Corridor)
+					if biome_id == .Fungal_Vaults {
+						pocket_shape = terrain_density_cave_passage_shape(.Worm_Path)
+						pocket_shape.radius_y_scale = math.min(
+							pocket_shape.radius_y_scale,
+							f32(0.70),
+						)
+					} else if biome_id == .Crystal_Geode_Network {
+						pocket_shape = terrain_density_cave_passage_shape(.Fracture)
+					}
+					throat_radius := math.max(
+						f32(1.75),
+						math.min(
+							radius * TERRAIN_CAVE_FIELD_ROUTE_POCKET_THROAT_RADIUS_SCALE,
+							network_sample.route_radius * f32(0.76),
+						),
+					)
+					terrain_density_carve_rough_segment_shaped(
+						view,
+						key,
+						chunk_origin,
+						columns,
+						network_sample.nearest_x,
+						network_sample.nearest_y,
+						network_sample.nearest_z,
+						center_x,
+						center_y,
+						center_z,
+						throat_radius,
+						pocket_shape,
+						TERRAIN_CAVE_BRANCH_SALT,
+						biome_id,
+					)
+					terrain_density_carve_cave_room_lobed_ellipsoid(
+						view,
+						key,
+						chunk_origin,
+						columns,
+						center_x,
+						center_y,
+						center_z,
+						radius_x * TERRAIN_CAVE_FIELD_ROUTE_POCKET_ROOM_SCALE,
+						radius_y * TERRAIN_CAVE_FIELD_ROUTE_POCKET_ROOM_SCALE,
+						radius_z * TERRAIN_CAVE_FIELD_ROUTE_POCKET_ROOM_SCALE,
+						TERRAIN_CAVE_FIELD_DETAIL_SALT,
+						biome_id,
+						true,
+					)
+					stamp_count += 1
+					continue
+				}
+				terrain_density_carve_cave_room_lobed_ellipsoid(
+					view,
+					key,
+					chunk_origin,
+					columns,
+					f32(world_x) + 0.5,
+					f32(world_y) + 0.5,
+					f32(world_z) + 0.5,
+					radius_x,
+					radius_y,
+					radius_z,
+					TERRAIN_CAVE_FIELD_DETAIL_SALT,
+					biome_id,
+					true,
+				)
+				if network_sample.bridgeable && !network_sample.connected {
+					bridge_shape := terrain_density_cave_passage_shape(.Collapsed_Corridor)
+					bridge_shape.radius_y_scale = math.min(bridge_shape.radius_y_scale, f32(0.64))
+					bridge_shape.radius_neck_scale = math.max(
+						bridge_shape.radius_neck_scale,
+						f32(0.34),
+					)
+					bridge_radius := math.max(
+						f32(2),
+						math.min(
+							radius * TERRAIN_CAVE_FIELD_NETWORK_BRIDGE_RADIUS_SCALE,
+							network_sample.route_radius * f32(0.82),
+						),
+					)
+					terrain_density_carve_rough_segment_shaped(
+						view,
+						key,
+						chunk_origin,
+						columns,
+						f32(world_x) + 0.5,
+						f32(world_y) + 0.5,
+						f32(world_z) + 0.5,
+						network_sample.nearest_x,
+						network_sample.nearest_y,
+						network_sample.nearest_z,
+						bridge_radius,
+						bridge_shape,
+						TERRAIN_CAVE_BRANCH_SALT,
+						biome_id,
+					)
+				}
+				stamp_count += 1
+			}
+		}
+	}
+}
+
+terrain_density_subterranean_cave_field_sample :: proc(
+	key: biomes.FeatureGridKey,
+	world_x, world_y, world_z: i32,
+	depth_below_surface: f32,
+) -> TerrainCaveFieldSample {
+	depth_support := math.smoothstep(f32(18), f32(56), depth_below_surface)
+	if depth_support <= 0 {
+		return {}
+	}
+
+	spaghetti_a := biomes.regional_terrain_field_value_noise_3(
+		key,
+		world_x,
+		world_y,
+		world_z,
+		42,
+		TERRAIN_CAVE_FIELD_SPAGHETTI_A_SALT,
+	)
+	spaghetti_b := biomes.regional_terrain_field_value_noise_3(
+		key,
+		world_x,
+		world_y,
+		world_z,
+		48,
+		TERRAIN_CAVE_FIELD_SPAGHETTI_B_SALT,
+	)
+	spaghetti_width := 0.055 + depth_support * 0.045
+	spaghetti_distance := math.max(math.abs(spaghetti_a), math.abs(spaghetti_b))
+	spaghetti_strength := math.clamp(
+		(spaghetti_width - spaghetti_distance) / spaghetti_width,
+		f32(0),
+		f32(1),
+	)
+
+	chamber := biomes.regional_terrain_field_value_noise_3(
+		key,
+		world_x,
+		world_y,
+		world_z,
+		118,
+		TERRAIN_CAVE_FIELD_CHAMBER_SALT,
+	)
+	chamber_detail := biomes.regional_terrain_field_value_noise_3(
+		key,
+		world_x,
+		world_y,
+		world_z,
+		34,
+		TERRAIN_CAVE_FIELD_DETAIL_SALT,
+	)
+	chamber_strength := math.smoothstep(
+		f32(0.54),
+		f32(0.84),
+		chamber + chamber_detail * 0.18 + depth_support * 0.10,
+	)
+	path_open_strength := spaghetti_strength * depth_support
+	chamber_open_strength := chamber_strength * depth_support
+
+	return {
+		open_strength = math.max(path_open_strength * 0.90, chamber_open_strength),
+		path_open_strength = path_open_strength,
+		chamber_open_strength = chamber_open_strength,
+		spaghetti_strength = spaghetti_strength,
+		chamber_strength = chamber_strength,
+		path_axis_x = math.abs(spaghetti_a) < math.abs(spaghetti_b),
+	}
+}
+
+terrain_density_cave_field_sample_prefers_path :: proc(
+	field_sample: TerrainCaveFieldSample,
+	vertical_support: f32,
+) -> bool {
+	path_strength := field_sample.path_open_strength * vertical_support
+	chamber_strength := field_sample.chamber_open_strength * vertical_support
+	return(
+		path_strength >= TERRAIN_CAVE_FIELD_PATH_OPEN_STRENGTH_MIN &&
+		(chamber_strength < TERRAIN_CAVE_FIELD_OPEN_STRENGTH_MIN ||
+				path_strength * TERRAIN_CAVE_FIELD_PATH_SELECTION_BIAS > chamber_strength) \
+	)
+}
+
+terrain_density_cave_field_sample_prefers_route_path :: proc(
+	field_sample: TerrainCaveFieldSample,
+	vertical_support: f32,
+	network_sample: TerrainCaveFieldNetworkSample,
+) -> bool {
+	if !network_sample.connected {
+		return false
+	}
+	path_strength := field_sample.path_open_strength * vertical_support
+	if path_strength < TERRAIN_CAVE_FIELD_ROUTE_PATH_OPEN_STRENGTH_MIN {
+		return false
+	}
+	return(
+		network_sample.distance <=
+		network_sample.route_radius + TERRAIN_CAVE_FIELD_ROUTE_PATH_DISTANCE_MARGIN_BLOCKS \
+	)
+}
+
+terrain_density_cave_field_sample_prefers_route_pocket :: proc(
+	field_sample: TerrainCaveFieldSample,
+	vertical_support: f32,
+	network_sample: TerrainCaveFieldNetworkSample,
+) -> bool {
+	if !network_sample.connected {
+		return false
+	}
+	chamber_strength := field_sample.chamber_open_strength * vertical_support
+	if chamber_strength < TERRAIN_CAVE_FIELD_OPEN_STRENGTH_MIN {
+		return false
+	}
+	return(
+		network_sample.distance <=
+		network_sample.route_radius + TERRAIN_CAVE_FIELD_ROUTE_POCKET_DISTANCE_MARGIN_BLOCKS \
+	)
+}
+
+terrain_density_cave_field_sample_is_candidate :: proc(
+	field_sample: TerrainCaveFieldSample,
+	vertical_support: f32,
+) -> bool {
+	path_strength := field_sample.path_open_strength * vertical_support
+	chamber_strength := field_sample.chamber_open_strength * vertical_support
+	return(
+		path_strength >= TERRAIN_CAVE_FIELD_PATH_OPEN_STRENGTH_MIN ||
+		chamber_strength >= TERRAIN_CAVE_FIELD_OPEN_STRENGTH_MIN \
+	)
+}
+
+terrain_density_cave_field_network_sample :: proc(
+	region: ^biomes.GenerationRegion,
+	world_x, world_y, world_z, radius: f32,
+	path_candidate: bool,
+) -> TerrainCaveFieldNetworkSample {
+	sample := TerrainCaveFieldNetworkSample {
+		distance = biomes.BIOME_FIELD_NO_DISTANCE,
+	}
+
+	for i := u32(0); i < region.cave_network_edge_count; i += 1 {
+		edge := region.cave_network_edges[i]
+		route_dir_x, route_dir_y, route_dir_z := terrain_density_delta_3(
+			edge.from_x,
+			edge.from_y,
+			edge.from_z,
+			edge.bend_x,
+			edge.bend_y,
+			edge.bend_z,
+		)
+		px, py, pz, distance := terrain_density_closest_segment_point_3(
+			world_x,
+			world_y,
+			world_z,
+			edge.from_x,
+			edge.from_y,
+			edge.from_z,
+			edge.bend_x,
+			edge.bend_y,
+			edge.bend_z,
+		)
+		terrain_density_cave_field_network_sample_note(
+			&sample,
+			distance,
+			math.max(f32(3), edge.radius_blocks),
+			px,
+			py,
+			pz,
+			route_dir_x,
+			route_dir_y,
+			route_dir_z,
+		)
+		route_dir_x, route_dir_y, route_dir_z = terrain_density_delta_3(
+			edge.bend_x,
+			edge.bend_y,
+			edge.bend_z,
+			edge.to_x,
+			edge.to_y,
+			edge.to_z,
+		)
+		px, py, pz, distance = terrain_density_closest_segment_point_3(
+			world_x,
+			world_y,
+			world_z,
+			edge.bend_x,
+			edge.bend_y,
+			edge.bend_z,
+			edge.to_x,
+			edge.to_y,
+			edge.to_z,
+		)
+		terrain_density_cave_field_network_sample_note(
+			&sample,
+			distance,
+			math.max(f32(3), edge.radius_blocks),
+			px,
+			py,
+			pz,
+			route_dir_x,
+			route_dir_y,
+			route_dir_z,
+		)
+	}
+
+	if !sample.found {
+		return sample
+	}
+
+	connected_margin := TERRAIN_CAVE_FIELD_NETWORK_CONNECTED_MARGIN_BLOCKS
+	if path_candidate {
+		connected_margin = TERRAIN_CAVE_FIELD_NETWORK_PATH_MARGIN_BLOCKS
+	}
+	connected_distance := radius + sample.route_radius + connected_margin
+	bridge_distance :=
+		radius + sample.route_radius + TERRAIN_CAVE_FIELD_NETWORK_BRIDGE_MARGIN_BLOCKS
+	sample.connected = sample.distance <= connected_distance
+	sample.bridgeable =
+		!path_candidate &&
+		radius >= TERRAIN_CAVE_FIELD_NETWORK_BRIDGE_MIN_RADIUS &&
+		sample.distance > connected_distance &&
+		sample.distance <= bridge_distance
+	return sample
+}
+
+terrain_density_cave_field_path_direction :: proc(
+	field_sample: TerrainCaveFieldSample,
+	network_sample: TerrainCaveFieldNetworkSample,
+) -> (
+	dir_x, dir_y, dir_z: f32,
+	route_follow: bool,
+) {
+	route_len_sq :=
+		network_sample.route_dir_x * network_sample.route_dir_x +
+		network_sample.route_dir_y * network_sample.route_dir_y +
+		network_sample.route_dir_z * network_sample.route_dir_z
+	route_xz_len_sq :=
+		network_sample.route_dir_x * network_sample.route_dir_x +
+		network_sample.route_dir_z * network_sample.route_dir_z
+	if network_sample.found && route_len_sq > 0.001 && route_xz_len_sq > 0.001 {
+		route_xz_len := math.sqrt_f32(route_xz_len_sq)
+		route_len := math.sqrt_f32(route_len_sq)
+		dir_x = network_sample.route_dir_x / route_xz_len
+		dir_y =
+			math.clamp(network_sample.route_dir_y / route_len, f32(-0.85), f32(0.85)) *
+			TERRAIN_CAVE_FIELD_PATH_ROUTE_VERTICAL_SCALE
+		dir_z = network_sample.route_dir_z / route_xz_len
+		route_follow = true
+		return
+	}
+
+	if field_sample.path_axis_x {
+		return 1, 0, 0, false
+	}
+	return 0, 0, 1, false
+}
+
+terrain_density_cave_field_network_sample_note :: proc(
+	sample: ^TerrainCaveFieldNetworkSample,
+	distance,
+	route_radius,
+	nearest_x,
+	nearest_y,
+	nearest_z,
+	route_dir_x,
+	route_dir_y,
+	route_dir_z: f32,
+) {
+	if !sample.found || distance < sample.distance {
+		sample.found = true
+		sample.distance = distance
+		sample.route_radius = route_radius
+		sample.nearest_x = nearest_x
+		sample.nearest_y = nearest_y
+		sample.nearest_z = nearest_z
+		sample.route_dir_x = route_dir_x
+		sample.route_dir_y = route_dir_y
+		sample.route_dir_z = route_dir_z
+	}
+}
+
+terrain_density_delta_3 :: proc(
+	from_x, from_y, from_z, to_x, to_y, to_z: f32,
+) -> (
+	dir_x, dir_y, dir_z: f32,
+) {
+	dir_x = to_x - from_x
+	dir_y = to_y - from_y
+	dir_z = to_z - from_z
+	return
+}
+
+terrain_density_closest_segment_point_3 :: proc(
+	x, y, z, from_x, from_y, from_z, to_x, to_y, to_z: f32,
+) -> (
+	nearest_x, nearest_y, nearest_z, distance: f32,
+) {
+	seg_x := to_x - from_x
+	seg_y := to_y - from_y
+	seg_z := to_z - from_z
+	length_sq := seg_x * seg_x + seg_y * seg_y + seg_z * seg_z
+	if length_sq <= 0.001 {
+		return from_x, from_y, from_z, terrain_density_distance_3(x, y, z, from_x, from_y, from_z)
+	}
+	t := ((x - from_x) * seg_x + (y - from_y) * seg_y + (z - from_z) * seg_z) / length_sq
+	t = math.clamp(t, f32(0), f32(1))
+	nearest_x = from_x + seg_x * t
+	nearest_y = from_y + seg_y * t
+	nearest_z = from_z + seg_z * t
+	distance = terrain_density_distance_3(x, y, z, nearest_x, nearest_y, nearest_z)
+	return
+}
+
+terrain_density_distance_3 :: proc(x, y, z, target_x, target_y, target_z: f32) -> f32 {
+	dx := x - target_x
+	dy := y - target_y
+	dz := z - target_z
+	return math.sqrt_f32(dx * dx + dy * dy + dz * dz)
+}
+
+terrain_density_cave_node_connectivity :: proc(
+	region: ^biomes.GenerationRegion,
+	node: biomes.CaveNetworkNode,
+) -> TerrainCaveNodeConnectivity {
+	connectivity := TerrainCaveNodeConnectivity {
+		nearest_route_distance = biomes.BIOME_FIELD_NO_DISTANCE,
+	}
+
+	for i := u32(0); i < region.cave_network_edge_count; i += 1 {
+		edge := region.cave_network_edges[i]
+		if edge.from_node_id == node.id || edge.to_node_id == node.id {
+			connectivity.has_edge = true
+			continue
+		}
+		px, py, pz, distance := terrain_density_closest_segment_point_3(
+			node.x,
+			node.y,
+			node.z,
+			edge.from_x,
+			edge.from_y,
+			edge.from_z,
+			edge.bend_x,
+			edge.bend_y,
+			edge.bend_z,
+		)
+		terrain_density_cave_node_connectivity_note_route(
+			&connectivity,
+			distance,
+			math.max(f32(3), edge.radius_blocks),
+			px,
+			py,
+			pz,
+		)
+		px, py, pz, distance = terrain_density_closest_segment_point_3(
+			node.x,
+			node.y,
+			node.z,
+			edge.bend_x,
+			edge.bend_y,
+			edge.bend_z,
+			edge.to_x,
+			edge.to_y,
+			edge.to_z,
+		)
+		terrain_density_cave_node_connectivity_note_route(
+			&connectivity,
+			distance,
+			math.max(f32(3), edge.radius_blocks),
+			px,
+			py,
+			pz,
+		)
+	}
+
+	for i := u32(0); i < region.cave_anchor_count; i += 1 {
+		anchor := region.cave_anchors[i]
+		if anchor.feature_id == node.id || anchor.target_feature_id == node.id {
+			connectivity.has_anchor = true
+			break
+		}
+	}
+
+	requires_connection :=
+		node.role == .Major_Region ||
+		node.role == .Water_Linked_Region ||
+		node.role == .Connector ||
+		connectivity.has_anchor
+	large_chamber := node.radius_blocks >= TERRAIN_CAVE_NODE_ISOLATED_CULL_RADIUS_BLOCKS
+	connectivity.should_bridge =
+		!connectivity.has_edge &&
+		connectivity.nearest_route_found &&
+		(requires_connection || large_chamber) &&
+		connectivity.nearest_route_distance <= TERRAIN_CAVE_NODE_BRIDGE_MAX_DISTANCE_BLOCKS
+	connectivity.should_carve = connectivity.has_edge || connectivity.should_bridge
+	if node.role == .Sealed_Secret && !connectivity.has_edge && !connectivity.has_anchor {
+		connectivity.should_carve = false
+		connectivity.should_bridge = false
+	}
+	return connectivity
+}
+
+terrain_density_cave_node_connectivity_note_route :: proc(
+	connectivity: ^TerrainCaveNodeConnectivity,
+	distance, route_radius, nearest_x, nearest_y, nearest_z: f32,
+) {
+	if !connectivity.nearest_route_found || distance < connectivity.nearest_route_distance {
+		connectivity.nearest_route_found = true
+		connectivity.nearest_route_distance = distance
+		connectivity.nearest_route_radius = route_radius
+		connectivity.nearest_x = nearest_x
+		connectivity.nearest_y = nearest_y
+		connectivity.nearest_z = nearest_z
+	}
+}
+
+terrain_density_cave_network_apply :: proc(
+	view: ^world_async.ChunkVoxelView,
+	region: ^biomes.GenerationRegion,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+) {
+	log.assertf(
+		len(columns) == CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH,
+		"terrain density column target count mismatch: %d",
+		len(columns),
+	)
+
+	node_connectivity: [biomes.GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]TerrainCaveNodeConnectivity
+	for i := u32(0); i < region.cave_network_node_count; i += 1 {
+		node_connectivity[i] = terrain_density_cave_node_connectivity(
+			region,
+			region.cave_network_nodes[i],
+		)
+	}
+
+	for i := u32(0); i < region.cave_network_node_count; i += 1 {
+		node := region.cave_network_nodes[i]
+		connectivity := node_connectivity[i]
+		if !connectivity.should_carve {
+			continue
+		}
+		terrain_density_carve_cave_node(view, region.key, chunk_origin, columns, node)
+	}
+
+	for i := u32(0); i < region.cave_network_edge_count; i += 1 {
+		edge := region.cave_network_edges[i]
+		terrain_density_carve_cave_edge(view, region, chunk_origin, columns, edge)
+	}
+
+	for i := u32(0); i < region.cave_network_node_count; i += 1 {
+		node := region.cave_network_nodes[i]
+		connectivity := node_connectivity[i]
+		if !connectivity.should_bridge {
+			continue
+		}
+		bridge_shape := terrain_density_cave_passage_shape(.Collapsed_Corridor)
+		if node.kind == .Geode_Chamber || node.biome_id == .Crystal_Geode_Network {
+			bridge_shape = terrain_density_cave_passage_shape(.Fracture)
+		} else if node.biome_id == .Fungal_Vaults {
+			bridge_shape = terrain_density_cave_passage_shape(.Worm_Path)
+			bridge_shape.radius_y_scale = math.min(bridge_shape.radius_y_scale, f32(0.72))
+		}
+		bridge_radius := math.max(
+			f32(2),
+			math.min(
+				node.connection_radius_blocks,
+				connectivity.nearest_route_radius * f32(0.88),
+			) *
+			TERRAIN_CAVE_NODE_BRIDGE_RADIUS_SCALE,
+		)
+		terrain_density_carve_rough_segment_shaped(
+			view,
+			region.key,
+			chunk_origin,
+			columns,
+			node.x,
+			node.y,
+			node.z,
+			connectivity.nearest_x,
+			connectivity.nearest_y,
+			connectivity.nearest_z,
+			bridge_radius,
+			bridge_shape,
+			TERRAIN_CAVE_BRANCH_SALT,
+			node.biome_id,
+		)
+	}
+
+	for i := u32(0); i < region.cave_anchor_count; i += 1 {
+		anchor := region.cave_anchors[i]
+		terrain_density_cave_anchor_apply(
+			view,
+			region,
+			chunk_origin,
+			columns,
+			anchor,
+			&node_connectivity,
+		)
+	}
+}
+
+terrain_density_cave_anchor_apply :: proc(
+	view: ^world_async.ChunkVoxelView,
+	region: ^biomes.GenerationRegion,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+	anchor: biomes.CaveAnchor,
+	node_connectivity: ^[biomes.GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]TerrainCaveNodeConnectivity,
+) {
+	anchor_radius := math.max(f32(3), anchor.influence_radius_blocks * 0.55)
+	node, node_index, found := terrain_density_cave_anchor_node_find(region, anchor)
+	if !found {
+		return
+	}
+
+	link_radius := math.max(f32(3), math.min(anchor_radius * 0.75, node.connection_radius_blocks))
+	if !node_connectivity[node_index].should_carve {
+		return
+	}
+	terrain_density_carve_cave_entrance(
+		view,
+		region.key,
+		chunk_origin,
+		columns,
+		anchor,
+		node,
+		link_radius,
+	)
+}
+
+terrain_density_cave_anchor_node_find :: proc(
+	region: ^biomes.GenerationRegion,
+	anchor: biomes.CaveAnchor,
+) -> (
+	node: biomes.CaveNetworkNode,
+	node_index: u32,
+	found: bool,
+) {
+	for i := u32(0); i < region.cave_network_node_count; i += 1 {
+		candidate := region.cave_network_nodes[i]
+		if candidate.id == anchor.feature_id {
+			return candidate, i, true
+		}
+	}
+
+	if !anchor.guaranteed_connection {
+		return
+	}
+
+	#partial switch anchor.kind {
+	case .Cave_Mouth,
+	     .Sinkhole,
+	     .Vertical_Shaft,
+	     .Lakebed_Breach,
+	     .Seabed_Breach,
+	     .Underground_River_Source,
+	     .Underground_River_Sink,
+	     .Magma_Vent,
+	     .Subterranean_Biome_Gateway:
+		break
+	case .Ravine_Breach:
+		return
+	}
+
+	best_distance_sq := f32(192 * 192)
+	for i := u32(0); i < region.cave_network_node_count; i += 1 {
+		candidate := region.cave_network_nodes[i]
+		dx := candidate.x - anchor.x
+		dy := candidate.y - anchor.y
+		dz := candidate.z - anchor.z
+		distance_sq := dx * dx + dy * dy + dz * dz
+		if distance_sq < best_distance_sq {
+			best_distance_sq = distance_sq
+			node = candidate
+			node_index = i
+			found = true
+		}
+	}
+	return
+}
+
+terrain_density_carve_cave_node :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+	node: biomes.CaveNetworkNode,
+) {
+	radius_x := node.radius_blocks
+	radius_y := node.radius_blocks * 0.85
+	radius_z := node.radius_blocks
+
+	#partial switch node.kind {
+	case .Biome_Hub:
+		radius_x *= 1.35
+		radius_y *= 0.78
+		radius_z *= 1.20
+	case .Underground_Lake:
+		radius_x *= 1.45
+		radius_y *= 0.55
+		radius_z *= 1.35
+	case .River_Junction:
+		radius_x *= 1.15
+		radius_y *= 0.72
+		radius_z *= 1.15
+	case .Vertical_Shaft:
+		radius_x *= 0.55
+		radius_y *= 1.75
+		radius_z *= 0.55
+	case .Geode_Chamber:
+		radius_x *= 1.05
+		radius_y *= 1.05
+		radius_z *= 1.05
+	case .Magma_Pocket:
+		radius_x *= 1.15
+		radius_y *= 0.70
+		radius_z *= 1.15
+	}
+
+	if terrain_density_cave_node_uses_profile_room(node) {
+		radius_scale := f32(1)
+		max_radius_xz := TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_XZ
+		max_radius_y := TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_Y
+		if !node.major_region {
+			radius_scale = TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_SCALE
+			max_radius_xz = TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_MAX_XZ
+			max_radius_y = TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_MAX_Y
+		}
+		terrain_density_carve_cave_room(
+			view,
+			key,
+			chunk_origin,
+			columns,
+			node.x,
+			node.y,
+			node.z,
+			math.min(radius_x * radius_scale, max_radius_xz),
+			math.min(radius_y * radius_scale, max_radius_y),
+			math.min(radius_z * radius_scale, max_radius_xz),
+			node.kind,
+			node.biome_id,
+		)
+		return
+	}
+
+	terrain_density_carve_rough_ellipsoid(
+		view,
+		key,
+		chunk_origin,
+		columns,
+		node.x,
+		node.y,
+		node.z,
+		radius_x,
+		radius_y,
+		radius_z,
+		TERRAIN_CAVE_ROUGHNESS_SALT,
+		node.biome_id,
+	)
+}
+
+terrain_density_cave_node_uses_profile_room :: proc(node: biomes.CaveNetworkNode) -> bool {
+	if node.major_region {
+		return true
+	}
+	if node.radius_blocks < TERRAIN_CAVE_NODE_PROFILE_ROOM_MIN_RADIUS_BLOCKS {
+		return false
+	}
+	return(
+		node.role == .Water_Linked_Region ||
+		node.role == .Resource_Chamber ||
+		node.kind == .Underground_Lake ||
+		node.kind == .Geode_Chamber ||
+		node.kind == .Magma_Pocket ||
+		(node.kind == .Chamber &&
+				node.radius_blocks >= TERRAIN_CAVE_NODE_ISOLATED_CULL_RADIUS_BLOCKS) \
+	)
+}
+
+terrain_density_carve_cave_room :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+	center_x, center_y, center_z, radius_x, radius_y, radius_z: f32,
+	kind: biomes.CaveNetworkNodeKind,
+	biome_id: biomes.BiomeID,
+) {
+	rx := math.max(f32(2), radius_x)
+	ry := math.max(f32(2), radius_y)
+	rz := math.max(f32(2), radius_z)
+	offset_x := biomes.regional_terrain_field_value_noise_3(
+		key,
+		i32(math.floor_f32(center_x)),
+		i32(math.floor_f32(center_y)),
+		i32(math.floor_f32(center_z)),
+		56,
+		TERRAIN_CAVE_BRANCH_SALT,
+	)
+	offset_z := biomes.regional_terrain_field_value_noise_3(
+		key,
+		i32(math.floor_f32(center_x)) + 11,
+		i32(math.floor_f32(center_y)),
+		i32(math.floor_f32(center_z)) - 7,
+		56,
+		TERRAIN_CAVE_BRANCH_SALT,
+	)
+	offset_len := math.sqrt_f32(offset_x * offset_x + offset_z * offset_z)
+	if offset_len <= 0.001 {
+		offset_x, offset_z = 1, 0
+	} else {
+		offset_x /= offset_len
+		offset_z /= offset_len
+	}
+
+	#partial switch biome_id {
+	case .Fungal_Vaults:
+		terrain_density_carve_cave_room_lobed_ellipsoid(
+			view,
+			key,
+			chunk_origin,
+			columns,
+			center_x,
+			center_y + ry * TERRAIN_FUNGAL_ROOM_LOWER_Y_OFFSET_SCALE,
+			center_z,
+			rx * TERRAIN_FUNGAL_ROOM_LOWER_XZ_SCALE,
+			ry * TERRAIN_FUNGAL_ROOM_LOWER_Y_SCALE,
+			rz * TERRAIN_FUNGAL_ROOM_LOWER_XZ_SCALE,
+			TERRAIN_CAVE_ROOM_DETAIL_SALT,
+			biome_id,
+			true,
+		)
+		terrain_density_carve_cave_room_lobed_ellipsoid(
+			view,
+			key,
+			chunk_origin,
+			columns,
+			center_x,
+			center_y + ry * TERRAIN_FUNGAL_ROOM_DOME_Y_OFFSET_SCALE,
+			center_z,
+			rx * TERRAIN_FUNGAL_ROOM_DOME_XZ_SCALE,
+			ry * TERRAIN_FUNGAL_ROOM_DOME_Y_SCALE,
+			rz * TERRAIN_FUNGAL_ROOM_DOME_XZ_SCALE,
+			TERRAIN_CAVE_ROOM_DETAIL_SALT,
+			biome_id,
+			true,
+		)
+		terrain_density_carve_cave_room_lobed_ellipsoid(
+			view,
+			key,
+			chunk_origin,
+			columns,
+			center_x + offset_x * rx * TERRAIN_FUNGAL_ROOM_ALCOVE_OFFSET_SCALE,
+			center_y + ry * TERRAIN_FUNGAL_ROOM_ALCOVE_Y_OFFSET_SCALE,
+			center_z + offset_z * rz * TERRAIN_FUNGAL_ROOM_ALCOVE_OFFSET_SCALE,
+			rx * TERRAIN_FUNGAL_ROOM_ALCOVE_XZ_SCALE,
+			ry * TERRAIN_FUNGAL_ROOM_ALCOVE_Y_SCALE,
+			rz * TERRAIN_FUNGAL_ROOM_ALCOVE_XZ_SCALE,
+			TERRAIN_CAVE_DETAIL_SALT,
+			biome_id,
+			true,
+		)
+		return
+	case .Crystal_Geode_Network:
+		terrain_density_carve_cave_room_lobed_ellipsoid(
+			view,
+			key,
+			chunk_origin,
+			columns,
+			center_x,
+			center_y,
+			center_z,
+			rx * TERRAIN_CRYSTAL_ROOM_MAIN_XZ_SCALE,
+			ry * TERRAIN_CRYSTAL_ROOM_MAIN_Y_SCALE,
+			rz * TERRAIN_CRYSTAL_ROOM_MAIN_XZ_SCALE,
+			TERRAIN_CAVE_PASSAGE_RIB_SALT,
+			biome_id,
+			true,
+		)
+		terrain_density_carve_rough_segment_shaped(
+			view,
+			key,
+			chunk_origin,
+			columns,
+			center_x - offset_x * rx * 0.72,
+			center_y - ry * TERRAIN_CRYSTAL_ROOM_FISSURE_LOWER_Y_SCALE,
+			center_z - offset_z * rz * 0.72,
+			center_x + offset_x * rx * 0.84,
+			center_y + ry * TERRAIN_CRYSTAL_ROOM_FISSURE_UPPER_Y_SCALE,
+			center_z + offset_z * rz * 0.84,
+			math.max(f32(2.5), math.min(rx, rz) * TERRAIN_CRYSTAL_ROOM_FISSURE_RADIUS_SCALE),
+			terrain_density_cave_passage_shape(.Fracture),
+			TERRAIN_CAVE_PASSAGE_RIB_SALT,
+			biome_id,
+			true,
+		)
+		return
+	case .Buried_Aquifer_Caves:
+		terrain_density_carve_cave_room_lobed_ellipsoid(
+			view,
+			key,
+			chunk_origin,
+			columns,
+			center_x,
+			center_y + ry * TERRAIN_AQUIFER_ROOM_BASIN_Y_OFFSET_SCALE,
+			center_z,
+			rx * TERRAIN_AQUIFER_ROOM_BASIN_XZ_SCALE,
+			ry * TERRAIN_AQUIFER_ROOM_BASIN_Y_SCALE,
+			rz * TERRAIN_AQUIFER_ROOM_BASIN_XZ_SCALE,
+			TERRAIN_CAVE_FIELD_DETAIL_SALT,
+			biome_id,
+			true,
+		)
+		terrain_density_carve_cave_room_lobed_ellipsoid(
+			view,
+			key,
+			chunk_origin,
+			columns,
+			center_x + offset_x * rx * TERRAIN_AQUIFER_ROOM_SHELF_OFFSET_SCALE,
+			center_y + ry * TERRAIN_AQUIFER_ROOM_SHELF_Y_OFFSET_SCALE,
+			center_z + offset_z * rz * TERRAIN_AQUIFER_ROOM_SHELF_OFFSET_SCALE,
+			rx * TERRAIN_AQUIFER_ROOM_SHELF_XZ_SCALE,
+			ry * TERRAIN_AQUIFER_ROOM_SHELF_Y_SCALE,
+			rz * TERRAIN_AQUIFER_ROOM_SHELF_XZ_SCALE,
+			TERRAIN_CAVE_ROOM_DETAIL_SALT,
+			biome_id,
+			true,
+		)
+		terrain_density_fill_water_ellipsoid(
+			view,
+			chunk_origin,
+			center_x,
+			center_y + ry * TERRAIN_AQUIFER_ROOM_WATER_Y_OFFSET_SCALE,
+			center_z,
+			rx * TERRAIN_AQUIFER_ROOM_WATER_XZ_SCALE,
+			math.max(f32(1.5), ry * TERRAIN_AQUIFER_ROOM_WATER_Y_SCALE),
+			rz * TERRAIN_AQUIFER_ROOM_WATER_XZ_SCALE,
+		)
+		return
+	}
+
+	if kind == .Vertical_Shaft {
+		terrain_density_carve_cave_room_lobed_ellipsoid(
+			view,
+			key,
+			chunk_origin,
+			columns,
+			center_x,
+			center_y,
+			center_z,
+			rx * 0.55,
+			ry,
+			rz * 0.55,
+			TERRAIN_CAVE_ROUGHNESS_SALT,
+			biome_id,
+			true,
+		)
+		return
+	}
+	terrain_density_carve_cave_room_lobed_ellipsoid(
+		view,
+		key,
+		chunk_origin,
+		columns,
+		center_x,
+		center_y,
+		center_z,
+		rx,
+		ry,
+		rz,
+		TERRAIN_CAVE_ROUGHNESS_SALT,
+		biome_id,
+		true,
+	)
+}
+
+terrain_density_carve_cave_room_lobed_ellipsoid :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+	center_x, center_y, center_z, radius_x, radius_y, radius_z: f32,
+	noise_salt: u64,
+	biome_id: biomes.BiomeID,
+	directional_material_profile: bool = false,
+) {
+	rx := math.max(f32(1), radius_x)
+	ry := math.max(f32(1), radius_y)
+	rz := math.max(f32(1), radius_z)
+	padding := math.max(rx, math.max(ry, rz)) * 0.26 + 2
+	local_min_x, local_max_x, local_min_y, local_max_y, local_min_z, local_max_z, intersects :=
+		terrain_density_carve_bounds_from_extents(
+			chunk_origin,
+			center_x - rx - padding,
+			center_x + rx + padding,
+			center_y - ry - padding,
+			center_y + ry + padding,
+			center_z - rz - padding,
+			center_z + rz + padding,
+		)
+	if !intersects {
+		return
+	}
+
+	internal_structure_active :=
+		math.min(rx, math.min(ry, rz)) >= TERRAIN_CAVE_ROOM_INTERNAL_STRUCTURE_MIN_RADIUS
+	axis_x := biomes.regional_terrain_field_value_noise_3(
+		key,
+		i32(math.floor_f32(center_x)),
+		i32(math.floor_f32(center_y)),
+		i32(math.floor_f32(center_z)),
+		64,
+		TERRAIN_CAVE_BRANCH_SALT,
+	)
+	axis_z := biomes.regional_terrain_field_value_noise_3(
+		key,
+		i32(math.floor_f32(center_x)) + 17,
+		i32(math.floor_f32(center_y)) - 5,
+		i32(math.floor_f32(center_z)) + 23,
+		64,
+		TERRAIN_CAVE_ROOM_DETAIL_SALT,
+	)
+	axis_len := math.sqrt_f32(axis_x * axis_x + axis_z * axis_z)
+	if axis_len <= 0.001 {
+		axis_x, axis_z = 1, 0
+	} else {
+		axis_x /= axis_len
+		axis_z /= axis_len
+	}
+
+	for z := local_min_z; z <= local_max_z; z += 1 {
+		world_z := f32(chunk_origin.z + z) + 0.5
+		for y := local_min_y; y <= local_max_y; y += 1 {
+			world_y := f32(chunk_origin.y + y) + 0.5
+			for x := local_min_x; x <= local_max_x; x += 1 {
+				world_x := f32(chunk_origin.x + x) + 0.5
+				nx := (world_x - center_x) / rx
+				ny := (world_y - center_y) / ry
+				nz := (world_z - center_z) / rz
+				rough := biomes.regional_terrain_field_value_noise_3(
+					key,
+					chunk_origin.x + x,
+					chunk_origin.y + y,
+					chunk_origin.z + z,
+					24,
+					noise_salt,
+				)
+				detail := biomes.regional_terrain_field_value_noise_3(
+					key,
+					chunk_origin.x + x,
+					chunk_origin.y + y,
+					chunk_origin.z + z,
+					10,
+					noise_salt ~ TERRAIN_CAVE_PASSAGE_RIB_SALT,
+				)
+				along := nx * axis_x + nz * axis_z
+				across := nx * -axis_z + nz * axis_x
+				radial := math.sqrt_f32(along * along + across * across)
+				wall_support :=
+					math.smoothstep(f32(0.18), f32(1.08), radial) *
+					(1.0 - math.smoothstep(f32(0.76), f32(1.12), math.abs(ny)))
+				core_shelf := 1.0 - math.smoothstep(f32(0.62), f32(1.02), radial)
+				warped_along :=
+					along +
+					detail *
+						TERRAIN_CAVE_ROOM_COORD_WARP_SCALE *
+						wall_support *
+						(0.80 + math.abs(across) * 0.28)
+				warped_across :=
+					across -
+					rough *
+						TERRAIN_CAVE_ROOM_COORD_WARP_SCALE *
+						wall_support *
+						(0.72 + math.abs(along) * 0.24)
+				warped_y := ny + detail * TERRAIN_CAVE_ROOM_VERTICAL_WARP_SCALE * core_shelf
+				shape :=
+					warped_along * warped_along +
+					warped_y * warped_y +
+					warped_across * warped_across
+				core_support := math.clamp((f32(1.0) - shape) * 1.389, f32(0), f32(1))
+				rough_scale :=
+					TERRAIN_CAVE_ROUGH_ELLIPSOID_EDGE_SCALE -
+					(TERRAIN_CAVE_ROUGH_ELLIPSOID_EDGE_SCALE -
+							TERRAIN_CAVE_ROUGH_ELLIPSOID_CORE_SCALE) *
+						core_support
+				threshold :=
+					1.0 +
+					(rough * 0.68 + detail * 0.32) * rough_scale +
+					detail * TERRAIN_CAVE_ROOM_SCALLOP_SCALE * wall_support +
+					terrain_density_cave_room_lobe_threshold_adjust(nx, ny, nz, axis_x, axis_z)
+				if shape <= threshold {
+					if internal_structure_active &&
+					   terrain_density_cave_room_internal_structure_preserves(
+						   nx,
+						   ny,
+						   nz,
+						   rx,
+						   ry,
+						   rz,
+						   axis_x,
+						   axis_z,
+						   rough,
+						   biome_id,
+					   ) {
+						continue
+					}
+					terrain_density_carve_local_block_with_material(
+						view,
+						key,
+						chunk_origin,
+						columns,
+						x,
+						y,
+						z,
+						biome_id,
+						directional_material_profile,
+					)
+				}
+			}
+		}
+	}
+}
+
+terrain_density_cave_room_internal_structure_preserves :: proc(
+	nx, ny, nz, rx, ry, rz, axis_x, axis_z, rough: f32,
+	biome_id: biomes.BiomeID,
+) -> bool {
+	min_radius := math.min(rx, math.min(ry, rz))
+	if min_radius < TERRAIN_CAVE_ROOM_INTERNAL_STRUCTURE_MIN_RADIUS {
+		return false
+	}
+
+	shape := nx * nx + ny * ny + nz * nz
+	if shape < 0.08 || shape > 0.88 {
+		return false
+	}
+
+	along := nx * axis_x + nz * axis_z
+	across := nx * -axis_z + nz * axis_x
+	along_abs := math.abs(along)
+	across_abs := math.abs(across)
+	vertical_column := 1.0 - math.smoothstep(f32(0.72), f32(0.98), math.abs(ny))
+	positive_rough := math.smoothstep(f32(0.02), f32(0.48), rough)
+	if vertical_column <= 0 || positive_rough <= 0 {
+		return false
+	}
+
+	strength := f32(0)
+	#partial switch biome_id {
+	case .Fungal_Vaults:
+		side_root :=
+			math.clamp(1.0 - math.abs(across_abs - f32(0.42)) * f32(5.0), f32(0), f32(1)) *
+			(1.0 - math.smoothstep(f32(0.62), f32(0.94), along_abs))
+		strength = side_root * vertical_column * positive_rough
+		return strength > 0.42
+	case .Crystal_Geode_Network:
+		crystal_blade :=
+			math.clamp(1.0 - math.abs(across_abs - f32(0.26)) * f32(7.0), f32(0), f32(1)) *
+			(1.0 - math.smoothstep(f32(0.70), f32(0.96), along_abs))
+		strength = crystal_blade * vertical_column * positive_rough
+		return strength > 0.46
+	case .Buried_Aquifer_Caves:
+		lower_island := math.smoothstep(f32(0.12), f32(0.58), -ny)
+		island_band :=
+			math.clamp(1.0 - math.abs(across_abs - f32(0.32)) * f32(5.2), f32(0), f32(1)) *
+			(1.0 - math.smoothstep(f32(0.50), f32(0.88), along_abs))
+		strength = island_band * lower_island * positive_rough
+		return strength > 0.36
+	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+		side_rib :=
+			math.clamp(1.0 - math.abs(across_abs - f32(0.36)) * f32(5.6), f32(0), f32(1)) *
+			(1.0 - math.smoothstep(f32(0.62), f32(0.92), along_abs))
+		strength = side_rib * vertical_column * positive_rough
+		return strength > 0.48
+	}
+	return false
+}
+
+terrain_density_cave_room_lobe_threshold_adjust :: proc(nx, ny, nz, axis_x, axis_z: f32) -> f32 {
+	shape := nx * nx + ny * ny + nz * nz
+	core_support := math.clamp((f32(1.0) - shape) * 1.389, f32(0), f32(1))
+	edge_support := 1.0 - core_support
+	along := nx * axis_x + nz * axis_z
+	across := nx * -axis_z + nz * axis_x
+	along_abs := math.abs(along)
+	across_abs := math.abs(across)
+	forward_lobe := math.smoothstep(f32(0.08), f32(0.86), along)
+	back_lobe := math.smoothstep(f32(0.18), f32(0.82), -along)
+	side_notch :=
+		math.smoothstep(f32(0.32), f32(0.92), across_abs) *
+		(1.0 - math.smoothstep(f32(0.70), f32(1.05), along_abs))
+	ceiling_rib :=
+		math.smoothstep(f32(0.18), f32(0.85), ny) *
+		math.smoothstep(f32(0.38), f32(0.96), across_abs)
+	return(
+		edge_support *
+		(forward_lobe * TERRAIN_CAVE_ROOM_LOBE_SWELL_SCALE +
+				back_lobe * TERRAIN_CAVE_ROOM_LOBE_BACK_SWELL_SCALE -
+				side_notch * TERRAIN_CAVE_ROOM_SIDE_NOTCH_SCALE -
+				ceiling_rib * TERRAIN_CAVE_ROOM_CEILING_RIB_SCALE) \
+	)
+}
+
+terrain_density_fill_water_ellipsoid :: proc(
+	view: ^world_async.ChunkVoxelView,
+	chunk_origin: world_async.BlockCoord,
+	center_x, center_y, center_z, radius_x, radius_y, radius_z: f32,
+) {
+	rx := math.max(f32(1), radius_x)
+	ry := math.max(f32(1), radius_y)
+	rz := math.max(f32(1), radius_z)
+	local_min_x, local_max_x, local_min_y, local_max_y, local_min_z, local_max_z, intersects :=
+		terrain_density_carve_bounds_from_extents(
+			chunk_origin,
+			center_x - rx,
+			center_x + rx,
+			center_y - ry,
+			center_y + ry,
+			center_z - rz,
+			center_z + rz,
+		)
+	if !intersects {
+		return
+	}
+
+	for z := local_min_z; z <= local_max_z; z += 1 {
+		world_z := f32(chunk_origin.z + z) + 0.5
+		for y := local_min_y; y <= local_max_y; y += 1 {
+			world_y := f32(chunk_origin.y + y) + 0.5
+			for x := local_min_x; x <= local_max_x; x += 1 {
+				world_x := f32(chunk_origin.x + x) + 0.5
+				nx := (world_x - center_x) / rx
+				ny := (world_y - center_y) / ry
+				nz := (world_z - center_z) / rz
+				if nx * nx + ny * ny + nz * nz > 1.0 {
+					continue
+				}
+				terrain_density_fill_local_water_block(view, x, y, z)
+			}
+		}
+	}
+}
+
+terrain_density_carve_cave_edge :: proc(
+	view: ^world_async.ChunkVoxelView,
+	region: ^biomes.GenerationRegion,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+	edge: biomes.CaveNetworkEdge,
+) {
+	radius := edge.radius_blocks
+	#partial switch edge.kind {
+	case .Canyon:
+		radius *= 1.18
+	case .Fracture:
+		radius *= 0.72
+	case .Flooded_Passage:
+		radius *= 1.10
+	case .Vertical_Shaft:
+		radius *= 0.92
+	case .Collapsed_Corridor:
+		radius *= 0.82
+	case .Worm_Path:
+		radius *= 0.92
+	}
+	terrain_density_carve_cave_passage_segment(
+		view,
+		region.key,
+		chunk_origin,
+		columns,
+		edge.from_x,
+		edge.from_y,
+		edge.from_z,
+		edge.bend_x,
+		edge.bend_y,
+		edge.bend_z,
+		radius,
+		edge.kind,
+		edge.from_biome_id,
+	)
+	terrain_density_carve_cave_passage_segment(
+		view,
+		region.key,
+		chunk_origin,
+		columns,
+		edge.bend_x,
+		edge.bend_y,
+		edge.bend_z,
+		edge.to_x,
+		edge.to_y,
+		edge.to_z,
+		radius * 0.94,
+		edge.kind,
+		edge.to_biome_id,
+	)
+}
+
+terrain_density_carve_cave_passage_segment :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+	from_x, from_y, from_z, to_x, to_y, to_z, radius_blocks: f32,
+	kind: biomes.CaveNetworkEdgeKind,
+	biome_id: biomes.BiomeID,
+) {
+	radius := math.max(f32(1), radius_blocks)
+	salt := TERRAIN_CAVE_ROUGHNESS_SALT
+	#partial switch kind {
+	case .Canyon:
+		radius *= 1.10
+		salt = TERRAIN_CAVE_ROOM_DETAIL_SALT
+	case .Fracture:
+		radius *= 0.68
+		salt = TERRAIN_CAVE_PASSAGE_RIB_SALT
+	case .Flooded_Passage:
+		radius *= 1.06
+		salt = TERRAIN_CAVE_FIELD_DETAIL_SALT
+	case .Vertical_Shaft:
+		radius *= 0.86
+	case .Collapsed_Corridor:
+		radius *= 0.72
+		salt = TERRAIN_CAVE_PASSAGE_RIB_SALT
+	case .Worm_Path:
+		radius *= 0.90
+		salt = TERRAIN_CAVE_BRANCH_SALT
+	}
+	terrain_density_carve_rough_segment_shaped(
+		view,
+		key,
+		chunk_origin,
+		columns,
+		from_x,
+		from_y,
+		from_z,
+		to_x,
+		to_y,
+		to_z,
+		radius,
+		terrain_density_cave_passage_shape(kind),
+		salt,
+		biome_id,
+	)
+}
+
+terrain_density_cave_passage_shape :: proc(
+	kind: biomes.CaveNetworkEdgeKind,
+) -> TerrainCaveSegmentShape {
+	shape := terrain_density_cave_segment_shape_default()
+	#partial switch kind {
+	case .Canyon:
+		shape.radius_x_scale = 1.12
+		shape.radius_y_scale = 1.10
+		shape.radius_z_scale = 1.06
+		shape.radius_noise_scale = 0.20
+		shape.radius_neck_scale = 0.10
+		shape.radius_swell_scale = 0.28
+		shape.radius_endpoint_scale = 0.08
+		shape.meander_scale = 0.82
+		shape.lift_scale = 0.42
+		shape.curve_scale = 0.18
+	case .Flooded_Passage:
+		shape.radius_x_scale = 1.12
+		shape.radius_y_scale = 0.58
+		shape.radius_z_scale = 1.10
+		shape.radius_noise_scale = 0.12
+		shape.radius_neck_scale = 0.08
+		shape.radius_swell_scale = 0.18
+		shape.radius_endpoint_scale = 0.05
+		shape.meander_scale = 0.62
+		shape.lift_scale = 0.18
+		shape.curve_scale = 0.14
+	case .Fracture:
+		shape.radius_x_scale = 0.68
+		shape.radius_y_scale = 1.12
+		shape.radius_z_scale = 0.82
+		shape.radius_noise_scale = 0.24
+		shape.radius_neck_scale = 0.26
+		shape.radius_swell_scale = 0.14
+		shape.radius_endpoint_scale = 0.08
+		shape.meander_scale = 0.96
+		shape.lift_scale = 0.52
+		shape.curve_scale = 0.30
+	case .Vertical_Shaft:
+		shape.radius_x_scale = 0.70
+		shape.radius_y_scale = 1.12
+		shape.radius_z_scale = 0.70
+		shape.radius_noise_scale = 0.12
+		shape.radius_neck_scale = 0.12
+		shape.radius_swell_scale = 0.12
+		shape.radius_endpoint_scale = 0.05
+		shape.meander_scale = 0.34
+		shape.lift_scale = 0.64
+		shape.curve_scale = 0.10
+	case .Collapsed_Corridor:
+		shape.radius_x_scale = 0.82
+		shape.radius_y_scale = 0.58
+		shape.radius_z_scale = 1.00
+		shape.radius_noise_scale = 0.26
+		shape.radius_neck_scale = 0.30
+		shape.radius_swell_scale = 0.10
+		shape.radius_endpoint_scale = 0.06
+		shape.meander_scale = 0.70
+		shape.lift_scale = 0.22
+		shape.curve_scale = 0.22
+	case .Worm_Path:
+		shape.radius_x_scale = 0.82
+		shape.radius_y_scale = 0.78
+		shape.radius_z_scale = 1.18
+		shape.radius_noise_scale = 0.30
+		shape.radius_neck_scale = 0.18
+		shape.radius_swell_scale = 0.24
+		shape.radius_endpoint_scale = 0.07
+		shape.meander_scale = 1.08
+		shape.lift_scale = 0.50
+		shape.curve_scale = 0.42
+	case .Tunnel:
+		shape.radius_y_scale = 0.78
+		shape.radius_noise_scale = 0.24
+		shape.radius_neck_scale = 0.22
+		shape.radius_swell_scale = 0.18
+		shape.radius_endpoint_scale = 0.06
+		shape.meander_scale = 0.88
+		shape.lift_scale = 0.42
+		shape.curve_scale = 0.24
+	}
+	return shape
+}
+
+terrain_density_carve_cave_entrance :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+	anchor: biomes.CaveAnchor,
+	node: biomes.CaveNetworkNode,
+	link_radius: f32,
+) {
+	opening_radius := math.max(f32(4), anchor.influence_radius_blocks)
+	opening_y := opening_radius * 0.45
+	if anchor.kind == .Sinkhole || anchor.kind == .Vertical_Shaft {
+		opening_y = opening_radius * 1.30
+	}
+
+	if anchor.kind == .Cave_Mouth || anchor.kind == .Ravine_Breach {
+		terrain_density_carve_cave_mouth(
+			view,
+			key,
+			chunk_origin,
+			columns,
+			anchor,
+			node,
+			opening_radius,
+		)
+		terrain_density_carve_cave_mouth_transition(
+			view,
+			key,
+			chunk_origin,
+			columns,
+			anchor,
+			node,
+			opening_radius,
+			link_radius,
+		)
+		return
+	} else if anchor.kind == .Sinkhole || anchor.kind == .Vertical_Shaft {
+		terrain_density_carve_sinkhole_throat(
+			view,
+			key,
+			chunk_origin,
+			columns,
+			anchor,
+			node,
+			opening_radius,
+			link_radius,
+		)
+	} else {
+		terrain_density_carve_rough_ellipsoid(
+			view,
+			key,
+			chunk_origin,
+			columns,
+			anchor.x,
+			anchor.y - opening_y * 0.25,
+			anchor.z,
+			opening_radius * 1.20,
+			opening_y,
+			opening_radius,
+			TERRAIN_CAVE_DETAIL_SALT,
+			node.biome_id,
+		)
+	}
+
+	mid_x := (anchor.x + node.x) * 0.5
+	mid_y := (anchor.y + node.y) * 0.5
+	mid_z := (anchor.z + node.z) * 0.5
+	terrain_density_carve_rough_segment_shaped(
+		view,
+		key,
+		chunk_origin,
+		columns,
+		anchor.x,
+		anchor.y,
+		anchor.z,
+		mid_x,
+		mid_y,
+		mid_z,
+		math.max(opening_radius * 0.42, link_radius),
+		terrain_density_cave_entrance_link_shape(anchor.kind, true),
+		TERRAIN_CAVE_DETAIL_SALT,
+		node.biome_id,
+	)
+	terrain_density_carve_rough_segment_shaped(
+		view,
+		key,
+		chunk_origin,
+		columns,
+		mid_x,
+		mid_y,
+		mid_z,
+		node.x,
+		node.y,
+		node.z,
+		link_radius,
+		terrain_density_cave_entrance_link_shape(anchor.kind, false),
+		TERRAIN_CAVE_ROUGHNESS_SALT,
+		node.biome_id,
+	)
+}
+
+terrain_density_cave_entrance_link_shape :: proc(
+	kind: biomes.CaveAnchorKind,
+	near_surface: bool,
+) -> TerrainCaveSegmentShape {
+	shape := terrain_density_cave_passage_shape(.Tunnel)
+	#partial switch kind {
+	case .Cave_Mouth, .Ravine_Breach:
+		if near_surface {
+			shape = terrain_density_cave_passage_shape(.Collapsed_Corridor)
+			shape.radius_y_scale = 0.54
+			shape.radius_neck_scale = 0.34
+			shape.curve_scale = 0.26
+		} else {
+			shape.radius_y_scale = 0.70
+			shape.radius_neck_scale = 0.26
+			shape.curve_scale = 0.30
+		}
+	case .Sinkhole, .Vertical_Shaft:
+		if near_surface {
+			shape = terrain_density_cave_passage_shape(.Vertical_Shaft)
+			shape.radius_x_scale = 0.64
+			shape.radius_z_scale = 0.64
+			shape.radius_neck_scale = 0.18
+			shape.curve_scale = 0.14
+		} else {
+			shape = terrain_density_cave_passage_shape(.Fracture)
+			shape.radius_x_scale = 0.72
+			shape.radius_z_scale = 0.78
+			shape.curve_scale = 0.24
+		}
+	case .Lakebed_Breach, .Seabed_Breach, .Underground_River_Source, .Underground_River_Sink:
+		shape = terrain_density_cave_passage_shape(.Flooded_Passage)
+		shape.radius_neck_scale = 0.14
+	}
+	return shape
+}
+
+terrain_density_cave_entrance_planar_direction :: proc(
+	anchor: biomes.CaveAnchor,
+	node: biomes.CaveNetworkNode,
+) -> (
+	dir_x, dir_z: f32,
+) {
+	dir_x = node.x - anchor.x
+	dir_z = node.z - anchor.z
+	dir_len := math.sqrt_f32(dir_x * dir_x + dir_z * dir_z)
+	if dir_len > 0.001 && anchor.kind != .Cave_Mouth && anchor.kind != .Ravine_Breach {
+		return dir_x / dir_len, dir_z / dir_len
+	}
+
+	hash := biomes.feature_grid_hash_combine(u64(anchor.id), TERRAIN_CAVE_CURVE_SALT)
+	dir_x = biomes.feature_grid_signed_unit_f32(hash, TERRAIN_CAVE_BRANCH_SALT)
+	dir_z = biomes.feature_grid_signed_unit_f32(hash, TERRAIN_CAVE_PASSAGE_RIB_SALT)
+	dir_len = math.sqrt_f32(dir_x * dir_x + dir_z * dir_z)
+	if dir_len <= 0.001 {
+		return 0, 1
+	}
+	return dir_x / dir_len, dir_z / dir_len
+}
+
+terrain_density_cave_mouth_size_support :: proc(opening_radius: f32) -> f32 {
+	return math.smoothstep(
+		TERRAIN_CAVE_MOUTH_SMALL_RADIUS_BLOCKS,
+		TERRAIN_CAVE_MOUTH_LARGE_RADIUS_BLOCKS,
+		opening_radius,
+	)
+}
+
+terrain_density_cave_mouth_reach_blocks :: proc(opening_radius: f32) -> f32 {
+	size_support := terrain_density_cave_mouth_size_support(opening_radius)
+	return(
+		opening_radius *
+		biomes.regional_terrain_field_lerp(
+			TERRAIN_CAVE_MOUTH_SMALL_REACH_SCALE,
+			TERRAIN_CAVE_MOUTH_LARGE_REACH_SCALE,
+			size_support,
+		) \
+	)
+}
+
+terrain_density_cave_mouth_surface_width_scale :: proc(opening_radius: f32) -> f32 {
+	size_support := terrain_density_cave_mouth_size_support(opening_radius)
+	return biomes.regional_terrain_field_lerp(
+		TERRAIN_CAVE_MOUTH_SMALL_WIDTH_SCALE,
+		TERRAIN_CAVE_MOUTH_LARGE_WIDTH_SCALE,
+		size_support,
+	)
+}
+
+terrain_density_cave_mouth_transition_run_blocks :: proc(opening_radius: f32) -> f32 {
+	size_support := terrain_density_cave_mouth_size_support(opening_radius)
+	return(
+		opening_radius *
+		biomes.regional_terrain_field_lerp(
+			f32(1.70),
+			TERRAIN_CAVE_MOUTH_TRANSITION_RUN_SCALE,
+			size_support,
+		) \
+	)
+}
+
+terrain_density_cave_mouth_transition_drop_blocks :: proc(opening_radius, total_drop: f32) -> f32 {
+	size_support := terrain_density_cave_mouth_size_support(opening_radius)
+	drop_limit :=
+		opening_radius *
+		biomes.regional_terrain_field_lerp(
+			f32(1.05),
+			TERRAIN_CAVE_MOUTH_TRANSITION_DROP_SCALE,
+			size_support,
+		)
+	return math.min(math.max(f32(3.0), total_drop * 0.32), drop_limit)
+}
+
+terrain_density_cave_mouth_near_link_radius :: proc(opening_radius, link_radius: f32) -> f32 {
+	size_support := terrain_density_cave_mouth_size_support(opening_radius)
+	opening_scaled :=
+		opening_radius * biomes.regional_terrain_field_lerp(f32(0.30), f32(0.46), size_support)
+	return math.max(f32(1.65), math.min(link_radius, opening_scaled))
+}
+
+terrain_density_cave_mouth_transition_style :: proc(
+	anchor: biomes.CaveAnchor,
+	opening_radius: f32,
+) -> TerrainCaveMouthTransitionStyle {
+	size_support := terrain_density_cave_mouth_size_support(opening_radius)
+	hash := biomes.feature_grid_hash_combine(u64(anchor.id), TERRAIN_CAVE_PASSAGE_RIB_SALT)
+	roll := biomes.feature_grid_unit_f32(hash, TERRAIN_CAVE_CURVE_SALT)
+	if roll < 0.34 {
+		return .Sloped_Tube
+	}
+	if roll < 0.72 || size_support < TERRAIN_CAVE_MOUTH_VESTIBULE_MIN_SUPPORT {
+		return .Curved_Ramp
+	}
+	return .Spiral_Ramp
+}
+
+terrain_density_cave_mouth_transition_scales :: proc(
+	style: TerrainCaveMouthTransitionStyle,
+) -> TerrainCaveMouthTransitionScales {
+	scales := TerrainCaveMouthTransitionScales {
+			run_scale          = 1,
+			drop_scale         = 1,
+			side_scale         = 1,
+			vestibule_scale    = 1,
+			bend_t             = 0.58,
+			bend_return_scale  = 0.55,
+			deep_radius_scale  = 0.90,
+			near_curve_boost   = 0,
+			near_meander_boost = 0,
+			deep_curve_boost   = 0.16,
+			deep_meander_boost = 0.18,
+			deep_lift_boost    = 0,
+		}
+	switch style {
+	case .Sloped_Tube:
+		scales.run_scale = 0.92
+		scales.side_scale = 0.42
+		scales.vestibule_scale = 0.78
+		scales.bend_t = 0.64
+		scales.bend_return_scale = 0.24
+		scales.deep_radius_scale = 0.82
+		scales.deep_curve_boost = 0.08
+		scales.deep_meander_boost = 0.06
+	case .Curved_Ramp:
+		scales.drop_scale = 0.94
+		scales.side_scale = 1.04
+		scales.bend_t = 0.54
+		scales.bend_return_scale = 0.68
+		scales.near_curve_boost = 0.06
+		scales.near_meander_boost = 0.08
+		scales.deep_curve_boost = 0.22
+		scales.deep_meander_boost = 0.22
+	case .Spiral_Ramp:
+		scales.run_scale = 1.16
+		scales.drop_scale = 0.82
+		scales.side_scale = 1.48
+		scales.vestibule_scale = 1.16
+		scales.bend_t = 0.46
+		scales.bend_return_scale = 1.18
+		scales.deep_radius_scale = 0.96
+		scales.near_curve_boost = 0.14
+		scales.near_meander_boost = 0.16
+		scales.deep_curve_boost = 0.34
+		scales.deep_meander_boost = 0.32
+		scales.deep_lift_boost = 0.10
+	}
+	return scales
+}
+
+terrain_density_cave_mouth_transition_bend_extension :: proc(
+	style: TerrainCaveMouthTransitionStyle,
+	size_support, transition_run: f32,
+) -> f32 {
+	extension_support := math.smoothstep(
+		TERRAIN_CAVE_MOUTH_VESTIBULE_MIN_SUPPORT,
+		f32(1),
+		size_support,
+	)
+	switch style {
+	case .Curved_Ramp:
+		return transition_run * TERRAIN_CAVE_MOUTH_CURVED_BEND_EXTENSION_SCALE * extension_support
+	case .Spiral_Ramp:
+		return transition_run * TERRAIN_CAVE_MOUTH_SPIRAL_BEND_EXTENSION_SCALE * extension_support
+	case .Sloped_Tube:
+		small_extension_support :=
+			1.0 - math.smoothstep(f32(0), TERRAIN_CAVE_MOUTH_VESTIBULE_MIN_SUPPORT, size_support)
+		return(
+			transition_run *
+			(TERRAIN_CAVE_MOUTH_SMALL_SLOPED_BEND_EXTENSION_SCALE * small_extension_support +
+					TERRAIN_CAVE_MOUTH_SLOPED_BEND_EXTENSION_SCALE * extension_support) \
+		)
+	}
+	return 0
+}
+
+terrain_density_cave_mouth_transition_plan :: proc(
+	anchor: biomes.CaveAnchor,
+	node: biomes.CaveNetworkNode,
+	opening_radius, link_radius: f32,
+) -> TerrainCaveMouthTransitionPlan {
+	dir_x, dir_z := terrain_density_cave_entrance_planar_direction(anchor, node)
+	side_x := -dir_z
+	side_z := dir_x
+	size_support := terrain_density_cave_mouth_size_support(opening_radius)
+	total_drop := math.max(f32(0), anchor.y - node.y)
+	style := terrain_density_cave_mouth_transition_style(anchor, opening_radius)
+	scales := terrain_density_cave_mouth_transition_scales(style)
+	transition_run :=
+		terrain_density_cave_mouth_transition_run_blocks(opening_radius) * scales.run_scale
+	transition_drop := math.max(
+		f32(3),
+		terrain_density_cave_mouth_transition_drop_blocks(opening_radius, total_drop) *
+		scales.drop_scale,
+	)
+	near_radius := terrain_density_cave_mouth_near_link_radius(opening_radius, link_radius)
+
+	hash := biomes.feature_grid_hash_combine(u64(anchor.id), TERRAIN_CAVE_BRANCH_SALT)
+	side_sign := biomes.feature_grid_signed_unit_f32(hash, TERRAIN_CAVE_CURVE_SALT)
+	if side_sign >= 0 {
+		side_sign = 1
+	} else {
+		side_sign = -1
+	}
+	side_offset :=
+		side_sign *
+		opening_radius *
+		TERRAIN_CAVE_MOUTH_TRANSITION_SIDE_SCALE *
+		biomes.regional_terrain_field_lerp(f32(0.28), f32(1.0), size_support) *
+		scales.side_scale
+
+	landing_x := anchor.x + dir_x * transition_run + side_x * side_offset
+	landing_y := anchor.y - transition_drop
+	landing_z := anchor.z + dir_z * transition_run + side_z * side_offset
+	bend_extension := terrain_density_cave_mouth_transition_bend_extension(
+		style,
+		size_support,
+		transition_run,
+	)
+	bend_x :=
+		landing_x +
+		(node.x - landing_x) * scales.bend_t -
+		side_x * side_offset * scales.bend_return_scale
+	bend_z :=
+		landing_z +
+		(node.z - landing_z) * scales.bend_t -
+		side_z * side_offset * scales.bend_return_scale
+	bend_y := landing_y + (node.y - landing_y) * scales.bend_t
+	if bend_extension > 0 {
+		if style == .Curved_Ramp ||
+		   (style == .Sloped_Tube && size_support < TERRAIN_CAVE_MOUTH_VESTIBULE_MIN_SUPPORT) {
+			bend_x =
+				landing_x +
+				dir_x * bend_extension -
+				side_x * side_offset * scales.bend_return_scale
+			bend_z =
+				landing_z +
+				dir_z * bend_extension -
+				side_z * side_offset * scales.bend_return_scale
+		} else {
+			bend_x += dir_x * bend_extension
+			bend_z += dir_z * bend_extension
+		}
+		bend_run := math.sqrt_f32(
+			(bend_x - landing_x) * (bend_x - landing_x) +
+			(bend_z - landing_z) * (bend_z - landing_z),
+		)
+		handoff_run := math.sqrt_f32(
+			(node.x - bend_x) * (node.x - bend_x) + (node.z - bend_z) * (node.z - bend_z),
+		)
+		total_deep_run := math.max(f32(1), bend_run + handoff_run)
+		total_deep_drop := math.max(f32(0), landing_y - node.y)
+		bend_y = landing_y - total_deep_drop * (bend_run / total_deep_run)
+	}
+	bend_run_blocks := math.sqrt_f32(
+		(bend_x - landing_x) * (bend_x - landing_x) + (bend_z - landing_z) * (bend_z - landing_z),
+	)
+	handoff_run_blocks := math.sqrt_f32(
+		(node.x - bend_x) * (node.x - bend_x) + (node.z - bend_z) * (node.z - bend_z),
+	)
+
+	return TerrainCaveMouthTransitionPlan {
+		style = style,
+		size_support = size_support,
+		dir_x = dir_x,
+		dir_z = dir_z,
+		side_x = side_x,
+		side_z = side_z,
+		transition_run = transition_run,
+		transition_drop = transition_drop,
+		near_radius = near_radius,
+		side_offset = side_offset,
+		landing_x = landing_x,
+		landing_y = landing_y,
+		landing_z = landing_z,
+		bend_x = bend_x,
+		bend_y = bend_y,
+		bend_z = bend_z,
+		near_run_blocks = math.sqrt_f32(
+			transition_run * transition_run + side_offset * side_offset,
+		),
+		near_drop_blocks = math.max(f32(0), anchor.y - landing_y),
+		bend_run_blocks = bend_run_blocks,
+		bend_drop_blocks = math.max(f32(0), landing_y - bend_y),
+		handoff_run_blocks = handoff_run_blocks,
+		handoff_drop_blocks = math.max(f32(0), bend_y - node.y),
+	}
+}
+
+terrain_density_carve_cave_mouth_transition :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+	anchor: biomes.CaveAnchor,
+	node: biomes.CaveNetworkNode,
+	opening_radius, link_radius: f32,
+) {
+	plan := terrain_density_cave_mouth_transition_plan(anchor, node, opening_radius, link_radius)
+	scales := terrain_density_cave_mouth_transition_scales(plan.style)
+
+	if plan.size_support >= TERRAIN_CAVE_MOUTH_VESTIBULE_MIN_SUPPORT {
+		vestibule_radius :=
+			opening_radius *
+			biomes.regional_terrain_field_lerp(f32(0.36), f32(0.58), plan.size_support) *
+			scales.vestibule_scale
+		terrain_density_carve_cave_room_lobed_ellipsoid(
+			view,
+			key,
+			chunk_origin,
+			columns,
+			anchor.x +
+			plan.dir_x * plan.transition_run * 0.58 +
+			plan.side_x * plan.side_offset * 0.35,
+			anchor.y - plan.transition_drop * 0.62,
+			anchor.z +
+			plan.dir_z * plan.transition_run * 0.58 +
+			plan.side_z * plan.side_offset * 0.35,
+			vestibule_radius * 1.05,
+			math.max(f32(2.0), vestibule_radius * 0.42),
+			vestibule_radius * 0.82,
+			TERRAIN_CAVE_ROOM_DETAIL_SALT,
+			node.biome_id,
+			true,
+		)
+	}
+
+	near_shape := terrain_density_cave_entrance_link_shape(anchor.kind, true)
+	near_shape.radius_y_scale *= 0.86
+	near_shape.radius_neck_scale += 0.08
+	near_shape.curve_scale += scales.near_curve_boost
+	near_shape.meander_scale += scales.near_meander_boost
+	terrain_density_carve_rough_segment_shaped(
+		view,
+		key,
+		chunk_origin,
+		columns,
+		anchor.x,
+		anchor.y,
+		anchor.z,
+		plan.landing_x,
+		plan.landing_y,
+		plan.landing_z,
+		plan.near_radius,
+		near_shape,
+		TERRAIN_CAVE_DETAIL_SALT,
+		node.biome_id,
+	)
+
+	deep_shape := terrain_density_cave_entrance_link_shape(anchor.kind, false)
+	deep_shape.curve_scale += scales.deep_curve_boost
+	deep_shape.meander_scale += scales.deep_meander_boost
+	deep_shape.lift_scale += scales.deep_lift_boost
+	terrain_density_carve_rough_segment_shaped(
+		view,
+		key,
+		chunk_origin,
+		columns,
+		plan.landing_x,
+		plan.landing_y,
+		plan.landing_z,
+		plan.bend_x,
+		plan.bend_y,
+		plan.bend_z,
+		math.max(plan.near_radius, link_radius * scales.deep_radius_scale),
+		deep_shape,
+		TERRAIN_CAVE_ROUGHNESS_SALT,
+		node.biome_id,
+	)
+	terrain_density_carve_rough_segment_shaped(
+		view,
+		key,
+		chunk_origin,
+		columns,
+		plan.bend_x,
+		plan.bend_y,
+		plan.bend_z,
+		node.x,
+		node.y,
+		node.z,
+		link_radius,
+		deep_shape,
+		TERRAIN_CAVE_BRANCH_SALT,
+		node.biome_id,
+	)
+}
+
+terrain_density_carve_cave_mouth :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+	anchor: biomes.CaveAnchor,
+	node: biomes.CaveNetworkNode,
+	opening_radius: f32,
+) {
+	dir_x, dir_z := terrain_density_cave_entrance_planar_direction(anchor, node)
+	side_x := -dir_z
+	side_z := dir_x
+	size_support := terrain_density_cave_mouth_size_support(opening_radius)
+	reach := terrain_density_cave_mouth_reach_blocks(opening_radius)
+	height := math.max(
+		f32(4),
+		opening_radius * biomes.regional_terrain_field_lerp(f32(0.70), f32(0.95), size_support),
+	)
+	mouth_skew := biomes.regional_terrain_field_value_noise_3(
+		key,
+		i32(math.floor_f32(anchor.x)),
+		i32(math.floor_f32(anchor.y)),
+		i32(math.floor_f32(anchor.z)),
+		28,
+		TERRAIN_CAVE_BRANCH_SALT,
+	)
+	local_min_x, local_max_x, local_min_y, local_max_y, local_min_z, local_max_z, intersects :=
+		terrain_density_carve_bounds_from_extents(
+			chunk_origin,
+			anchor.x - reach - opening_radius * 1.45,
+			anchor.x + reach + opening_radius * 1.45,
+			anchor.y - height * 1.60,
+			anchor.y + 3,
+			anchor.z - reach - opening_radius * 1.45,
+			anchor.z + reach + opening_radius * 1.45,
+		)
+	if !intersects {
+		return
+	}
+
+	for z := local_min_z; z <= local_max_z; z += 1 {
+		world_z := f32(chunk_origin.z + z) + 0.5
+		for y := local_min_y; y <= local_max_y; y += 1 {
+			world_y := f32(chunk_origin.y + y) + 0.5
+			for x := local_min_x; x <= local_max_x; x += 1 {
+				world_x := f32(chunk_origin.x + x) + 0.5
+				column := columns[x + z * CHUNK_BLOCK_LENGTH]
+				below_surface := column.surface_height_blocks - world_y
+				if below_surface < -1 || below_surface > height * 1.75 {
+					continue
+				}
+
+				rel_x := world_x - anchor.x
+				rel_z := world_z - anchor.z
+				forward := rel_x * dir_x + rel_z * dir_z
+				if forward < -opening_radius * 0.35 || forward > reach {
+					continue
+				}
+				side := rel_x * side_x + rel_z * side_z
+				t := math.clamp(forward / reach, f32(0), f32(1))
+				width_base :=
+					opening_radius *
+					biomes.regional_terrain_field_lerp(
+						terrain_density_cave_mouth_surface_width_scale(opening_radius),
+						f32(0.42),
+						t,
+					)
+				arch_height := height * biomes.regional_terrain_field_lerp(1.05, 0.46, t)
+				lower_arch_support := math.smoothstep(
+					arch_height * 0.34,
+					arch_height * 0.92,
+					below_surface,
+				)
+				width :=
+					width_base *
+					terrain_density_cave_mouth_lower_width_scale(t, lower_arch_support)
+				side_bias := mouth_skew * opening_radius * 0.14 * (1.0 - t)
+				height_unit := below_surface / arch_height
+				vertical := height_unit - 0.32
+				if vertical > 0 {
+					vertical *= 0.78
+				} else {
+					vertical *= 1.12
+				}
+				side_normalized := (side - side_bias) / width
+				side_abs := math.abs(side_normalized)
+				upper_lip_support := math.clamp(
+					(f32(0.42) - height_unit) * f32(3.125),
+					f32(0),
+					f32(1),
+				)
+				side_shoulder := math.clamp(
+					(side_abs - TERRAIN_CAVE_MOUTH_SIDE_SHOULDER_START) *
+					TERRAIN_CAVE_MOUTH_SIDE_SHOULDER_INV_RANGE,
+					f32(0),
+					f32(1),
+				)
+				center_support := math.clamp(1.0 - side_abs * f32(2.381), f32(0), f32(1))
+				jaw_band := math.clamp(
+					1.0 - math.abs(side_abs - f32(0.56)) * f32(3.125),
+					f32(0),
+					f32(1),
+				)
+				jaw_side_direction := f32(0)
+				if side_normalized > 0 {
+					jaw_side_direction = 1
+				} else if side_normalized < 0 {
+					jaw_side_direction = -1
+				}
+				jaw_asymmetry := math.clamp(
+					1.0 + jaw_side_direction * mouth_skew * f32(0.22),
+					f32(0.78),
+					f32(1.22),
+				)
+				lower_jaw_relief :=
+					lower_arch_support *
+					(1.0 - t * 0.78) *
+					jaw_band *
+					jaw_asymmetry *
+					TERRAIN_CAVE_MOUTH_LOWER_JAW_RELIEF_STRENGTH
+				upper_center_lip :=
+					upper_lip_support *
+					(1.0 - t * 0.62) *
+					center_support *
+					TERRAIN_CAVE_MOUTH_UPPER_LIP_RIB_STRENGTH
+				side_alcove_relief :=
+					terrain_density_cave_mouth_side_alcove_relief(
+						t,
+						side_abs,
+						lower_arch_support,
+						size_support,
+					) *
+					jaw_asymmetry
+				shape :=
+					side_normalized * side_normalized +
+					vertical * vertical +
+					upper_lip_support *
+						(1.0 - t * 0.55) *
+						side_shoulder *
+						TERRAIN_CAVE_MOUTH_SIDE_SHOULDER_STRENGTH -
+					lower_arch_support *
+						(1.0 - t) *
+						center_support *
+						TERRAIN_CAVE_MOUTH_CENTER_RELIEF_STRENGTH -
+					lower_jaw_relief +
+					upper_center_lip -
+					side_alcove_relief
+				if shape > 1.18 {
+					continue
+				}
+				rough := biomes.regional_terrain_field_value_noise_3(
+					key,
+					chunk_origin.x + x,
+					chunk_origin.y + y,
+					chunk_origin.z + z,
+					14,
+					TERRAIN_CAVE_DETAIL_SALT,
+				)
+				if shape <= 1.0 + rough * 0.18 {
+					terrain_density_carve_local_block_with_material(
+						view,
+						key,
+						chunk_origin,
+						columns,
+						x,
+						y,
+						z,
+						node.biome_id,
+					)
+				}
+			}
+		}
+	}
+}
+
+terrain_density_cave_mouth_lower_width_scale :: proc(forward_t, lower_arch_support: f32) -> f32 {
+	return 1.0 + lower_arch_support * (1.0 - forward_t) * TERRAIN_CAVE_MOUTH_LOWER_WIDTH_BOOST
+}
+
+terrain_density_cave_mouth_side_shoulder_penalty :: proc(
+	forward_t, side_abs, upper_lip_support: f32,
+) -> f32 {
+	side_shoulder := math.clamp(
+		(side_abs - TERRAIN_CAVE_MOUTH_SIDE_SHOULDER_START) *
+		TERRAIN_CAVE_MOUTH_SIDE_SHOULDER_INV_RANGE,
+		f32(0),
+		f32(1),
+	)
+	return(
+		upper_lip_support *
+		(1.0 - forward_t * 0.55) *
+		side_shoulder *
+		TERRAIN_CAVE_MOUTH_SIDE_SHOULDER_STRENGTH \
+	)
+}
+
+terrain_density_cave_mouth_lower_center_relief :: proc(
+	forward_t, side_abs, lower_arch_support: f32,
+) -> f32 {
+	center_support := math.clamp(1.0 - side_abs * f32(2.381), f32(0), f32(1))
+	return(
+		lower_arch_support *
+		(1.0 - forward_t) *
+		center_support *
+		TERRAIN_CAVE_MOUTH_CENTER_RELIEF_STRENGTH \
+	)
+}
+
+terrain_density_cave_mouth_lower_jaw_relief :: proc(
+	forward_t, side_abs, lower_arch_support: f32,
+) -> f32 {
+	jaw_band := math.clamp(1.0 - math.abs(side_abs - f32(0.56)) * f32(3.125), f32(0), f32(1))
+	return(
+		lower_arch_support *
+		(1.0 - forward_t * 0.78) *
+		jaw_band *
+		TERRAIN_CAVE_MOUTH_LOWER_JAW_RELIEF_STRENGTH \
+	)
+}
+
+terrain_density_cave_mouth_upper_lip_rib :: proc(
+	forward_t, side_abs, upper_lip_support: f32,
+) -> f32 {
+	center_support := math.clamp(1.0 - side_abs * f32(2.381), f32(0), f32(1))
+	return(
+		upper_lip_support *
+		(1.0 - forward_t * 0.62) *
+		center_support *
+		TERRAIN_CAVE_MOUTH_UPPER_LIP_RIB_STRENGTH \
+	)
+}
+
+terrain_density_cave_mouth_side_alcove_relief :: proc(
+	forward_t, side_abs, lower_arch_support, size_support: f32,
+) -> f32 {
+	forward_band :=
+		math.smoothstep(f32(0.08), f32(0.36), forward_t) *
+		(1.0 - math.smoothstep(f32(0.70), f32(0.96), forward_t))
+	side_band := math.clamp(1.0 - math.abs(side_abs - f32(0.72)) * f32(3.85), f32(0), f32(1))
+	size_scale := biomes.regional_terrain_field_lerp(
+		TERRAIN_CAVE_MOUTH_SIDE_ALCOVE_SMALL_SCALE,
+		TERRAIN_CAVE_MOUTH_SIDE_ALCOVE_LARGE_SCALE,
+		size_support,
+	)
+	return(
+		lower_arch_support *
+		forward_band *
+		side_band *
+		TERRAIN_CAVE_MOUTH_SIDE_ALCOVE_RELIEF_STRENGTH *
+		size_scale \
+	)
+}
+
+terrain_density_carve_sinkhole_throat :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+	anchor: biomes.CaveAnchor,
+	node: biomes.CaveNetworkNode,
+	opening_radius, link_radius: f32,
+) {
+	depth := math.max(opening_radius * 2.2, anchor.y - node.y)
+	dir_x, dir_z := terrain_density_cave_entrance_planar_direction(anchor, node)
+	side_x := -dir_z
+	side_z := dir_x
+	rim_skew := biomes.regional_terrain_field_value_noise_3(
+		key,
+		i32(math.floor_f32(anchor.x)),
+		i32(math.floor_f32(anchor.y)),
+		i32(math.floor_f32(anchor.z)),
+		31,
+		TERRAIN_CAVE_BRANCH_SALT,
+	)
+	spiral_hash := biomes.feature_grid_hash_combine(u64(anchor.id), TERRAIN_CAVE_CURVE_SALT)
+	spiral_roll := biomes.feature_grid_unit_f32(spiral_hash, TERRAIN_CAVE_BRANCH_SALT)
+	spiral_strength := math.smoothstep(f32(0.24), f32(0.96), spiral_roll)
+	spiral_turn := f32(1)
+	if biomes.feature_grid_signed_unit_f32(spiral_hash, TERRAIN_CAVE_PASSAGE_RIB_SALT) < 0 {
+		spiral_turn = -1
+	}
+	spiral_phase :=
+		biomes.feature_grid_unit_f32(spiral_hash, TERRAIN_CAVE_DETAIL_SALT) * f32(6.2831855)
+	spiral_extent := opening_radius * TERRAIN_SINKHOLE_SPIRAL_OFFSET_SCALE * spiral_strength
+	local_min_x, local_max_x, local_min_y, local_max_y, local_min_z, local_max_z, intersects :=
+		terrain_density_carve_bounds_from_extents(
+			chunk_origin,
+			anchor.x - opening_radius * 1.48 - spiral_extent,
+			anchor.x + opening_radius * 1.48 + spiral_extent,
+			anchor.y - depth - 2,
+			anchor.y + 2,
+			anchor.z - opening_radius * 1.48 - spiral_extent,
+			anchor.z + opening_radius * 1.48 + spiral_extent,
+		)
+	if !intersects {
+		return
+	}
+
+	for z := local_min_z; z <= local_max_z; z += 1 {
+		world_z := f32(chunk_origin.z + z) + 0.5
+		for y := local_min_y; y <= local_max_y; y += 1 {
+			world_y := f32(chunk_origin.y + y) + 0.5
+			drop := anchor.y - world_y
+			if drop < -1 || drop > depth {
+				continue
+			}
+			t := math.clamp(drop / depth, f32(0), f32(1))
+			radius := biomes.regional_terrain_field_lerp(opening_radius * 1.18, link_radius, t)
+			spiral_support :=
+				math.smoothstep(f32(0.08), f32(0.72), t) *
+				(1.0 - math.smoothstep(f32(0.82), f32(1.0), t))
+			spiral_angle := spiral_phase + spiral_turn * t * f32(5.15)
+			spiral_x := dir_x * math.cos(spiral_angle) + side_x * math.sin(spiral_angle)
+			spiral_z := dir_z * math.cos(spiral_angle) + side_z * math.sin(spiral_angle)
+			center_x :=
+				anchor.x +
+				dir_x * opening_radius * 0.12 * t +
+				spiral_x * spiral_extent * spiral_support
+			center_z :=
+				anchor.z +
+				dir_z * opening_radius * 0.12 * t +
+				spiral_z * spiral_extent * spiral_support
+			major_radius := radius * terrain_density_sinkhole_major_radius_scale(t)
+			minor_radius := radius * terrain_density_sinkhole_minor_radius_scale(t)
+			for x := local_min_x; x <= local_max_x; x += 1 {
+				world_x := f32(chunk_origin.x + x) + 0.5
+				dx := world_x - center_x
+				dz := world_z - center_z
+				forward := dx * dir_x + dz * dir_z
+				side := dx * side_x + dz * side_z
+				forward_unit := forward / major_radius
+				side_unit := side / minor_radius
+				side_abs := math.abs(side_unit)
+				forward_abs := math.abs(forward_unit)
+				side_direction := f32(0)
+				if side_unit > 0 {
+					side_direction = 1
+				} else if side_unit < 0 {
+					side_direction = -1
+				}
+				ledge_asymmetry := math.clamp(
+					1.0 + side_direction * rim_skew * f32(0.20),
+					f32(0.82),
+					f32(1.18),
+				)
+				shape :=
+					forward_unit * forward_unit +
+					side_unit * side_unit +
+					terrain_density_sinkhole_rim_lip_penalty(t, forward_abs, side_abs) -
+					terrain_density_sinkhole_side_ledge_relief(t, side_abs) * ledge_asymmetry
+				if shape > 1.22 {
+					continue
+				}
+				rough := biomes.regional_terrain_field_value_noise_3(
+					key,
+					chunk_origin.x + x,
+					chunk_origin.y + y,
+					chunk_origin.z + z,
+					12,
+					TERRAIN_CAVE_DETAIL_SALT,
+				)
+				if shape <= 1.0 + rough * 0.22 {
+					terrain_density_carve_local_block_with_material(
+						view,
+						key,
+						chunk_origin,
+						columns,
+						x,
+						y,
+						z,
+						node.biome_id,
+					)
+				}
+			}
+		}
+	}
+}
+
+terrain_density_sinkhole_major_radius_scale :: proc(depth_t: f32) -> f32 {
+	return biomes.regional_terrain_field_lerp(f32(1.12), f32(0.92), depth_t)
+}
+
+terrain_density_sinkhole_minor_radius_scale :: proc(depth_t: f32) -> f32 {
+	return biomes.regional_terrain_field_lerp(f32(0.78), f32(1.02), depth_t)
+}
+
+terrain_density_sinkhole_side_ledge_relief :: proc(depth_t, side_abs: f32) -> f32 {
+	upper_support := math.clamp(1.0 - depth_t * f32(2.2), f32(0), f32(1))
+	side_band := math.clamp(1.0 - math.abs(side_abs - f32(0.56)) * f32(3.125), f32(0), f32(1))
+	return upper_support * side_band * TERRAIN_SINKHOLE_SIDE_LEDGE_RELIEF_STRENGTH
+}
+
+terrain_density_sinkhole_rim_lip_penalty :: proc(depth_t, forward_abs, side_abs: f32) -> f32 {
+	rim_support := math.clamp(1.0 - depth_t * f32(3.4), f32(0), f32(1))
+	center_support := math.clamp(1.0 - (forward_abs + side_abs) * f32(0.95), f32(0), f32(1))
+	return rim_support * center_support * TERRAIN_SINKHOLE_RIM_LIP_STRENGTH
+}
+
+terrain_density_carve_rough_ellipsoid :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+	center_x, center_y, center_z, radius_x, radius_y, radius_z: f32,
+	noise_salt: u64,
+	biome_id: biomes.BiomeID,
+	directional_material_profile: bool = false,
+) {
+	rx := math.max(f32(1), radius_x)
+	ry := math.max(f32(1), radius_y)
+	rz := math.max(f32(1), radius_z)
+	padding := math.max(rx, math.max(ry, rz)) * 0.18 + 2
+	local_min_x, local_max_x, local_min_y, local_max_y, local_min_z, local_max_z, intersects :=
+		terrain_density_carve_bounds_from_extents(
+			chunk_origin,
+			center_x - rx - padding,
+			center_x + rx + padding,
+			center_y - ry - padding,
+			center_y + ry + padding,
+			center_z - rz - padding,
+			center_z + rz + padding,
+		)
+	if !intersects {
+		return
+	}
+
+	for z := local_min_z; z <= local_max_z; z += 1 {
+		world_z := f32(chunk_origin.z + z) + 0.5
+		for y := local_min_y; y <= local_max_y; y += 1 {
+			world_y := f32(chunk_origin.y + y) + 0.5
+			for x := local_min_x; x <= local_max_x; x += 1 {
+				world_x := f32(chunk_origin.x + x) + 0.5
+				nx := (world_x - center_x) / rx
+				ny := (world_y - center_y) / ry
+				nz := (world_z - center_z) / rz
+				shape := nx * nx + ny * ny + nz * nz
+				rough := biomes.regional_terrain_field_value_noise_3(
+					key,
+					chunk_origin.x + x,
+					chunk_origin.y + y,
+					chunk_origin.z + z,
+					24,
+					noise_salt,
+				)
+				core_support := math.clamp((f32(1.0) - shape) * 1.389, f32(0), f32(1))
+				rough_scale :=
+					TERRAIN_CAVE_ROUGH_ELLIPSOID_EDGE_SCALE -
+					(TERRAIN_CAVE_ROUGH_ELLIPSOID_EDGE_SCALE -
+							TERRAIN_CAVE_ROUGH_ELLIPSOID_CORE_SCALE) *
+						core_support
+				threshold := 1.0 + rough * rough_scale
+				if shape <= threshold {
+					terrain_density_carve_local_block_with_material(
+						view,
+						key,
+						chunk_origin,
+						columns,
+						x,
+						y,
+						z,
+						biome_id,
+						directional_material_profile,
+					)
+				}
+			}
+		}
+	}
+}
+
+terrain_density_cave_segment_shape_default :: proc() -> TerrainCaveSegmentShape {
+	return {
+		radius_x_scale = 1.10,
+		radius_y_scale = 0.88,
+		radius_z_scale = 1.05,
+		radius_noise_scale = 0.18,
+		radius_neck_scale = 0.16,
+		radius_swell_scale = 0.20,
+		radius_endpoint_scale = 0.0,
+		meander_scale = 0.72,
+		lift_scale = 0.36,
+		curve_scale = 0.0,
+	}
+}
+
+terrain_density_cave_field_path_shape :: proc() -> TerrainCaveSegmentShape {
+	shape := terrain_density_cave_passage_shape(.Worm_Path)
+	shape.radius_x_scale = TERRAIN_CAVE_FIELD_PATH_CROSS_AXIS_SCALE
+	shape.radius_y_scale = TERRAIN_CAVE_FIELD_PATH_Y_SCALE
+	shape.radius_z_scale = TERRAIN_CAVE_FIELD_PATH_CROSS_AXIS_SCALE
+	shape.radius_noise_scale = 0.20
+	shape.radius_neck_scale = 0.18
+	shape.radius_swell_scale = 0.16
+	shape.radius_endpoint_scale = 0.03
+	shape.meander_scale = 0.46
+	shape.lift_scale = 0.20
+	shape.curve_scale = 0.18
+	return shape
+}
+
+terrain_density_cave_passage_radius_profile_scale :: proc(
+	shape: TerrainCaveSegmentShape,
+	rough, center_bulge: f32,
+) -> f32 {
+	neck := math.smoothstep(f32(0.18), f32(0.92), -rough)
+	swell := math.smoothstep(f32(0.22), f32(0.95), rough)
+	scale :=
+		1.0 +
+		center_bulge * shape.radius_swell_scale * 0.18 +
+		swell * shape.radius_swell_scale -
+		neck * shape.radius_neck_scale
+	return math.clamp(scale, f32(0.72), f32(1.34))
+}
+
+terrain_density_cave_segment_triangle_wave :: proc(value: f32) -> f32 {
+	phase := value - math.floor_f32(value)
+	return 1.0 - math.abs(phase * 2.0 - 1.0)
+}
+
+terrain_density_carve_rough_segment_shaped :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+	from_x, from_y, from_z, to_x, to_y, to_z, radius_blocks: f32,
+	shape: TerrainCaveSegmentShape,
+	noise_salt: u64,
+	biome_id: biomes.BiomeID,
+	directional_material_profile: bool = false,
+) {
+	radius := math.max(f32(1), radius_blocks)
+	max_radius := radius * 1.45 + 2
+	t_min, t_max, intersects := terrain_density_segment_chunk_overlap(
+		chunk_origin,
+		from_x,
+		from_y,
+		from_z,
+		to_x,
+		to_y,
+		to_z,
+		max_radius,
+	)
+	if !intersects {
+		return
+	}
+
+	dx := to_x - from_x
+	dy := to_y - from_y
+	dz := to_z - from_z
+	length := math.sqrt_f32(dx * dx + dy * dy + dz * dz)
+	if length <= 0.001 {
+		terrain_density_carve_rough_ellipsoid(
+			view,
+			key,
+			chunk_origin,
+			columns,
+			from_x,
+			from_y,
+			from_z,
+			radius * shape.radius_x_scale,
+			radius * shape.radius_y_scale,
+			radius * shape.radius_z_scale,
+			noise_salt,
+			biome_id,
+			directional_material_profile,
+		)
+		return
+	}
+
+	length_sq := length * length
+	tangent_x := dx / length
+	tangent_y := dy / length
+	tangent_z := dz / length
+	length_xz := math.sqrt_f32(dx * dx + dz * dz)
+	side_x := f32(1)
+	side_y := f32(0)
+	side_z := f32(0)
+	if length_xz > 0.001 {
+		side_x = -dz / length_xz
+		side_z = dx / length_xz
+	}
+	up_x := side_y * tangent_z - side_z * tangent_y
+	up_y := side_z * tangent_x - side_x * tangent_z
+	up_z := side_x * tangent_y - side_y * tangent_x
+
+	curve_hash := biomes.feature_grid_hash_mix(key.world_seed)
+	curve_hash = biomes.feature_grid_hash_combine(curve_hash, u64(key.generator_version))
+	curve_hash = biomes.feature_grid_hash_combine(curve_hash, TERRAIN_CAVE_CURVE_SALT)
+	curve_hash = biomes.feature_grid_hash_combine(
+		curve_hash,
+		biomes.feature_grid_hash_i32(i32(math.floor_f32(from_x))),
+	)
+	curve_hash = biomes.feature_grid_hash_combine(
+		curve_hash,
+		biomes.feature_grid_hash_i32(i32(math.floor_f32(from_y))),
+	)
+	curve_hash = biomes.feature_grid_hash_combine(
+		curve_hash,
+		biomes.feature_grid_hash_i32(i32(math.floor_f32(from_z))),
+	)
+	curve_hash = biomes.feature_grid_hash_combine(
+		curve_hash,
+		biomes.feature_grid_hash_i32(i32(math.floor_f32(to_x))),
+	)
+	curve_hash = biomes.feature_grid_hash_combine(
+		curve_hash,
+		biomes.feature_grid_hash_i32(i32(math.floor_f32(to_y))),
+	)
+	curve_hash = biomes.feature_grid_hash_combine(
+		curve_hash,
+		biomes.feature_grid_hash_i32(i32(math.floor_f32(to_z))),
+	)
+	curve_side := biomes.feature_grid_signed_unit_f32(curve_hash, TERRAIN_CAVE_CURVE_SALT)
+	curve_lift := biomes.feature_grid_signed_unit_f32(curve_hash, TERRAIN_CAVE_BRANCH_SALT)
+	branch_side := biomes.feature_grid_signed_unit_f32(
+		curve_hash,
+		TERRAIN_CAVE_FIELD_SPAGHETTI_A_SALT,
+	)
+	branch_lift := biomes.feature_grid_signed_unit_f32(
+		curve_hash,
+		TERRAIN_CAVE_FIELD_SPAGHETTI_B_SALT,
+	)
+	neck_phase := biomes.feature_grid_unit_f32(curve_hash, TERRAIN_CAVE_PASSAGE_RIB_SALT)
+
+	max_shape_scale := math.max(
+		shape.radius_y_scale,
+		math.max(shape.radius_x_scale, shape.radius_z_scale),
+	)
+	max_curve_extent :=
+		radius * (shape.curve_scale + shape.meander_scale * 0.42 + shape.lift_scale * 0.28)
+	max_carve_radius := radius * max_shape_scale * 1.46 + max_curve_extent + 2
+	seg_min_x := math.min(from_x + dx * t_min, from_x + dx * t_max) - max_carve_radius
+	seg_max_x := math.max(from_x + dx * t_min, from_x + dx * t_max) + max_carve_radius
+	seg_min_y := math.min(from_y + dy * t_min, from_y + dy * t_max) - max_carve_radius
+	seg_max_y := math.max(from_y + dy * t_min, from_y + dy * t_max) + max_carve_radius
+	seg_min_z := math.min(from_z + dz * t_min, from_z + dz * t_max) - max_carve_radius
+	seg_max_z := math.max(from_z + dz * t_min, from_z + dz * t_max) + max_carve_radius
+	local_min_x, local_max_x, local_min_y, local_max_y, local_min_z, local_max_z, bounds_intersects :=
+		terrain_density_carve_bounds_from_extents(
+			chunk_origin,
+			seg_min_x,
+			seg_max_x,
+			seg_min_y,
+			seg_max_y,
+			seg_min_z,
+			seg_max_z,
+		)
+	if !bounds_intersects {
+		return
+	}
+
+	horizontal_radius_scale := (shape.radius_x_scale + shape.radius_z_scale) * 0.5
+	for z := local_min_z; z <= local_max_z; z += 1 {
+		world_z := f32(chunk_origin.z + z) + 0.5
+		for y := local_min_y; y <= local_max_y; y += 1 {
+			world_y := f32(chunk_origin.y + y) + 0.5
+			for x := local_min_x; x <= local_max_x; x += 1 {
+				world_x := f32(chunk_origin.x + x) + 0.5
+				rel_from_x := world_x - from_x
+				rel_from_y := world_y - from_y
+				rel_from_z := world_z - from_z
+				raw_t := (rel_from_x * dx + rel_from_y * dy + rel_from_z * dz) / length_sq
+				if raw_t < -max_carve_radius / length || raw_t > 1.0 + max_carve_radius / length {
+					continue
+				}
+				t := math.clamp(raw_t, f32(0), f32(1))
+				center_bulge := 1.0 - math.abs(t * 2.0 - 1.0)
+				s_curve :=
+					center_bulge *
+					(curve_side * shape.curve_scale +
+							branch_side * shape.meander_scale * (t * 2.0 - 1.0) * 0.42)
+				u_curve :=
+					center_bulge *
+					(curve_lift * shape.curve_scale * 0.45 +
+							branch_lift * shape.lift_scale * (t * 2.0 - 1.0) * 0.28)
+				cx := from_x + dx * t + side_x * s_curve * radius + up_x * u_curve * radius
+				cy := from_y + dy * t + side_y * s_curve * radius + up_y * u_curve * radius
+				cz := from_z + dz * t + side_z * s_curve * radius + up_z * u_curve * radius
+				rel_x := world_x - cx
+				rel_y := world_y - cy
+				rel_z := world_z - cz
+				side_dist := rel_x * side_x + rel_y * side_y + rel_z * side_z
+				up_dist := rel_x * up_x + rel_y * up_y + rel_z * up_z
+				along_dist := rel_x * tangent_x + rel_y * tangent_y + rel_z * tangent_z
+				neck_wave := terrain_density_cave_segment_triangle_wave(t * 2.35 + neck_phase)
+				profile_scale := math.clamp(
+					0.90 +
+					center_bulge * 0.10 +
+					(1.0 - center_bulge) * shape.radius_endpoint_scale +
+					(1.0 - neck_wave) * shape.radius_swell_scale * 0.12 -
+					neck_wave * shape.radius_neck_scale * 0.16,
+					f32(0.66),
+					f32(1.30),
+				)
+				base_radius := radius * profile_scale
+				side_radius := math.max(f32(0.75), base_radius * horizontal_radius_scale)
+				up_radius := math.max(f32(0.75), base_radius * shape.radius_y_scale)
+				along_radius := math.max(f32(0.75), base_radius * 1.10)
+				shape_value :=
+					(side_dist * side_dist) / (side_radius * side_radius) +
+					(up_dist * up_dist) / (up_radius * up_radius) +
+					(along_dist * along_dist) / (along_radius * along_radius)
+				if shape_value > 1.30 {
+					continue
+				}
+				rough := biomes.regional_terrain_field_value_noise_3(
+					key,
+					chunk_origin.x + x,
+					chunk_origin.y + y,
+					chunk_origin.z + z,
+					18,
+					noise_salt,
+				)
+				core_support := math.clamp((f32(1.0) - shape_value) * 1.389, f32(0), f32(1))
+				rough_scale :=
+					shape.radius_noise_scale *
+					biomes.regional_terrain_field_lerp(f32(0.58), f32(0.22), core_support)
+				threshold :=
+					1.0 +
+					rough *
+						rough_scale *
+						terrain_density_cave_passage_radius_profile_scale(
+							shape,
+							rough,
+							center_bulge,
+						)
+				if shape_value <= threshold {
+					terrain_density_carve_local_block_with_material(
+						view,
+						key,
+						chunk_origin,
+						columns,
+						x,
+						y,
+						z,
+						biome_id,
+						directional_material_profile,
+					)
+				}
+			}
+		}
+	}
+}
+
+terrain_density_carve_local_block_with_material :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+	local_x, local_y, local_z: i32,
+	biome_id: biomes.BiomeID,
+	directional_material_profile: bool = false,
+) {
+	_ = terrain_density_carve_local_block_with_material_result(
+		view,
+		key,
+		chunk_origin,
+		columns,
+		local_x,
+		local_y,
+		local_z,
+		biome_id,
+		directional_material_profile,
+	)
+}
+
+terrain_density_carve_local_block_with_material_result :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+	local_x, local_y, local_z: i32,
+	biome_id: biomes.BiomeID,
+	directional_material_profile: bool = false,
+) -> bool {
+	world_y := chunk_origin.y + local_y
+	vertical_support := terrain_density_cave_vertical_support(f32(world_y))
+	if vertical_support <= 0 {
+		return false
+	}
+	if vertical_support < 0.98 {
+		edge_roll := biomes.regional_terrain_field_value_noise_3(
+			key,
+			chunk_origin.x + local_x,
+			world_y,
+			chunk_origin.z + local_z,
+			9,
+			TERRAIN_CAVE_VERTICAL_CUSHION_SALT,
+		)
+		if math.clamp(0.5 + edge_roll * 0.5, f32(0), f32(1)) > vertical_support {
+			return false
+		}
+	}
+
+	column := columns[local_x + local_z * CHUNK_BLOCK_LENGTH]
+	if !terrain_density_surface_is_solid(column, world_y) {
+		return false
+	}
+
+	index := chunk_block_index(u32(local_x), u32(local_y), u32(local_z))
+	if view.blocks.occupancy[index] != .Solid {
+		return false
+	}
+	if terrain_material_palette_index(view.blocks.material_id[index]) == TERRAIN_WATER_MAT_ID {
+		return false
+	}
+
+	view.blocks.occupancy[index] = .Empty
+	view.blocks.material_id[index] = world_async.BlockMaterialID(0)
+	terrain_density_mark_cave_wall_neighbors(
+		view,
+		local_x,
+		local_y,
+		local_z,
+		biome_id,
+		directional_material_profile,
+	)
+	return true
+}
+
+terrain_density_fill_local_water_block :: proc(
+	view: ^world_async.ChunkVoxelView,
+	local_x, local_y, local_z: i32,
+) {
+	index := chunk_block_index(u32(local_x), u32(local_y), u32(local_z))
+	if view.blocks.occupancy[index] != .Empty {
+		return
+	}
+	view.blocks.occupancy[index] = .Solid
+	view.blocks.material_id[index] = world_async.BlockMaterialID(TERRAIN_WATER_MAT_ID)
+}
+
+terrain_density_cave_vertical_support :: proc(world_y: f32) -> f32 {
+	bottom_support := math.smoothstep(
+		TERRAIN_CAVE_BOTTOM_CUSHION_START_BLOCKS,
+		TERRAIN_CAVE_BOTTOM_CUSHION_END_BLOCKS,
+		world_y,
+	)
+	top_support :=
+		1.0 -
+		math.smoothstep(
+			TERRAIN_CAVE_TOP_CUSHION_START_BLOCKS,
+			TERRAIN_CAVE_TOP_CUSHION_END_BLOCKS,
+			world_y,
+		)
+	return math.clamp(bottom_support * top_support, f32(0), f32(1))
+}
+
+terrain_density_mark_cave_wall_neighbors :: proc(
+	view: ^world_async.ChunkVoxelView,
+	local_x, local_y, local_z: i32,
+	biome_id: biomes.BiomeID,
+	directional_material_profile: bool = false,
+) {
+	wall_material_id: world_async.BlockMaterialID
+	floor_material_id: world_async.BlockMaterialID
+	ceiling_material_id: world_async.BlockMaterialID
+	if directional_material_profile {
+		wall_material_id, floor_material_id, ceiling_material_id = terrain_cave_material_profile(
+			biome_id,
+		)
+	} else {
+		wall_material_id = terrain_cave_wall_material_id(biome_id)
+		floor_material_id = wall_material_id
+		ceiling_material_id = wall_material_id
+	}
+	offsets := [?]world_async.BlockCoord {
+		{x = 1, y = 0, z = 0},
+		{x = -1, y = 0, z = 0},
+		{x = 0, y = 1, z = 0},
+		{x = 0, y = -1, z = 0},
+		{x = 0, y = 0, z = 1},
+		{x = 0, y = 0, z = -1},
+	}
+	for offset in offsets {
+		x := local_x + offset.x
+		y := local_y + offset.y
+		z := local_z + offset.z
+		if !chunk_block_coord_is_inside(x, y, z) {
+			continue
+		}
+		index := chunk_block_index(u32(x), u32(y), u32(z))
+		if view.blocks.occupancy[index] != .Solid {
+			continue
+		}
+		if terrain_material_palette_index(view.blocks.material_id[index]) == TERRAIN_WATER_MAT_ID {
+			continue
+		}
+		material_id := wall_material_id
+		if offset.y < 0 {
+			material_id = floor_material_id
+		} else if offset.y > 0 {
+			material_id = ceiling_material_id
+		}
+		view.blocks.material_id[index] = material_id
+	}
+}
+
+terrain_cave_material_profile :: proc(
+	biome_id: biomes.BiomeID,
+) -> (
+	wall_material_id, floor_material_id, ceiling_material_id: world_async.BlockMaterialID,
+) {
+	switch biome_id {
+	case .Fungal_Vaults:
+		return world_async.BlockMaterialID(
+			TERRAIN_WET_MARSH_MAT_ID,
+		), world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID), world_async.BlockMaterialID(TERRAIN_DIRT_MAT_ID)
+	case .Crystal_Geode_Network:
+		return world_async.BlockMaterialID(
+			TERRAIN_CRYSTAL_MAT_ID,
+		), world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID), world_async.BlockMaterialID(TERRAIN_CRYSTAL_MAT_ID)
+	case .Buried_Aquifer_Caves:
+		return world_async.BlockMaterialID(
+			TERRAIN_AQUIFER_WALL_MAT_ID,
+		), world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID), world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+		return world_async.BlockMaterialID(
+			TERRAIN_STONE_MAT_ID,
+		), world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID), world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+	}
+	return world_async.BlockMaterialID(
+		TERRAIN_STONE_MAT_ID,
+	), world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID), world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+}
+
+terrain_cave_wall_material_id :: proc(biome_id: biomes.BiomeID) -> world_async.BlockMaterialID {
+	switch biome_id {
+	case .Fungal_Vaults:
+		return world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID)
+	case .Crystal_Geode_Network:
+		return world_async.BlockMaterialID(TERRAIN_CRYSTAL_MAT_ID)
+	case .Buried_Aquifer_Caves:
+		return world_async.BlockMaterialID(TERRAIN_AQUIFER_WALL_MAT_ID)
+	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+		return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+	}
+	return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+}
+
+terrain_cave_wall_material_id_for_neighbor :: proc(
+	biome_id: biomes.BiomeID,
+	offset: world_async.BlockCoord,
+) -> world_async.BlockMaterialID {
+	if offset.y < 0 {
+		return terrain_cave_floor_material_id(biome_id)
+	}
+	if offset.y > 0 {
+		return terrain_cave_ceiling_material_id(biome_id)
+	}
+	return terrain_cave_wall_material_id(biome_id)
+}
+
+terrain_cave_floor_material_id :: proc(biome_id: biomes.BiomeID) -> world_async.BlockMaterialID {
+	_, floor_material_id, _ := terrain_cave_material_profile(biome_id)
+	return floor_material_id
+}
+
+terrain_cave_ceiling_material_id :: proc(biome_id: biomes.BiomeID) -> world_async.BlockMaterialID {
+	_, _, ceiling_material_id := terrain_cave_material_profile(biome_id)
+	return ceiling_material_id
+}
+
+terrain_density_segment_chunk_overlap :: proc(
+	chunk_origin: world_async.BlockCoord,
+	from_x, from_y, from_z, to_x, to_y, to_z, radius: f32,
+) -> (
+	t_min, t_max: f32,
+	intersects: bool,
+) {
+	min_x := f32(chunk_origin.x) - radius
+	min_y := f32(chunk_origin.y) - radius
+	min_z := f32(chunk_origin.z) - radius
+	max_x := f32(chunk_origin.x + CHUNK_BLOCK_LENGTH) + radius
+	max_y := f32(chunk_origin.y + CHUNK_BLOCK_LENGTH) + radius
+	max_z := f32(chunk_origin.z + CHUNK_BLOCK_LENGTH) + radius
+
+	t_min = f32(0)
+	t_max = f32(1)
+	if !terrain_density_segment_axis_intersects_slab(
+		from_x,
+		to_x - from_x,
+		min_x,
+		max_x,
+		&t_min,
+		&t_max,
+	) {
+		return 0, 0, false
+	}
+	if !terrain_density_segment_axis_intersects_slab(
+		from_y,
+		to_y - from_y,
+		min_y,
+		max_y,
+		&t_min,
+		&t_max,
+	) {
+		return 0, 0, false
+	}
+	if !terrain_density_segment_axis_intersects_slab(
+		from_z,
+		to_z - from_z,
+		min_z,
+		max_z,
+		&t_min,
+		&t_max,
+	) {
+		return 0, 0, false
+	}
+	return t_min, t_max, true
+}
+
+terrain_density_segment_axis_intersects_slab :: proc(
+	start, delta, slab_min, slab_max: f32,
+	t_min, t_max: ^f32,
+) -> bool {
+	if math.abs(delta) <= 0.00001 {
+		return start >= slab_min && start <= slab_max
+	}
+
+	inv_delta := 1.0 / delta
+	t1 := (slab_min - start) * inv_delta
+	t2 := (slab_max - start) * inv_delta
+	if t1 > t2 {
+		t1, t2 = t2, t1
+	}
+	t_min^ = math.max(t_min^, t1)
+	t_max^ = math.min(t_max^, t2)
+	return t_min^ <= t_max^
+}
+
+terrain_water_volume_fill :: proc(
+	view: ^world_async.ChunkVoxelView,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+) {
+	log.assertf(
+		len(columns) == CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH,
+		"terrain water column target count mismatch: %d",
+		len(columns),
+	)
+
+	for z in 0 ..< CHUNK_BLOCK_LENGTH {
+		for x in 0 ..< CHUNK_BLOCK_LENGTH {
+			column := columns[x + z * CHUNK_BLOCK_LENGTH]
+			if !column.water_fill_active {
+				continue
+			}
+
+			water_level := i32(math.floor_f32(column.water_level_blocks))
+			if water_level < chunk_origin.y {
+				continue
+			}
+
+			for y in 0 ..< CHUNK_BLOCK_LENGTH {
+				world_y := chunk_origin.y + i32(y)
+				if world_y > water_level {
+					break
+				}
+
+				index := chunk_block_index(u32(x), u32(y), u32(z))
+				if view.blocks.occupancy[index] == .Solid {
+					continue
+				}
+
+				view.blocks.occupancy[index] = .Solid
+				view.blocks.material_id[index] = world_async.BlockMaterialID(TERRAIN_WATER_MAT_ID)
+			}
+		}
+	}
+}
+
+terrain_density_carve_bounds_from_extents :: proc(
+	chunk_origin: world_async.BlockCoord,
+	min_world_x, max_world_x, min_world_y, max_world_y, min_world_z, max_world_z: f32,
+) -> (
+	local_min_x, local_max_x, local_min_y, local_max_y, local_min_z, local_max_z: i32,
+	intersects: bool,
+) {
+	min_x := i32(math.floor_f32(min_world_x)) - chunk_origin.x
+	max_x := i32(math.floor_f32(max_world_x)) - chunk_origin.x
+	min_y := i32(math.floor_f32(min_world_y)) - chunk_origin.y
+	max_y := i32(math.floor_f32(max_world_y)) - chunk_origin.y
+	min_z := i32(math.floor_f32(min_world_z)) - chunk_origin.z
+	max_z := i32(math.floor_f32(max_world_z)) - chunk_origin.z
+
+	if max_x < 0 ||
+	   max_y < 0 ||
+	   max_z < 0 ||
+	   min_x >= CHUNK_BLOCK_LENGTH ||
+	   min_y >= CHUNK_BLOCK_LENGTH ||
+	   min_z >= CHUNK_BLOCK_LENGTH {
+		return 0, 0, 0, 0, 0, 0, false
+	}
+
+	local_min_x = math.clamp(min_x, 0, CHUNK_BLOCK_LENGTH - 1)
+	local_max_x = math.clamp(max_x, 0, CHUNK_BLOCK_LENGTH - 1)
+	local_min_y = math.clamp(min_y, 0, CHUNK_BLOCK_LENGTH - 1)
+	local_max_y = math.clamp(max_y, 0, CHUNK_BLOCK_LENGTH - 1)
+	local_min_z = math.clamp(min_z, 0, CHUNK_BLOCK_LENGTH - 1)
+	local_max_z = math.clamp(max_z, 0, CHUNK_BLOCK_LENGTH - 1)
+	intersects = true
+	return
 }
 
 terrain_cave_debug_column_mask_build :: proc(
@@ -3704,6 +7521,16 @@ terrain_cave_debug_column_mask_build :: proc(
 			chunk_origin,
 			edge.from_x,
 			edge.from_z,
+			edge.bend_x,
+			edge.bend_z,
+			math.max(f32(3), edge.radius_blocks * 0.24) +
+			biomes.CAVE_NETWORK_DEBUG_SURFACE_FALLOFF_BLOCKS,
+		)
+		terrain_cave_debug_column_mask_add_segment(
+			mask,
+			chunk_origin,
+			edge.bend_x,
+			edge.bend_z,
 			edge.to_x,
 			edge.to_z,
 			math.max(f32(3), edge.radius_blocks * 0.24) +
@@ -3849,13 +7676,64 @@ terrain_generation_key_make :: proc(seed: u32) -> biomes.FeatureGridKey {
 	return biomes.feature_grid_key_make(u64(seed), TERRAIN_GENERATOR_VERSION)
 }
 
+terrain_generation_region_for_fill :: proc(
+	key: biomes.FeatureGridKey,
+	coord: biomes.GenerationRegionCoord,
+) -> biomes.GenerationRegion {
+	cache := &state.terrain_generation_region_cache
+
+	sync.lock(&cache.mutex)
+	cache.clock += 1
+	stamp := cache.clock
+	lru_index := u32(0)
+	lru_stamp := max(u64)
+	empty_index: i32 = -1
+	for i := u32(0); i < TERRAIN_GENERATION_REGION_CACHE_CAPACITY; i += 1 {
+		slot := &cache.slots[i]
+		if slot.valid {
+			if slot.key == key && slot.coord == coord {
+				slot.last_used = stamp
+				region := slot.region
+				sync.unlock(&cache.mutex)
+				return region
+			}
+			if slot.last_used < lru_stamp {
+				lru_stamp = slot.last_used
+				lru_index = i
+			}
+		} else if empty_index < 0 {
+			empty_index = i32(i)
+		}
+	}
+	sync.unlock(&cache.mutex)
+
+	region := biomes.generation_region_build_for_terrain_fill(key, coord)
+
+	sync.lock(&cache.mutex)
+	cache.clock += 1
+	target_index := lru_index
+	if empty_index >= 0 {
+		target_index = u32(empty_index)
+	}
+	cache.slots[target_index] = {
+			valid     = true,
+			key       = key,
+			coord     = coord,
+			region    = region,
+			last_used = cache.clock,
+		}
+	sync.unlock(&cache.mutex)
+
+	return region
+}
+
 terrain_biome_column_sample :: proc(
 	key: biomes.FeatureGridKey,
 	surface_sample: biomes.SurfaceBiomeFieldSample,
 	world_x, world_z: i32,
 ) -> TerrainBiomeColumn {
 	evaluation := biomes.surface_biome_profile_evaluate(key, surface_sample, world_x, world_z)
-	return terrain_biome_column_from_profile_evaluation(evaluation)
+	return terrain_biome_column_from_profile_evaluation(key, evaluation, world_x, world_z)
 }
 
 terrain_biome_column_sample_with_hydrology :: proc(
@@ -3871,25 +7749,73 @@ terrain_biome_column_sample_with_hydrology :: proc(
 		world_x,
 		world_z,
 	)
-	return terrain_biome_column_from_profile_evaluation(evaluation)
+	return terrain_biome_column_from_profile_evaluation(key, evaluation, world_x, world_z)
 }
 
 terrain_biome_column_from_profile_evaluation :: proc(
+	key: biomes.FeatureGridKey,
 	evaluation: biomes.SurfaceBiomeProfileEvaluation,
+	world_x, world_z: i32,
 ) -> TerrainBiomeColumn {
 	target := evaluation.final_target
-
-	height := i32(math.floor_f32(target.surface_height_blocks))
-	height = math.clamp(height, 0, CHUNK_BLOCK_LENGTH - 1)
+	material_biome_id := terrain_biome_material_biome_pick(key, evaluation, world_x, world_z)
+	surface_height_blocks := terrain_surface_height_apply_vertical_cushion(
+		target.surface_height_blocks,
+	)
+	height := i32(math.floor_f32(surface_height_blocks))
 
 	surface_layer_depth := terrain_biome_layer_depth_ceil(target.surface_layer_depth_blocks)
 	surface_layer_depth = math.clamp(surface_layer_depth, 1, CHUNK_BLOCK_LENGTH)
+	water_influence := math.max(
+		evaluation.hydrology_sample.basin_influence,
+		evaluation.hydrology_sample.channel_influence,
+	)
+	sea_fill_active := surface_height_blocks < biomes.SEA_LEVEL_BLOCKS
+	local_water_level := evaluation.hydrology_sample.water_level_blocks
+	water_surface_below_level := surface_height_blocks < local_water_level
+	local_water_fill_active :=
+		water_influence > TERRAIN_LOCAL_WATER_FILL_INFLUENCE_MIN && water_surface_below_level
+	water_level := biomes.SEA_LEVEL_BLOCKS
+	if local_water_fill_active {
+		water_level = math.max(biomes.SEA_LEVEL_BLOCKS, local_water_level)
+	}
+	surface_material_id := terrain_biome_surface_material_id(material_biome_id)
+	surface_material_id = terrain_surface_material_apply_shoreline(
+		key,
+		evaluation,
+		surface_material_id,
+		surface_height_blocks,
+		water_level,
+		world_x,
+		world_z,
+	)
+	subsurface_material_id := terrain_biome_subsurface_material_id(material_biome_id)
+	subsurface_material_id = terrain_subsurface_material_apply_shoreline(
+		evaluation,
+		subsurface_material_id,
+		surface_height_blocks,
+		water_level,
+	)
+	if surface_material_id == world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID) {
+		subsurface_material_id = surface_material_id
+	}
+	surface_layer_depth = terrain_surface_layer_depth_apply_shoreline(
+		evaluation,
+		surface_layer_depth,
+		surface_height_blocks,
+		water_level,
+	)
 
 	return {
 		surface_height = height,
+		surface_height_blocks = surface_height_blocks,
 		surface_layer_depth = surface_layer_depth,
 		dominant_biome_id = target.biome_id,
-		hydrology_debug_material_active = evaluation.hydrology_sample.feature_count > 0,
+		surface_material_id = surface_material_id,
+		subsurface_material_id = subsurface_material_id,
+		hydrology_debug_material_active = local_water_fill_active,
+		water_fill_active = sea_fill_active || local_water_fill_active,
+		water_level_blocks = water_level,
 	}
 }
 
@@ -3899,6 +7825,130 @@ terrain_biome_column_sample_direct :: proc(
 ) -> TerrainBiomeColumn {
 	surface_sample := biomes.surface_biome_field_sample(key, world_x, world_z)
 	return terrain_biome_column_sample(key, surface_sample, world_x, world_z)
+}
+
+terrain_surface_height_apply_vertical_cushion :: proc(height_blocks: f32) -> f32 {
+	height := height_blocks
+	if height > TERRAIN_SURFACE_HEIGHT_TOP_SOFT_START_BLOCKS {
+		range_blocks :=
+			TERRAIN_SURFACE_HEIGHT_TOP_LIMIT_BLOCKS - TERRAIN_SURFACE_HEIGHT_TOP_SOFT_START_BLOCKS
+		overshoot := height - TERRAIN_SURFACE_HEIGHT_TOP_SOFT_START_BLOCKS
+		height =
+			TERRAIN_SURFACE_HEIGHT_TOP_SOFT_START_BLOCKS +
+			range_blocks * overshoot / (overshoot + range_blocks)
+	}
+	if height < TERRAIN_SURFACE_HEIGHT_BOTTOM_SOFT_START_BLOCKS {
+		range_blocks :=
+			TERRAIN_SURFACE_HEIGHT_BOTTOM_SOFT_START_BLOCKS -
+			TERRAIN_SURFACE_HEIGHT_BOTTOM_LIMIT_BLOCKS
+		overshoot := TERRAIN_SURFACE_HEIGHT_BOTTOM_SOFT_START_BLOCKS - height
+		height =
+			TERRAIN_SURFACE_HEIGHT_BOTTOM_SOFT_START_BLOCKS -
+			range_blocks * overshoot / (overshoot + range_blocks)
+	}
+	return height
+}
+
+terrain_biome_material_biome_pick :: proc(
+	key: biomes.FeatureGridKey,
+	evaluation: biomes.SurfaceBiomeProfileEvaluation,
+	world_x, world_z: i32,
+) -> biomes.BiomeID {
+	if evaluation.cell_count <= 1 || evaluation.transition_strength <= 0.02 {
+		return evaluation.final_target.biome_id
+	}
+
+	h := biomes.feature_grid_key_hash(key)
+	h = biomes.feature_grid_hash_combine(h, TERRAIN_SURFACE_MATERIAL_BLEND_SALT)
+	h = biomes.feature_grid_hash_combine(h, biomes.feature_grid_hash_i32(world_x))
+	h = biomes.feature_grid_hash_combine(h, biomes.feature_grid_hash_i32(world_z))
+	roll := biomes.feature_grid_unit_f32(h, TERRAIN_SURFACE_MATERIAL_BLEND_SALT)
+	cumulative := f32(0)
+	for i := u32(0); i < evaluation.cell_count; i += 1 {
+		cumulative += evaluation.blend_weights[i]
+		if roll <= cumulative {
+			return evaluation.targets[i].biome_id
+		}
+	}
+	return evaluation.final_target.biome_id
+}
+
+terrain_shoreline_material_width :: proc(evaluation: biomes.SurfaceBiomeProfileEvaluation) -> f32 {
+	return math.max(f32(6), evaluation.final_target.shoreline_width_blocks * 0.85)
+}
+
+terrain_shoreline_height_delta :: proc(surface_height_blocks, water_level_blocks: f32) -> f32 {
+	water_level := math.max(biomes.SEA_LEVEL_BLOCKS, water_level_blocks)
+	return surface_height_blocks - water_level
+}
+
+terrain_surface_material_apply_shoreline :: proc(
+	key: biomes.FeatureGridKey,
+	evaluation: biomes.SurfaceBiomeProfileEvaluation,
+	base_material_id: world_async.BlockMaterialID,
+	surface_height_blocks, water_level_blocks: f32,
+	world_x, world_z: i32,
+) -> world_async.BlockMaterialID {
+	shore_width := terrain_shoreline_material_width(evaluation)
+	height_delta := terrain_shoreline_height_delta(surface_height_blocks, water_level_blocks)
+	if height_delta > shore_width {
+		return base_material_id
+	}
+	if height_delta < -4 {
+		return world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID)
+	}
+
+	lower_beach_limit := shore_width * 0.42
+	upper_beach_limit := shore_width * 0.94
+	if height_delta <= lower_beach_limit {
+		return world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID)
+	}
+	if height_delta >= upper_beach_limit {
+		return base_material_id
+	}
+
+	sand_strength := 1.0 - math.smoothstep(lower_beach_limit, upper_beach_limit, height_delta)
+	dither := biomes.regional_terrain_field_value_noise_2(
+		key,
+		world_x,
+		world_z,
+		17,
+		TERRAIN_SHORE_MATERIAL_BLEND_SALT,
+	)
+	roll := math.clamp(0.5 + dither * TERRAIN_SHORE_MATERIAL_DITHER_AMPLITUDE, f32(0), f32(1))
+	if roll < sand_strength {
+		return world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID)
+	}
+	return base_material_id
+}
+
+terrain_surface_layer_depth_apply_shoreline :: proc(
+	evaluation: biomes.SurfaceBiomeProfileEvaluation,
+	surface_layer_depth: i32,
+	surface_height_blocks, water_level_blocks: f32,
+) -> i32 {
+	if surface_layer_depth <= 1 {
+		return surface_layer_depth
+	}
+	shore_width := terrain_shoreline_material_width(evaluation)
+	height_delta := terrain_shoreline_height_delta(surface_height_blocks, water_level_blocks)
+	if height_delta < -4 || height_delta > shore_width * TERRAIN_SHORE_CAP_THIN_BAND_FRACTION {
+		return surface_layer_depth
+	}
+	return 1
+}
+
+terrain_subsurface_material_apply_shoreline :: proc(
+	evaluation: biomes.SurfaceBiomeProfileEvaluation,
+	base_material_id: world_async.BlockMaterialID,
+	surface_height_blocks, water_level_blocks: f32,
+) -> world_async.BlockMaterialID {
+	shore_width := terrain_shoreline_material_width(evaluation)
+	height_delta := terrain_shoreline_height_delta(surface_height_blocks, water_level_blocks)
+	if height_delta <= shore_width * TERRAIN_SHORE_CAP_THIN_BAND_FRACTION {
+		return world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID)
+	}
+	return base_material_id
 }
 
 terrain_biome_layer_depth_ceil :: proc(depth: f32) -> i32 {
@@ -3939,14 +7989,14 @@ terrain_debug_material_flags_from_combo :: proc(combo: u32) -> u32 {
 }
 
 terrain_biome_block_material_id :: proc(
-	biome_id: biomes.BiomeID,
-	blocks_below_surface, surface_layer_depth: i32,
+	column: TerrainBiomeColumn,
+	blocks_below_surface: i32,
 ) -> world_async.BlockMaterialID {
-	if blocks_below_surface < surface_layer_depth {
-		return terrain_biome_surface_material_id(biome_id)
+	if blocks_below_surface < column.surface_layer_depth {
+		return column.surface_material_id
 	}
-	if blocks_below_surface < surface_layer_depth + TERRAIN_DIRT_LAYER_BLOCK_DEPTH {
-		return terrain_biome_subsurface_material_id(biome_id)
+	if blocks_below_surface < column.surface_layer_depth + TERRAIN_DIRT_LAYER_BLOCK_DEPTH {
+		return column.subsurface_material_id
 	}
 	return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
 }
@@ -3996,6 +8046,793 @@ terrain_biome_subsurface_material_id :: proc(
 /////////////////////////////////////
 
 when ODIN_DEBUG {
+
+	DEBUG_TERRAIN_QUALITY_GRID_STEPS :: 17
+	DEBUG_TERRAIN_QUALITY_GRID_STEP_BLOCKS :: 64
+	DEBUG_TERRAIN_QUALITY_GRID_MIN_BLOCK :: -512
+
+	debug_terrain_generation_quality_contract_checks_run :: proc(key: biomes.FeatureGridKey) {
+		log.assert(
+			CHUNK_STREAMING_RADIUS_Y_UP >= 1,
+			"terrain streaming must include an upper layer so mountains are visible",
+		)
+		log.assert(
+			CHUNK_STREAMING_RADIUS_Y_DOWN >= 2,
+			"terrain streaming must include at least two lower layers for subterranean depth",
+		)
+
+		min_height := max(f32)
+		max_height := -max(f32)
+		same_biome_pairs: u32
+		biome_pair_count: u32
+		water_debug_columns: u32
+		previous_row: [DEBUG_TERRAIN_QUALITY_GRID_STEPS]biomes.BiomeID
+
+		for z_index := 0; z_index < DEBUG_TERRAIN_QUALITY_GRID_STEPS; z_index += 1 {
+			prev_x_valid := false
+			prev_x_biome := biomes.BiomeID.Temperate_Hills
+			world_z := i32(
+				DEBUG_TERRAIN_QUALITY_GRID_MIN_BLOCK +
+				z_index * DEBUG_TERRAIN_QUALITY_GRID_STEP_BLOCKS,
+			)
+
+			for x_index := 0; x_index < DEBUG_TERRAIN_QUALITY_GRID_STEPS; x_index += 1 {
+				world_x := i32(
+					DEBUG_TERRAIN_QUALITY_GRID_MIN_BLOCK +
+					x_index * DEBUG_TERRAIN_QUALITY_GRID_STEP_BLOCKS,
+				)
+				column := terrain_biome_column_sample_direct(key, world_x, world_z)
+
+				min_height = math.min(min_height, column.surface_height_blocks)
+				max_height = math.max(max_height, column.surface_height_blocks)
+
+				if prev_x_valid {
+					biome_pair_count += 1
+					if prev_x_biome == column.dominant_biome_id {
+						same_biome_pairs += 1
+					}
+				}
+				if z_index > 0 {
+					biome_pair_count += 1
+					if previous_row[x_index] == column.dominant_biome_id {
+						same_biome_pairs += 1
+					}
+				}
+				previous_row[x_index] = column.dominant_biome_id
+				prev_x_biome = column.dominant_biome_id
+				prev_x_valid = true
+
+				if column.hydrology_debug_material_active {
+					water_debug_columns += 1
+					log.assert(
+						column.water_fill_active,
+						"hydrology debug columns must correspond to actual local water fill",
+					)
+				}
+			}
+		}
+
+		height_range := max_height - min_height
+		same_biome_ratio := f32(same_biome_pairs) / f32(biome_pair_count)
+		log.assertf(
+			height_range >= 55,
+			"surface terrain should have meaningful elevation range: min=%.2f max=%.2f range=%.2f",
+			min_height,
+			max_height,
+			height_range,
+		)
+		log.assertf(
+			max_height >= 78,
+			"surface terrain should generate visible highland/mountain heights, max=%.2f",
+			max_height,
+		)
+		log.assertf(
+			same_biome_ratio >= 0.48,
+			"surface biome field should have coherent neighboring samples, ratio=%.3f",
+			same_biome_ratio,
+		)
+		log.assert(
+			water_debug_columns > 0,
+			"terrain quality sample should include local water-fill debug columns",
+		)
+		shore_eval := biomes.SurfaceBiomeProfileEvaluation {
+			final_target = {shoreline_width_blocks = 18},
+		}
+		shore_material := terrain_surface_material_apply_shoreline(
+			key,
+			shore_eval,
+			world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID),
+			biomes.SEA_LEVEL_BLOCKS + 1,
+			biomes.SEA_LEVEL_BLOCKS,
+			11,
+			23,
+		)
+		log.assert(
+			shore_material == world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID),
+			"shoreline material rule should turn low beach surface to sand/wet material",
+		)
+		lower_middle_shore_material := terrain_surface_material_apply_shoreline(
+			key,
+			shore_eval,
+			world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID),
+			biomes.SEA_LEVEL_BLOCKS + 8,
+			biomes.SEA_LEVEL_BLOCKS,
+			11,
+			23,
+		)
+		log.assert(
+			lower_middle_shore_material == world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID),
+			"shoreline material dither should keep lower-middle beach surface sand/wet",
+		)
+		upland_material := terrain_surface_material_apply_shoreline(
+			key,
+			shore_eval,
+			world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID),
+			biomes.SEA_LEVEL_BLOCKS + 48,
+			biomes.SEA_LEVEL_BLOCKS,
+			11,
+			23,
+		)
+		log.assert(
+			upland_material == world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID),
+			"shoreline material rule should leave upland grass material alone",
+		)
+		shore_cap_depth := terrain_surface_layer_depth_apply_shoreline(
+			shore_eval,
+			TERRAIN_GRASS_CAP_BLOCK_DEPTH,
+			biomes.SEA_LEVEL_BLOCKS + 8,
+			biomes.SEA_LEVEL_BLOCKS,
+		)
+		log.assert(
+			shore_cap_depth == 1,
+			"shoreline material layering should thin grass caps over middle beach sand",
+		)
+		shore_subsurface_material := terrain_subsurface_material_apply_shoreline(
+			shore_eval,
+			world_async.BlockMaterialID(TERRAIN_DIRT_MAT_ID),
+			biomes.SEA_LEVEL_BLOCKS + 8,
+			biomes.SEA_LEVEL_BLOCKS,
+		)
+		log.assert(
+			shore_subsurface_material == world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID),
+			"shoreline material layering should expose sand/wet material under the beach cap",
+		)
+		upland_cap_depth := terrain_surface_layer_depth_apply_shoreline(
+			shore_eval,
+			TERRAIN_GRASS_CAP_BLOCK_DEPTH,
+			biomes.SEA_LEVEL_BLOCKS + 48,
+			biomes.SEA_LEVEL_BLOCKS,
+		)
+		upland_subsurface_material := terrain_subsurface_material_apply_shoreline(
+			shore_eval,
+			world_async.BlockMaterialID(TERRAIN_DIRT_MAT_ID),
+			biomes.SEA_LEVEL_BLOCKS + 48,
+			biomes.SEA_LEVEL_BLOCKS,
+		)
+		log.assert(
+			upland_cap_depth == TERRAIN_GRASS_CAP_BLOCK_DEPTH &&
+			upland_subsurface_material == world_async.BlockMaterialID(TERRAIN_DIRT_MAT_ID),
+			"shoreline material layering should leave upland caps and subsurface material alone",
+		)
+		log.assert(
+			terrain_surface_height_apply_vertical_cushion(200) <
+			TERRAIN_SURFACE_HEIGHT_TOP_LIMIT_BLOCKS,
+			"surface height top cushion should keep generated terrain below the hard top support",
+		)
+		log.assert(
+			terrain_surface_height_apply_vertical_cushion(-220) >
+			TERRAIN_SURFACE_HEIGHT_BOTTOM_LIMIT_BLOCKS,
+			"surface height bottom cushion should keep generated terrain above the hard lower support",
+		)
+		tunnel_passage_shape := terrain_density_cave_passage_shape(.Tunnel)
+		generic_segment_shape := terrain_density_cave_segment_shape_default()
+		canyon_passage_shape := terrain_density_cave_passage_shape(.Canyon)
+		fracture_passage_shape := terrain_density_cave_passage_shape(.Fracture)
+		flooded_passage_shape := terrain_density_cave_passage_shape(.Flooded_Passage)
+		worm_passage_shape := terrain_density_cave_passage_shape(.Worm_Path)
+		collapsed_passage_shape := terrain_density_cave_passage_shape(.Collapsed_Corridor)
+		log.assert(
+			canyon_passage_shape.radius_x_scale > tunnel_passage_shape.radius_x_scale &&
+			canyon_passage_shape.radius_y_scale > tunnel_passage_shape.radius_y_scale,
+			"canyon cave passage profile should be broader than a tunnel",
+		)
+		log.assert(
+			fracture_passage_shape.radius_x_scale < tunnel_passage_shape.radius_x_scale &&
+			fracture_passage_shape.radius_y_scale > tunnel_passage_shape.radius_y_scale,
+			"fracture cave passage profile should be narrow and tall",
+		)
+		log.assert(
+			fracture_passage_shape.radius_neck_scale > tunnel_passage_shape.radius_neck_scale,
+			"fracture cave passage profile should pinch more strongly than a tunnel",
+		)
+		log.assert(
+			canyon_passage_shape.radius_swell_scale > tunnel_passage_shape.radius_swell_scale,
+			"canyon cave passage profile should support wider local chambers",
+		)
+		log.assert(
+			flooded_passage_shape.radius_y_scale < tunnel_passage_shape.radius_y_scale,
+			"flooded cave passage profile should be vertically flattened",
+		)
+		log.assert(
+			worm_passage_shape.meander_scale > tunnel_passage_shape.meander_scale &&
+			worm_passage_shape.radius_z_scale > tunnel_passage_shape.radius_z_scale,
+			"worm cave passage profile should be more sinuous than a tunnel",
+		)
+		log.assert(
+			worm_passage_shape.curve_scale > tunnel_passage_shape.curve_scale &&
+			tunnel_passage_shape.curve_scale > generic_segment_shape.curve_scale,
+			"cave passage profiles should add coherent centerline curvature over generic segments",
+		)
+		log.assert(
+			collapsed_passage_shape.radius_y_scale < tunnel_passage_shape.radius_y_scale &&
+			collapsed_passage_shape.radius_neck_scale > tunnel_passage_shape.radius_neck_scale,
+			"collapsed cave passage profile should be flatter and more pinched than a tunnel",
+		)
+		log.assert(
+			tunnel_passage_shape.radius_neck_scale > generic_segment_shape.radius_neck_scale &&
+			tunnel_passage_shape.meander_scale > generic_segment_shape.meander_scale,
+			"ordinary tunnel cave passage profile should be more pinched and wandering than a generic segment",
+		)
+		log.assert(
+			tunnel_passage_shape.radius_endpoint_scale >
+				generic_segment_shape.radius_endpoint_scale &&
+			fracture_passage_shape.radius_endpoint_scale >=
+				tunnel_passage_shape.radius_endpoint_scale,
+			"cave passage profiles should keep endpoint sockets wider than generic segments",
+		)
+		log.assert(
+			terrain_density_cave_passage_radius_profile_scale(tunnel_passage_shape, -1.0, 0.0) <
+			terrain_density_cave_passage_radius_profile_scale(tunnel_passage_shape, 1.0, 0.0),
+			"cave passage radius profile should create deterministic necks and swells",
+		)
+		log.assert(
+			TERRAIN_FUNGAL_ROOM_LOWER_XZ_SCALE > 1.0 &&
+			TERRAIN_FUNGAL_ROOM_LOWER_Y_SCALE < TERRAIN_FUNGAL_ROOM_DOME_Y_SCALE,
+			"fungal cave room profile should favor broad lower vaults with taller domes",
+		)
+		log.assert(
+			TERRAIN_FUNGAL_ROOM_ALCOVE_OFFSET_SCALE > TERRAIN_FUNGAL_ROOM_ALCOVE_XZ_SCALE,
+			"fungal cave room profile should push side alcoves away from the room center",
+		)
+		log.assert(
+			TERRAIN_CRYSTAL_ROOM_MAIN_Y_SCALE > 1.0 && TERRAIN_CRYSTAL_ROOM_MAIN_XZ_SCALE < 0.85,
+			"crystal cave room profile should favor tall narrow geode volumes",
+		)
+		log.assert(
+			TERRAIN_CRYSTAL_ROOM_FISSURE_UPPER_Y_SCALE >
+			TERRAIN_CRYSTAL_ROOM_FISSURE_LOWER_Y_SCALE,
+			"crystal cave room fissure should rise through the geode room",
+		)
+		log.assert(
+			TERRAIN_AQUIFER_ROOM_BASIN_XZ_SCALE > 1.0 &&
+			TERRAIN_AQUIFER_ROOM_BASIN_Y_SCALE < TERRAIN_AQUIFER_ROOM_SHELF_Y_SCALE + 0.08,
+			"aquifer cave room profile should favor a broad low flooded basin",
+		)
+		log.assert(
+			TERRAIN_AQUIFER_ROOM_SHELF_OFFSET_SCALE > TERRAIN_AQUIFER_ROOM_SHELF_XZ_SCALE * 0.5,
+			"aquifer cave room profile should offset the dry shelf away from the basin center",
+		)
+		log.assert(
+			TERRAIN_AQUIFER_ROOM_WATER_Y_OFFSET_SCALE <
+				TERRAIN_AQUIFER_ROOM_BASIN_Y_OFFSET_SCALE &&
+			TERRAIN_AQUIFER_ROOM_WATER_Y_SCALE < TERRAIN_AQUIFER_ROOM_BASIN_Y_SCALE,
+			"aquifer cave room water profile should stay lower and shallower than the basin",
+		)
+		log.assert(
+			terrain_density_cave_node_uses_profile_room(
+				{role = .Pocket, kind = .Chamber, radius_blocks = 5, major_region = true},
+			),
+			"major cave nodes should always use biome-specific profile rooms",
+		)
+		log.assert(
+			terrain_density_cave_node_uses_profile_room(
+				{
+					role = .Resource_Chamber,
+					kind = .Geode_Chamber,
+					radius_blocks = TERRAIN_CAVE_NODE_PROFILE_ROOM_MIN_RADIUS_BLOCKS,
+				},
+			),
+			"medium resource chambers should use biome-specific profile rooms",
+		)
+		log.assert(
+			terrain_density_cave_node_uses_profile_room(
+				{
+					role = .Water_Linked_Region,
+					kind = .Underground_Lake,
+					radius_blocks = TERRAIN_CAVE_NODE_PROFILE_ROOM_MIN_RADIUS_BLOCKS,
+				},
+			),
+			"medium water-linked chambers should use biome-specific profile rooms",
+		)
+		log.assert(
+			terrain_density_cave_node_uses_profile_room(
+				{
+					role = .Pocket,
+					kind = .Chamber,
+					radius_blocks = TERRAIN_CAVE_NODE_ISOLATED_CULL_RADIUS_BLOCKS,
+				},
+			),
+			"large ordinary chambers should use profile rooms instead of plain ellipsoids",
+		)
+		log.assert(
+			!terrain_density_cave_node_uses_profile_room(
+				{
+					role = .Pocket,
+					kind = .Chamber,
+					radius_blocks = TERRAIN_CAVE_NODE_PROFILE_ROOM_MIN_RADIUS_BLOCKS - 1,
+				},
+			),
+			"small ordinary pockets should remain cheap or be culled by connectivity",
+		)
+		log.assert(
+			terrain_density_cave_room_lobe_threshold_adjust(0.92, 0, 0, 1, 0) > 0,
+			"cave room lobe profile should expand at least one deterministic side",
+		)
+		log.assert(
+			terrain_density_cave_room_lobe_threshold_adjust(0, 0, 0.92, 1, 0) < 0,
+			"cave room lobe profile should notch the perpendicular room edge",
+		)
+		log.assert(
+			math.abs(terrain_density_cave_room_lobe_threshold_adjust(0, 0, 0, 1, 0)) < 0.001,
+			"cave room lobe profile should leave the core room connection intact",
+		)
+		log.assert(
+			!terrain_density_cave_room_internal_structure_preserves(
+				0,
+				0,
+				0,
+				8,
+				8,
+				8,
+				1,
+				0,
+				1,
+				.Fungal_Vaults,
+			),
+			"cave room internal structure should leave the connected core open",
+		)
+		log.assert(
+			terrain_density_cave_room_internal_structure_preserves(
+				0,
+				0,
+				0.42,
+				8,
+				8,
+				8,
+				1,
+				0,
+				1,
+				.Fungal_Vaults,
+			),
+			"fungal cave rooms should preserve off-center root-like internal columns",
+		)
+		log.assert(
+			terrain_density_cave_room_internal_structure_preserves(
+				0,
+				0,
+				0.32,
+				8,
+				8,
+				8,
+				1,
+				0,
+				1,
+				.Crystal_Geode_Network,
+			),
+			"crystal cave rooms should preserve narrow off-center blade-like structure",
+		)
+		log.assert(
+			terrain_density_cave_room_internal_structure_preserves(
+				0,
+				-0.45,
+				0.32,
+				8,
+				8,
+				8,
+				1,
+				0,
+				1,
+				.Buried_Aquifer_Caves,
+			),
+			"aquifer cave rooms should preserve low island-like structure",
+		)
+		log.assert(
+			terrain_density_cave_mouth_lower_width_scale(0.0, 1.0) >
+			terrain_density_cave_mouth_lower_width_scale(1.0, 1.0),
+			"cave mouth profile should keep the surface opening wider than the back throat",
+		)
+		log.assert(
+			terrain_density_cave_mouth_lower_width_scale(0.0, 1.0) >= 1.25,
+			"cave mouth profile should keep a broad lower surface arch",
+		)
+		log.assert(
+			terrain_density_cave_mouth_side_shoulder_penalty(0.0, 0.9, 1.0) >
+			terrain_density_cave_mouth_side_shoulder_penalty(0.0, 0.1, 1.0),
+			"cave mouth profile should leave stronger upper side shoulders than the center",
+		)
+		log.assert(
+			terrain_density_cave_mouth_side_shoulder_penalty(0.0, 0.36, 1.0) > 0,
+			"cave mouth profile should start preserving upper side shoulders before the far edge",
+		)
+		log.assert(
+			terrain_density_cave_mouth_lower_center_relief(0.0, 0.1, 1.0) >
+			terrain_density_cave_mouth_lower_center_relief(0.0, 0.9, 1.0),
+			"cave mouth profile should open the lower center more than side edges",
+		)
+		log.assert(
+			terrain_density_cave_mouth_lower_center_relief(0.0, 0.1, 1.0) > 0.10,
+			"cave mouth profile should cut a stronger lower-center opening",
+		)
+		log.assert(
+			terrain_density_cave_mouth_lower_jaw_relief(0.0, 0.52, 1.0) >
+			terrain_density_cave_mouth_lower_jaw_relief(0.0, 0.05, 1.0),
+			"cave mouth profile should carve lower side jaw pockets away from the center",
+		)
+		log.assert(
+			terrain_density_cave_mouth_lower_jaw_relief(1.0, 0.52, 1.0) <
+			terrain_density_cave_mouth_lower_jaw_relief(0.0, 0.52, 1.0),
+			"cave mouth lower jaw relief should fade into the back throat",
+		)
+		log.assert(
+			terrain_density_cave_mouth_side_alcove_relief(0.42, 0.72, 1.0, 1.0) >
+			terrain_density_cave_mouth_side_alcove_relief(0.42, 0.10, 1.0, 1.0),
+			"cave mouth side alcove relief should target off-center side pockets",
+		)
+		log.assert(
+			terrain_density_cave_mouth_side_alcove_relief(0.95, 0.72, 1.0, 1.0) <
+			terrain_density_cave_mouth_side_alcove_relief(0.42, 0.72, 1.0, 1.0),
+			"cave mouth side alcove relief should fade before the back throat",
+		)
+		log.assert(
+			terrain_density_cave_mouth_side_alcove_relief(0.42, 0.72, 1.0, 0.0) <
+			terrain_density_cave_mouth_side_alcove_relief(0.42, 0.72, 1.0, 1.0),
+			"small cave mouths should keep side alcove relief smaller than large mouths",
+		)
+		log.assert(
+			terrain_density_cave_mouth_upper_lip_rib(0.0, 0.05, 1.0) >
+			terrain_density_cave_mouth_upper_lip_rib(0.0, 0.9, 1.0),
+			"cave mouth profile should preserve a small upper-center lip",
+		)
+		log.assert(
+			terrain_density_sinkhole_major_radius_scale(0.0) >
+			terrain_density_sinkhole_minor_radius_scale(0.0),
+			"sinkhole throat profile should start as an asymmetric oval at the surface",
+		)
+		log.assert(
+			terrain_density_sinkhole_minor_radius_scale(1.0) >
+			terrain_density_sinkhole_major_radius_scale(1.0),
+			"sinkhole throat profile should twist toward a narrower lower connector",
+		)
+		log.assert(
+			terrain_density_sinkhole_side_ledge_relief(0.0, 0.56) >
+			terrain_density_sinkhole_side_ledge_relief(0.0, 0.05),
+			"sinkhole throat profile should carve upper side ledges away from the center",
+		)
+		log.assert(
+			terrain_density_sinkhole_side_ledge_relief(1.0, 0.56) <
+			terrain_density_sinkhole_side_ledge_relief(0.0, 0.56),
+			"sinkhole side ledge relief should fade with depth",
+		)
+		log.assert(
+			terrain_density_sinkhole_rim_lip_penalty(0.0, 0.05, 0.05) >
+			terrain_density_sinkhole_rim_lip_penalty(0.0, 0.9, 0.9),
+			"sinkhole throat profile should preserve a small upper-center rim lip",
+		)
+		mouth_entrance_shape := terrain_density_cave_entrance_link_shape(.Cave_Mouth, true)
+		mouth_deep_shape := terrain_density_cave_entrance_link_shape(.Cave_Mouth, false)
+		sinkhole_entrance_shape := terrain_density_cave_entrance_link_shape(.Sinkhole, true)
+		log.assert(
+			mouth_entrance_shape.radius_y_scale < tunnel_passage_shape.radius_y_scale &&
+			mouth_entrance_shape.radius_neck_scale > tunnel_passage_shape.radius_neck_scale,
+			"cave mouth entrance link should flatten and pinch before joining the graph",
+		)
+		log.assert(
+			mouth_deep_shape.curve_scale > tunnel_passage_shape.curve_scale,
+			"deep cave mouth link should keep coherent curvature into the graph",
+		)
+		log.assert(
+			terrain_density_cave_mouth_reach_blocks(6) <
+			terrain_density_cave_mouth_reach_blocks(12),
+			"small cave mouths should have shorter surface carving reach than large mouths",
+		)
+		log.assert(
+			terrain_density_cave_mouth_near_link_radius(6, 3) < 3,
+			"small cave mouths should keep the near-surface connector narrower than the graph link",
+		)
+		log.assert(
+			terrain_density_cave_mouth_transition_drop_blocks(12, 120) /
+				terrain_density_cave_mouth_transition_run_blocks(12) <
+			0.8,
+			"cave mouth transition should slope before dropping into the deep graph",
+		)
+		small_mouth_anchor := biomes.CaveAnchor {
+			id = 1,
+		}
+		log.assert(
+			terrain_density_cave_mouth_transition_style(small_mouth_anchor, 6) != .Spiral_Ramp,
+			"small cave mouths should not choose the semi-chamber spiral ramp profile",
+		)
+		log.assert(
+			sinkhole_entrance_shape.radius_y_scale > mouth_entrance_shape.radius_y_scale &&
+			sinkhole_entrance_shape.radius_x_scale < tunnel_passage_shape.radius_x_scale,
+			"sinkhole entrance link should remain vertical and narrower than ordinary tunnels",
+		)
+		cave_field_path_shape := terrain_density_cave_field_path_shape()
+		log.assert(
+			cave_field_path_shape.radius_y_scale < tunnel_passage_shape.radius_y_scale &&
+			cave_field_path_shape.radius_x_scale < tunnel_passage_shape.radius_x_scale,
+			"stochastic cave-field paths should use a narrow flattened profile",
+		)
+		log.assert(
+			TERRAIN_CAVE_FIELD_PATH_SEGMENT_HALF_LENGTH_SCALE >
+			TERRAIN_CAVE_FIELD_PATH_SEGMENT_RADIUS_SCALE,
+			"stochastic cave-field path segments should be longer than they are wide",
+		)
+		path_direction_field_sample := TerrainCaveFieldSample {
+			path_axis_x = false,
+		}
+		path_direction_network_sample := TerrainCaveFieldNetworkSample {
+			found       = true,
+			route_dir_x = 0.6,
+			route_dir_y = 0.4,
+			route_dir_z = 0.8,
+		}
+		path_dir_x, path_dir_y, path_dir_z, path_route_follow :=
+			terrain_density_cave_field_path_direction(
+				path_direction_field_sample,
+				path_direction_network_sample,
+			)
+		path_horizontal_len := math.sqrt_f32(path_dir_x * path_dir_x + path_dir_z * path_dir_z)
+		log.assert(
+			path_route_follow &&
+			math.abs(path_horizontal_len - 1.0) < 0.001 &&
+			path_dir_y > 0 &&
+			path_dir_y <= TERRAIN_CAVE_FIELD_PATH_ROUTE_VERTICAL_SCALE,
+			"stochastic cave-field path segments should follow nearby route tangents with bounded pitch",
+		)
+		fallback_dir_x, fallback_dir_y, fallback_dir_z, fallback_route_follow :=
+			terrain_density_cave_field_path_direction(path_direction_field_sample, {})
+		log.assert(
+			!fallback_route_follow &&
+			fallback_dir_x == 0 &&
+			fallback_dir_y == 0 &&
+			fallback_dir_z == 1,
+			"stochastic cave-field path direction should retain deterministic axis fallback",
+		)
+		route_pocket_field_sample := TerrainCaveFieldSample {
+				chamber_open_strength = TERRAIN_CAVE_FIELD_OPEN_STRENGTH_MIN + 0.08,
+				path_open_strength    = 0.08,
+			}
+		route_pocket_network_sample := TerrainCaveFieldNetworkSample {
+				connected    = true,
+				distance     = 10,
+				route_radius = 4,
+			}
+		log.assert(
+			terrain_density_cave_field_sample_prefers_route_pocket(
+				route_pocket_field_sample,
+				1.0,
+				route_pocket_network_sample,
+			),
+			"route-adjacent chamber samples should become connected cave-field side pockets",
+		)
+		route_pocket_network_sample.connected = false
+		log.assert(
+			!terrain_density_cave_field_sample_prefers_route_pocket(
+				route_pocket_field_sample,
+				1.0,
+				route_pocket_network_sample,
+			),
+			"route-pocket cave-field samples should require actual network connectivity",
+		)
+		cave_field_candidates: u32
+		cave_field_path_candidates: u32
+		cave_field_chamber_candidates: u32
+		for sample_z := i32(-128); sample_z <= 128; sample_z += 16 {
+			for sample_y := i32(-112); sample_y <= -32; sample_y += 16 {
+				for sample_x := i32(-128); sample_x <= 128; sample_x += 16 {
+					sample_column := terrain_biome_column_sample_direct(key, sample_x, sample_z)
+					depth_below_surface := sample_column.surface_height_blocks - f32(sample_y)
+					field_sample := terrain_density_subterranean_cave_field_sample(
+						key,
+						sample_x,
+						sample_y,
+						sample_z,
+						depth_below_surface,
+					)
+					if terrain_density_cave_field_sample_is_candidate(
+						field_sample,
+						terrain_density_cave_vertical_support(f32(sample_y)),
+					) {
+						cave_field_candidates += 1
+						if terrain_density_cave_field_sample_prefers_path(
+							field_sample,
+							terrain_density_cave_vertical_support(f32(sample_y)),
+						) {
+							cave_field_path_candidates += 1
+						} else {
+							cave_field_chamber_candidates += 1
+						}
+					}
+				}
+			}
+		}
+		log.assert(
+			cave_field_candidates > 0,
+			"subterranean cave field should produce narrow/cavern candidate samples",
+		)
+		log.assert(
+			cave_field_path_candidates > 0 && cave_field_chamber_candidates > 0,
+			"subterranean cave field should produce both path and chamber shaped candidates",
+		)
+
+		cave_connectivity_route_edge := biomes.CaveNetworkEdge {
+			id            = biomes.FeatureID(0x701),
+			kind          = .Canyon,
+			from_node_id  = biomes.FeatureID(0x702),
+			to_node_id    = biomes.FeatureID(0x703),
+			from_biome_id = .Fungal_Vaults,
+			to_biome_id   = .Fungal_Vaults,
+			from_x        = 48,
+			from_y        = -80,
+			from_z        = 0,
+			bend_x        = 72,
+			bend_y        = -76,
+			bend_z        = 12,
+			to_x          = 96,
+			to_y          = -80,
+			to_z          = 0,
+			radius_blocks = 6,
+		}
+		cave_connectivity_small_node := biomes.CaveNetworkNode {
+			id                       = biomes.FeatureID(0x711),
+			kind                     = .Chamber,
+			role                     = .Pocket,
+			biome_id                 = .Fungal_Vaults,
+			x                        = 0,
+			y                        = -80,
+			z                        = 0,
+			radius_blocks            = 6,
+			connection_radius_blocks = 3,
+		}
+		cave_connectivity_small_region := biomes.GenerationRegion {
+			key = key,
+		}
+		cave_connectivity_small_region.cave_network_node_count = 1
+		cave_connectivity_small_region.cave_network_nodes[0] = cave_connectivity_small_node
+		cave_connectivity_small := terrain_density_cave_node_connectivity(
+			&cave_connectivity_small_region,
+			cave_connectivity_small_node,
+		)
+		log.assert(
+			!cave_connectivity_small.should_carve,
+			"small isolated cave network pockets should be culled before voxel carving",
+		)
+
+		cave_connectivity_large_node := biomes.CaveNetworkNode {
+			id                       = biomes.FeatureID(0x721),
+			kind                     = .Biome_Hub,
+			role                     = .Major_Region,
+			biome_id                 = .Fungal_Vaults,
+			x                        = 0,
+			y                        = -80,
+			z                        = 0,
+			radius_blocks            = 24,
+			connection_radius_blocks = 8,
+			major_region             = true,
+		}
+		cave_connectivity_large_region := biomes.GenerationRegion {
+			key = key,
+		}
+		cave_connectivity_large_region.cave_network_node_count = 1
+		cave_connectivity_large_region.cave_network_nodes[0] = cave_connectivity_large_node
+		cave_connectivity_large := terrain_density_cave_node_connectivity(
+			&cave_connectivity_large_region,
+			cave_connectivity_large_node,
+		)
+		log.assert(
+			!cave_connectivity_large.should_carve,
+			"large cave network chambers without an edge or bridge route should not carve isolated rooms",
+		)
+
+		cave_connectivity_large_region.cave_network_edge_count = 1
+		cave_connectivity_large_region.cave_network_edges[0] = cave_connectivity_route_edge
+		cave_connectivity_large = terrain_density_cave_node_connectivity(
+			&cave_connectivity_large_region,
+			cave_connectivity_large_node,
+		)
+		log.assert(
+			cave_connectivity_large.should_carve && cave_connectivity_large.should_bridge,
+			"large cave network chambers near a route should bridge into the network",
+		)
+
+		cave_connectivity_anchor_node := biomes.CaveNetworkNode {
+			id                       = biomes.FeatureID(0x731),
+			kind                     = .Entrance,
+			role                     = .Pocket,
+			biome_id                 = .Buried_Aquifer_Caves,
+			x                        = 0,
+			y                        = -80,
+			z                        = 0,
+			radius_blocks            = 8,
+			connection_radius_blocks = 4,
+		}
+		cave_connectivity_anchor := biomes.CaveAnchor {
+			id                      = biomes.FeatureID(0x732),
+			feature_id              = cave_connectivity_anchor_node.id,
+			target_feature_id       = cave_connectivity_anchor_node.id,
+			kind                    = .Cave_Mouth,
+			x                       = 0,
+			y                       = 64,
+			z                       = 0,
+			influence_radius_blocks = 8,
+			guaranteed_connection   = true,
+		}
+		cave_connectivity_anchor_region := biomes.GenerationRegion {
+			key = key,
+		}
+		cave_connectivity_anchor_region.cave_network_node_count = 1
+		cave_connectivity_anchor_region.cave_network_nodes[0] = cave_connectivity_anchor_node
+		cave_connectivity_anchor_region.cave_anchor_count = 1
+		cave_connectivity_anchor_region.cave_anchors[0] = cave_connectivity_anchor
+		cave_connectivity_anchor_sample := terrain_density_cave_node_connectivity(
+			&cave_connectivity_anchor_region,
+			cave_connectivity_anchor_node,
+		)
+		log.assert(
+			cave_connectivity_anchor_sample.has_anchor &&
+			!cave_connectivity_anchor_sample.should_carve,
+			"anchored cave mouths without an edge or bridge route should not become dead-end entrances",
+		)
+		cave_connectivity_anchor_region.cave_network_edge_count = 1
+		cave_connectivity_anchor_region.cave_network_edges[0] = cave_connectivity_route_edge
+		cave_connectivity_anchor_sample = terrain_density_cave_node_connectivity(
+			&cave_connectivity_anchor_region,
+			cave_connectivity_anchor_node,
+		)
+		log.assert(
+			cave_connectivity_anchor_sample.should_carve &&
+			cave_connectivity_anchor_sample.should_bridge,
+			"anchored cave mouths near a route should carve only when they can bridge into the network",
+		)
+
+		surface_node := biomes.cave_network_node_from_owner(
+			key,
+			biomes.FeatureGridCoord3{x = 0, y = 0, z = 0},
+		)
+		surface_column := terrain_biome_column_sample_direct(
+			key,
+			i32(math.floor_f32(surface_node.x)),
+			i32(math.floor_f32(surface_node.z)),
+		)
+		surface_node_depth := surface_column.surface_height_blocks - surface_node.y
+		log.assertf(
+			surface_node_depth >= 60,
+			"surface-adjacent cave node should have meaningful depth, depth=%.2f",
+			surface_node_depth,
+		)
+		log.assertf(
+			surface_node.radius_blocks <= 45,
+			"surface-adjacent cave node radius should not create a broad crater, radius=%.2f",
+			surface_node.radius_blocks,
+		)
+
+		deep_node := biomes.cave_network_node_from_owner(
+			key,
+			biomes.FeatureGridCoord3{x = 0, y = -1, z = 0},
+		)
+		log.assertf(
+			deep_node.y < surface_node.y - 64,
+			"deep cave owner should produce a lower subterranean node: surface_y=%.2f deep_y=%.2f",
+			surface_node.y,
+			deep_node.y,
+		)
+		log.assertf(
+			deep_node.y < -96,
+			"deep cave owner should reach mid-depth terrain, deep_y=%.2f",
+			deep_node.y,
+		)
+	}
 
 	debug_chunk_mesher_contract_checks_run :: proc(transient_arena: ^mem.Arena) {
 		temp := mem.begin_arena_temp_memory(transient_arena)
@@ -4238,6 +9075,88 @@ when ODIN_DEBUG {
 				unpacked_vertex.material_id,
 			)
 		}
+
+		chunk_voxel_view_fill_empty(&view)
+		shore_below_index := chunk_block_index(4, 4, 4)
+		shore_grass_index := chunk_block_index(4, 5, 4)
+		view.blocks.occupancy[shore_below_index] = .Solid
+		view.blocks.material_id[shore_below_index] = world_async.BlockMaterialID(
+			TERRAIN_WET_MARSH_MAT_ID,
+		)
+		view.blocks.occupancy[shore_grass_index] = .Solid
+		view.blocks.material_id[shore_grass_index] = world_async.BlockMaterialID(
+			TERRAIN_GRASS_MAT_ID,
+		)
+		shore_output := chunk_voxel_view_build_binary_greedy_mesh(
+			view,
+			.Treat_Out_Of_Chunk_As_Empty,
+			allocator,
+			scratch,
+		)
+		log.assertf(
+			shore_output.face_count == 6,
+			"shore grass cap: expected visible cap faces to merge as wet material, got %d faces",
+			shore_output.face_count,
+		)
+		for vertex in shore_output.vertices {
+			unpacked_vertex := terrain_unpack_vertex(vertex)
+			log.assertf(
+				unpacked_vertex.material_id == TERRAIN_WET_MARSH_MAT_ID,
+				"shore grass cap: normal=%d expected wet material, got %d",
+				unpacked_vertex.normal_id,
+				unpacked_vertex.material_id,
+			)
+		}
+
+		shore_row_cache := new(world_async.ChunkBinaryGreedyRowCache, allocator)
+		log.assert(shore_row_cache != nil, "shore row cache allocation failed")
+		terrain_binary_row_cache_fill(shore_row_cache, view, 1)
+		shore_cache_output := chunk_binary_row_cache_build_binary_greedy_mesh(
+			shore_row_cache,
+			view,
+			.Treat_Out_Of_Chunk_As_Empty,
+			allocator,
+			scratch,
+		)
+		log.assertf(
+			shore_cache_output.face_count == 6,
+			"shore cached grass cap: expected visible cap faces to merge as wet material, got %d faces",
+			shore_cache_output.face_count,
+		)
+		for vertex in shore_cache_output.vertices {
+			unpacked_vertex := terrain_unpack_vertex(vertex)
+			log.assertf(
+				unpacked_vertex.material_id == TERRAIN_WET_MARSH_MAT_ID,
+				"shore cached grass cap: normal=%d expected wet material, got %d",
+				unpacked_vertex.normal_id,
+				unpacked_vertex.material_id,
+			)
+		}
+		log.assert(
+			terrain_binary_cave_face_material_index(2, TERRAIN_AQUIFER_WALL_MAT_ID) ==
+			TERRAIN_WET_MARSH_MAT_ID,
+			"aquifer cave top faces should render as wet floor material",
+		)
+		log.assert(
+			terrain_binary_cave_face_material_index(3, TERRAIN_AQUIFER_WALL_MAT_ID) ==
+			TERRAIN_STONE_MAT_ID,
+			"aquifer cave bottom faces should render as stone ceiling material",
+		)
+		log.assert(
+			terrain_binary_cave_face_material_index(0, TERRAIN_AQUIFER_WALL_MAT_ID) ==
+			TERRAIN_AQUIFER_WALL_MAT_ID,
+			"aquifer cave side faces should keep aquifer wall material",
+		)
+		log.assert(
+			terrain_binary_cave_face_material_index(2, TERRAIN_CRYSTAL_MAT_ID) ==
+			TERRAIN_STONE_MAT_ID,
+			"crystal cave top faces should render as stone floor material",
+		)
+		log.assert(
+			terrain_binary_cave_face_material_index(3, TERRAIN_CRYSTAL_MAT_ID) ==
+			TERRAIN_CRYSTAL_MAT_ID,
+			"crystal cave bottom faces should keep crystal ceiling material",
+		)
 
 		chunk_voxel_view_fill_empty(&view)
 		index = chunk_block_index(8, 9, 10)
@@ -4488,6 +9407,25 @@ when ODIN_DEBUG {
 			right_neighbor_output.face_count,
 		)
 
+		missing_neighbor_output := mesh_job_execute_sync(
+			{
+				mesher = .Greedy_Binary,
+				snapshot = left_snapshot,
+				neighbors = chunk_mesh_neighbors_find(
+					neighbor_test_snapshots[:1],
+					left_snapshot.coord,
+				),
+				boundary_policy = .Sample_Neighbor_Snapshots,
+			},
+			allocator,
+			allocator,
+		)
+		log.assertf(
+			missing_neighbor_output.face_count == 5,
+			"left boundary block: expected missing sampled neighbor to suppress perimeter face, got %d",
+			missing_neighbor_output.face_count,
+		)
+
 		{
 			binary_temp := mem.begin_arena_temp_memory(transient_arena)
 			defer mem.end_arena_temp_memory(binary_temp)
@@ -4656,12 +9594,15 @@ when ODIN_DEBUG {
 			)
 		}
 
-		heightfield_coord := world_async.ChunkCoord{0, 0, 0}
 		heightfield_seed := u32(0)
-		heightfield_origin := chunk_origin_from_coord(heightfield_coord)
 		heightfield_key := terrain_generation_key_make(heightfield_seed)
+
+		heightfield_coord := world_async.ChunkCoord{0, 0, 0}
+		heightfield_origin := chunk_origin_from_coord(heightfield_coord)
 		terrain_heightfield_voxel_view_fill(&view, heightfield_coord, heightfield_seed)
-		heightfield_top_y: [CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH]i32
+		heightfield_solid_count: u32
+		heightfield_surface_column_count: u32
+		heightfield_surface_material_column_count: u32
 		for z in 0 ..< CHUNK_BLOCK_LENGTH {
 			for x in 0 ..< CHUNK_BLOCK_LENGTH {
 				column := terrain_biome_column_sample_direct(
@@ -4669,75 +9610,383 @@ when ODIN_DEBUG {
 					heightfield_origin.x + i32(x),
 					heightfield_origin.z + i32(z),
 				)
-				top_y: i32 = -1
-				for y in 0 ..< CHUNK_BLOCK_LENGTH {
-					index = chunk_block_index(u32(x), u32(y), u32(z))
-					if view.blocks.occupancy[index] == .Solid {
-						top_y = i32(y)
+				surface_local_y := column.surface_height - heightfield_origin.y
+				if surface_local_y >= 0 && surface_local_y < CHUNK_BLOCK_LENGTH {
+					heightfield_surface_column_count += 1
+					surface_index := chunk_block_index(u32(x), u32(surface_local_y), u32(z))
+					if view.blocks.occupancy[surface_index] == .Solid {
+						surface_material_id := terrain_material_palette_index(
+							view.blocks.material_id[surface_index],
+						)
+						expected_surface_material_id := u32(u8(column.surface_material_id))
+						if surface_material_id == expected_surface_material_id {
+							heightfield_surface_material_column_count += 1
+						}
 					}
 				}
 
-				log.assertf(
-					top_y >= 0,
-					"heightfield column %d,%d: expected at least one solid block",
-					x,
-					z,
-				)
-				heightfield_top_y[x + z * CHUNK_BLOCK_LENGTH] = top_y
-
-				log.assertf(
-					top_y == column.surface_height,
-					"biome heightfield column %d,%d: expected top y %d, got %d",
-					x,
-					z,
-					column.surface_height,
-					top_y,
-				)
-
-				top_index := chunk_block_index(u32(x), u32(top_y), u32(z))
-				top_material_id := terrain_material_palette_index(
-					view.blocks.material_id[top_index],
-				)
-				expected_top_material_id := u32(
-					u8(terrain_biome_surface_material_id(column.dominant_biome_id)),
-				)
-				log.assertf(
-					top_material_id == expected_top_material_id,
-					"biome heightfield column %d,%d: expected top material %d, got %d",
-					x,
-					z,
-					expected_top_material_id,
-					top_material_id,
-				)
-
 				for y in 0 ..< CHUNK_BLOCK_LENGTH {
-					blocks_below_surface := top_y - i32(y)
-					if blocks_below_surface < 0 ||
-					   blocks_below_surface >= column.surface_layer_depth {
-						continue
-					}
-
 					index = chunk_block_index(u32(x), u32(y), u32(z))
-					log.assertf(
-						view.blocks.occupancy[index] == .Solid,
-						"heightfield column %d,%d: expected grass-cap block %d to be solid",
-						x,
-						z,
-						y,
-					)
+					if view.blocks.occupancy[index] == .Solid {
+						heightfield_solid_count += 1
+					}
+				}
+			}
+		}
+		log.assert(heightfield_solid_count > 0, "heightfield chunk: expected solid terrain")
+		log.assert(
+			heightfield_surface_column_count > 0,
+			"heightfield chunk: expected at least one surface column in chunk",
+		)
+		log.assert(
+			heightfield_surface_material_column_count > 0,
+			"heightfield chunk: expected at least one uncarved biome surface material",
+		)
 
-					material_id := terrain_material_palette_index(view.blocks.material_id[index])
-					log.assertf(
-						material_id == expected_top_material_id,
-						"biome heightfield column %d,%d: expected surface material %d, got %d",
-						x,
-						z,
-						expected_top_material_id,
-						material_id,
+		lower_heightfield_coord := world_async.ChunkCoord{0, -1, 0}
+		terrain_heightfield_voxel_view_fill(&view, lower_heightfield_coord, heightfield_seed)
+		lower_solid_count: u32
+		for z in 0 ..< CHUNK_BLOCK_LENGTH {
+			for y in 0 ..< CHUNK_BLOCK_LENGTH {
+				for x in 0 ..< CHUNK_BLOCK_LENGTH {
+					index = chunk_block_index(u32(x), u32(y), u32(z))
+					if view.blocks.occupancy[index] == .Solid {
+						lower_solid_count += 1
+					}
+				}
+			}
+		}
+		log.assertf(
+			lower_solid_count > CHUNK_BLOCK_COUNT / 4,
+			"lower heightfield chunk: expected substantial solid terrain, got %d blocks",
+			lower_solid_count,
+		)
+
+		cave_floor_offset := world_async.BlockCoord {
+			x = 0,
+			y = -1,
+			z = 0,
+		}
+		cave_ceiling_offset := world_async.BlockCoord {
+			x = 0,
+			y = 1,
+			z = 0,
+		}
+		cave_wall_offset := world_async.BlockCoord {
+			x = 1,
+			y = 0,
+			z = 0,
+		}
+		log.assert(
+			terrain_cave_wall_material_id_for_neighbor(.Fungal_Vaults, cave_floor_offset) ==
+			world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID),
+			"fungal cave profile should use mossy floor material",
+		)
+		log.assert(
+			terrain_cave_wall_material_id_for_neighbor(.Fungal_Vaults, cave_ceiling_offset) ==
+			world_async.BlockMaterialID(TERRAIN_DIRT_MAT_ID),
+			"fungal cave profile should use earth ceiling material",
+		)
+		log.assert(
+			terrain_cave_wall_material_id_for_neighbor(
+				.Crystal_Geode_Network,
+				cave_floor_offset,
+			) ==
+			world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID),
+			"crystal cave profile should use stone floor material",
+		)
+		log.assert(
+			terrain_cave_wall_material_id_for_neighbor(
+				.Crystal_Geode_Network,
+				cave_ceiling_offset,
+			) ==
+			world_async.BlockMaterialID(TERRAIN_CRYSTAL_MAT_ID),
+			"crystal cave profile should use crystal ceiling material",
+		)
+		log.assert(
+			terrain_cave_wall_material_id_for_neighbor(.Buried_Aquifer_Caves, cave_wall_offset) ==
+			world_async.BlockMaterialID(TERRAIN_AQUIFER_WALL_MAT_ID),
+			"aquifer cave profile should use distinct side wall material",
+		)
+
+		chunk_voxel_view_fill_empty(&view)
+		test_columns: [CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH]TerrainBiomeColumn
+		for z in 0 ..< CHUNK_BLOCK_LENGTH {
+			for x in 0 ..< CHUNK_BLOCK_LENGTH {
+				test_columns[x + z * CHUNK_BLOCK_LENGTH] = {
+					surface_height         = 64,
+					surface_height_blocks  = 64,
+					surface_material_id    = world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID),
+					subsurface_material_id = world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID),
+				}
+				for y in 0 ..< CHUNK_BLOCK_LENGTH {
+					index = chunk_block_index(u32(x), u32(y), u32(z))
+					view.blocks.occupancy[index] = .Solid
+					view.blocks.material_id[index] = world_async.BlockMaterialID(
+						TERRAIN_CORRUPTED_ASH_MAT_ID,
 					)
 				}
 			}
 		}
+		aquifer_origin := world_async.BlockCoord {
+			x = 0,
+			y = -CHUNK_BLOCK_LENGTH,
+			z = 0,
+		}
+		terrain_density_carve_cave_room(
+			&view,
+			heightfield_key,
+			aquifer_origin,
+			test_columns[:],
+			16,
+			-16,
+			16,
+			9,
+			6,
+			9,
+			.Underground_Lake,
+			.Buried_Aquifer_Caves,
+		)
+		aquifer_open_count: u32
+		aquifer_water_count: u32
+		aquifer_wall_count: u32
+		aquifer_floor_count: u32
+		aquifer_ceiling_count: u32
+		aquifer_wall_material := terrain_cave_wall_material_id(.Buried_Aquifer_Caves)
+		aquifer_floor_material := terrain_cave_floor_material_id(.Buried_Aquifer_Caves)
+		aquifer_ceiling_material := terrain_cave_ceiling_material_id(.Buried_Aquifer_Caves)
+		for z in 0 ..< CHUNK_BLOCK_LENGTH {
+			for y in 0 ..< CHUNK_BLOCK_LENGTH {
+				for x in 0 ..< CHUNK_BLOCK_LENGTH {
+					index = chunk_block_index(u32(x), u32(y), u32(z))
+					palette := terrain_material_palette_index(view.blocks.material_id[index])
+					if view.blocks.occupancy[index] == .Empty {
+						aquifer_open_count += 1
+					}
+					if palette == TERRAIN_WATER_MAT_ID {
+						aquifer_water_count += 1
+					}
+					if palette == terrain_material_palette_index(aquifer_wall_material) {
+						aquifer_wall_count += 1
+					}
+					if palette == terrain_material_palette_index(aquifer_floor_material) {
+						aquifer_floor_count += 1
+					}
+					if palette == terrain_material_palette_index(aquifer_ceiling_material) {
+						aquifer_ceiling_count += 1
+					}
+				}
+			}
+		}
+		log.assertf(
+			aquifer_open_count > 64,
+			"aquifer cave room should carve explorable open volume, got %d",
+			aquifer_open_count,
+		)
+		log.assert(
+			aquifer_water_count > 0,
+			"aquifer cave room should fill lower pockets with water",
+		)
+		log.assert(
+			aquifer_wall_count > 0,
+			"aquifer cave room should expose subterranean biome wall material",
+		)
+		log.assert(aquifer_floor_count > 0, "aquifer cave room should expose wet floor material")
+		log.assert(
+			aquifer_ceiling_count > 0,
+			"aquifer cave room should expose stone ceiling material",
+		)
+
+		chunk_voxel_view_fill_empty(&view)
+		for z in 0 ..< CHUNK_BLOCK_LENGTH {
+			for x in 0 ..< CHUNK_BLOCK_LENGTH {
+				test_columns[x + z * CHUNK_BLOCK_LENGTH] = {
+					surface_height         = 64,
+					surface_height_blocks  = 64,
+					surface_material_id    = world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID),
+					subsurface_material_id = world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID),
+				}
+				for y in 0 ..< CHUNK_BLOCK_LENGTH {
+					index = chunk_block_index(u32(x), u32(y), u32(z))
+					view.blocks.occupancy[index] = .Solid
+					view.blocks.material_id[index] = world_async.BlockMaterialID(
+						TERRAIN_STONE_MAT_ID,
+					)
+				}
+			}
+		}
+		passage_region := new(biomes.GenerationRegion)
+		passage_region.key = heightfield_key
+		passage_from_id := biomes.FeatureID(0x101)
+		passage_to_id := biomes.FeatureID(0x202)
+		passage_region.cave_network_node_count = 2
+		passage_region.cave_network_nodes[0] = {
+			id                       = passage_from_id,
+			kind                     = .Chamber,
+			role                     = .Major_Region,
+			biome_id                 = .Fungal_Vaults,
+			x                        = 4,
+			y                        = -16,
+			z                        = 16,
+			radius_blocks            = 7,
+			connection_radius_blocks = 4,
+			major_region             = true,
+		}
+		passage_region.cave_network_nodes[1] = {
+			id                       = passage_to_id,
+			kind                     = .Geode_Chamber,
+			role                     = .Resource_Chamber,
+			biome_id                 = .Crystal_Geode_Network,
+			x                        = 28,
+			y                        = -15,
+			z                        = 16,
+			radius_blocks            = 6,
+			connection_radius_blocks = 4,
+		}
+		passage_edge := biomes.CaveNetworkEdge {
+			id            = biomes.FeatureID(0x303),
+			kind          = .Canyon,
+			from_node_id  = passage_from_id,
+			to_node_id    = passage_to_id,
+			from_biome_id = .Fungal_Vaults,
+			to_biome_id   = .Crystal_Geode_Network,
+			from_x        = 4,
+			from_y        = -16,
+			from_z        = 16,
+			bend_x        = 16,
+			bend_y        = -15,
+			bend_z        = 16,
+			to_x          = 28,
+			to_y          = -15,
+			to_z          = 16,
+			radius_blocks = 3.4,
+		}
+		terrain_density_carve_cave_edge(
+			&view,
+			passage_region,
+			aquifer_origin,
+			test_columns[:],
+			passage_edge,
+		)
+		passage_fungal_wall_count: u32
+		passage_crystal_wall_count: u32
+		passage_fungal_wall_material := terrain_cave_wall_material_id(.Fungal_Vaults)
+		passage_crystal_wall_material := terrain_cave_wall_material_id(.Crystal_Geode_Network)
+		for z in 0 ..< CHUNK_BLOCK_LENGTH {
+			for y in 0 ..< CHUNK_BLOCK_LENGTH {
+				for x in 0 ..< CHUNK_BLOCK_LENGTH {
+					index = chunk_block_index(u32(x), u32(y), u32(z))
+					palette := terrain_material_palette_index(view.blocks.material_id[index])
+					if palette == terrain_material_palette_index(passage_fungal_wall_material) {
+						passage_fungal_wall_count += 1
+					}
+					if palette == terrain_material_palette_index(passage_crystal_wall_material) {
+						passage_crystal_wall_count += 1
+					}
+				}
+			}
+		}
+		log.assert(
+			passage_fungal_wall_count > 0,
+			"cave edge should inherit the from-node subterranean biome material",
+		)
+		log.assert(
+			passage_crystal_wall_count > 0,
+			"cave edge should inherit the to-node subterranean biome material",
+		)
+
+		cave_node := biomes.cave_network_node_from_owner(
+			heightfield_key,
+			biomes.FeatureGridCoord3{x = 0, y = 0, z = 0},
+		)
+		cave_center_block := world_async.BlockCoord {
+			x = i32(math.floor_f32(cave_node.x)),
+			y = i32(math.floor_f32(cave_node.y)),
+			z = i32(math.floor_f32(cave_node.z)),
+		}
+		cave_chunk_coord := chunk_coord_from_block_coord(cave_center_block)
+		terrain_heightfield_voxel_view_fill(&view, cave_chunk_coord, heightfield_seed)
+		cave_local := block_coord_local_from_chunk_coord(cave_center_block, cave_chunk_coord)
+		log.assert(
+			chunk_block_coord_is_inside(cave_local.x, cave_local.y, cave_local.z),
+			"cave node center should map inside its generated chunk",
+		)
+		cave_index := chunk_block_index(u32(cave_local.x), u32(cave_local.y), u32(cave_local.z))
+		cave_palette := terrain_material_palette_index(view.blocks.material_id[cave_index])
+		log.assertf(
+			view.blocks.occupancy[cave_index] == .Empty || cave_palette == TERRAIN_WATER_MAT_ID,
+			"cave node center should be carved or water-filled, occupancy=%v material=%d",
+			view.blocks.occupancy[cave_index],
+			cave_palette,
+		)
+		cave_open_count: u32
+		for dz := i32(-4); dz <= 4; dz += 1 {
+			for dy := i32(-4); dy <= 4; dy += 1 {
+				for dx := i32(-4); dx <= 4; dx += 1 {
+					lx := cave_local.x + dx
+					ly := cave_local.y + dy
+					lz := cave_local.z + dz
+					if !chunk_block_coord_is_inside(lx, ly, lz) {
+						continue
+					}
+					local_index := chunk_block_index(u32(lx), u32(ly), u32(lz))
+					local_palette := terrain_material_palette_index(
+						view.blocks.material_id[local_index],
+					)
+					if view.blocks.occupancy[local_index] == .Empty ||
+					   local_palette == TERRAIN_WATER_MAT_ID {
+						cave_open_count += 1
+					}
+				}
+			}
+		}
+		log.assertf(
+			cave_open_count > 12,
+			"cave node room should carve a local volume, got %d open/water blocks",
+			cave_open_count,
+		)
+
+		water_found := false
+		for owner_z := i32(-2); owner_z <= 2 && !water_found; owner_z += 1 {
+			for owner_x := i32(-2); owner_x <= 2 && !water_found; owner_x += 1 {
+				water_node := biomes.water_feature_surface_node_from_owner(
+					heightfield_key,
+					biomes.FeatureGridCoord2{x = owner_x, z = owner_z},
+				)
+				water_block := world_async.BlockCoord {
+					x = i32(math.floor_f32(water_node.x)),
+					y = i32(math.floor_f32(water_node.water_level_blocks)),
+					z = i32(math.floor_f32(water_node.z)),
+				}
+				water_chunk_coord := chunk_coord_from_block_coord(water_block)
+				terrain_heightfield_voxel_view_fill(&view, water_chunk_coord, heightfield_seed)
+				for z in 0 ..< CHUNK_BLOCK_LENGTH {
+					for y in 0 ..< CHUNK_BLOCK_LENGTH {
+						for x in 0 ..< CHUNK_BLOCK_LENGTH {
+							index = chunk_block_index(u32(x), u32(y), u32(z))
+							if view.blocks.occupancy[index] != .Solid {
+								continue
+							}
+							if terrain_material_palette_index(view.blocks.material_id[index]) ==
+							   TERRAIN_WATER_MAT_ID {
+								water_found = true
+								break
+							}
+						}
+						if water_found {
+							break
+						}
+					}
+					if water_found {
+						break
+					}
+				}
+			}
+		}
+		log.assert(water_found, "surface hydrology should generate visible water blocks")
+		debug_terrain_generation_quality_contract_checks_run(heightfield_key)
+
+		terrain_heightfield_voxel_view_fill(&view, heightfield_coord, heightfield_seed)
 
 		heightfield_output := chunk_voxel_view_build_binary_greedy_mesh(
 			view,
@@ -4766,30 +10015,11 @@ when ODIN_DEBUG {
 				vertex.block_z,
 			)
 
-			top_y := heightfield_top_y[vertex.block_x + vertex.block_z * CHUNK_BLOCK_LENGTH]
-			surface_block_y := i32(vertex.block_y) - 1
 			log.assertf(
-				surface_block_y == top_y,
-				"heightfield top face %d: expected surface block y %d, got %d",
+				(vertex.material_id & (TERRAIN_MATERIAL_PALETTE_COUNT - 1)) <
+				TERRAIN_MATERIAL_PALETTE_COUNT,
+				"heightfield face %d: material out of palette range: %d",
 				face_index,
-				top_y,
-				surface_block_y,
-			)
-
-			column := terrain_biome_column_sample_direct(
-				heightfield_key,
-				heightfield_origin.x + i32(vertex.block_x),
-				heightfield_origin.z + i32(vertex.block_z),
-			)
-			expected_top_material_id := u32(
-				u8(terrain_biome_surface_material_id(column.dominant_biome_id)),
-			)
-			log.assertf(
-				(vertex.material_id & (TERRAIN_MATERIAL_PALETTE_COUNT - 1)) ==
-				expected_top_material_id,
-				"heightfield face %d: expected top block material %d, got %d",
-				face_index,
-				expected_top_material_id,
 				vertex.material_id,
 			)
 		}

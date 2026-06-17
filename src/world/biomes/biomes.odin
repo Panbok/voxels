@@ -247,11 +247,20 @@ SURFACE_BIOME_JUNCTION_BAND_BLOCKS :: f32(32.0)
 SUBTERRANEAN_BIOME_BLEND_BAND_BLOCKS :: f32(72.0)
 SUBTERRANEAN_BIOME_JUNCTION_BAND_BLOCKS :: f32(28.0)
 
+SURFACE_BIOME_WARP_LOW_CELL_BLOCKS :: 1536
+SURFACE_BIOME_WARP_HIGH_CELL_BLOCKS :: 384
+SURFACE_BIOME_WARP_LOW_STRENGTH_BLOCKS :: f32(128.0)
+SURFACE_BIOME_WARP_HIGH_STRENGTH_BLOCKS :: f32(32.0)
+
 SURFACE_MACRO_ZONE_SALT :: u64(0x7f4a7c159e3779b9)
 SUBTERRANEAN_MACRO_ZONE_SALT :: u64(0xc2b2ae3d27d4eb4f)
 SURFACE_BIOME_IDENTITY_SALT :: u64(0x243f6a8885a308d3)
 SUBTERRANEAN_BIOME_IDENTITY_SALT :: u64(0x13198a2e03707344)
 BIOME_ADJACENCY_CLASH_SALT :: u64(0xa4093822299f31d0)
+SURFACE_BIOME_WARP_LOW_X_SALT :: u64(0xe17a1465b2c91d8f)
+SURFACE_BIOME_WARP_LOW_Z_SALT :: u64(0x41c6e93abf78d215)
+SURFACE_BIOME_WARP_HIGH_X_SALT :: u64(0x9f2d0a84c6715e3b)
+SURFACE_BIOME_WARP_HIGH_Z_SALT :: u64(0x6be48d920fc13a57)
 
 SURFACE_BIOME_RARE_CLASH_CHANCE :: f32(0.08)
 SUBTERRANEAN_BIOME_RARE_CLASH_CHANCE :: f32(0.10)
@@ -923,6 +932,10 @@ subterranean_biome_identities_are_compatible :: proc(a, b: BiomeID) -> bool {
 	if a == .Buried_Aquifer_Caves || b == .Buried_Aquifer_Caves {
 		return true
 	}
+	if (a == .Fungal_Vaults && b == .Crystal_Geode_Network) ||
+	   (a == .Crystal_Geode_Network && b == .Fungal_Vaults) {
+		return true
+	}
 	return false
 }
 
@@ -935,18 +948,19 @@ surface_biome_field_sample :: proc(
 	block_x, block_z: i32,
 ) -> SurfaceBiomeFieldSample {
 	config := feature_grid_config_for(.Surface, .Biome)
+	sample_x, sample_z := surface_biome_field_warped_sample_position(key, block_x, block_z)
+	owner_block_x := i32(math.floor_f32(sample_x))
+	owner_block_z := i32(math.floor_f32(sample_z))
 	owners: [FEATURE_GRID_WORLEY_NEIGHBOR_COUNT_2]FeatureGridCoord2
 	owner_count := feature_grid_neighbor_owners_from_block(
-		block_x,
-		block_z,
+		owner_block_x,
+		owner_block_z,
 		FEATURE_GRID_WORLEY_NEIGHBOR_RADIUS,
 		config,
 		owners[:],
 	)
 
 	sample := SurfaceBiomeFieldSample{}
-	sample_x := f32(block_x) + 0.5
-	sample_z := f32(block_z) + 0.5
 
 	for i := u32(0); i < owner_count; i += 1 {
 		point := feature_grid_point_from_owner(key, config, owners[i])
@@ -956,6 +970,53 @@ surface_biome_field_sample :: proc(
 
 	surface_biome_field_sample_finalize(&sample)
 	return sample
+}
+
+surface_biome_field_warped_sample_position :: proc(
+	key: FeatureGridKey,
+	block_x, block_z: i32,
+) -> (
+	sample_x, sample_z: f32,
+) {
+	base_x := f32(block_x) + 0.5
+	base_z := f32(block_z) + 0.5
+	low_x := regional_terrain_field_value_noise_2(
+		key,
+		block_x,
+		block_z,
+		SURFACE_BIOME_WARP_LOW_CELL_BLOCKS,
+		SURFACE_BIOME_WARP_LOW_X_SALT,
+	)
+	low_z := regional_terrain_field_value_noise_2(
+		key,
+		block_x,
+		block_z,
+		SURFACE_BIOME_WARP_LOW_CELL_BLOCKS,
+		SURFACE_BIOME_WARP_LOW_Z_SALT,
+	)
+	high_x := regional_terrain_field_value_noise_2(
+		key,
+		block_x,
+		block_z,
+		SURFACE_BIOME_WARP_HIGH_CELL_BLOCKS,
+		SURFACE_BIOME_WARP_HIGH_X_SALT,
+	)
+	high_z := regional_terrain_field_value_noise_2(
+		key,
+		block_x,
+		block_z,
+		SURFACE_BIOME_WARP_HIGH_CELL_BLOCKS,
+		SURFACE_BIOME_WARP_HIGH_Z_SALT,
+	)
+	sample_x =
+		base_x +
+		low_x * SURFACE_BIOME_WARP_LOW_STRENGTH_BLOCKS +
+		high_x * SURFACE_BIOME_WARP_HIGH_STRENGTH_BLOCKS
+	sample_z =
+		base_z +
+		low_z * SURFACE_BIOME_WARP_LOW_STRENGTH_BLOCKS +
+		high_z * SURFACE_BIOME_WARP_HIGH_STRENGTH_BLOCKS
+	return
 }
 
 subterranean_biome_field_sample :: proc(
@@ -1770,6 +1831,10 @@ when ODIN_DEBUG {
 		log.assert(
 			subterranean_biome_identities_are_compatible(.Fungal_Vaults, .Buried_Aquifer_Caves),
 			"aquifer subterranean regions should act as compatible connectors",
+		)
+		log.assert(
+			subterranean_biome_identities_are_compatible(.Fungal_Vaults, .Crystal_Geode_Network),
+			"fungal-crystal subterranean transitions should be allowed",
 		)
 
 		{
