@@ -102,19 +102,20 @@ CaveNetworkNode :: struct {
 }
 
 CaveNetworkEdge :: struct {
-	id:                      FeatureID,
-	owner:                   FeatureGridCoord3,
-	kind:                    CaveNetworkEdgeKind,
-	from_node_id:            FeatureID,
-	to_node_id:              FeatureID,
-	from_biome_id:           BiomeID,
-	to_biome_id:             BiomeID,
-	from_x, from_y, from_z:  f32,
-	bend_x, bend_y, bend_z:  f32,
-	to_x, to_y, to_z:        f32,
-	radius_blocks:           f32,
-	influence_radius_blocks: f32,
-	guaranteed_connection:   bool,
+	id:                       FeatureID,
+	owner:                    FeatureGridCoord3,
+	kind:                     CaveNetworkEdgeKind,
+	from_node_id:             FeatureID,
+	to_node_id:               FeatureID,
+	from_biome_id:            BiomeID,
+	to_biome_id:              BiomeID,
+	from_x, from_y, from_z:   f32,
+	bend_x, bend_y, bend_z:   f32,
+	to_x, to_y, to_z:         f32,
+	radius_blocks:            f32,
+	influence_radius_blocks:  f32,
+	guaranteed_connection:    bool,
+	regional_seam_connection: bool,
 }
 
 CaveAnchor :: struct {
@@ -176,6 +177,22 @@ CAVE_NETWORK_SURFACE_ANCHOR_EMIT_ROLL_MAX :: f32(0.42)
 CAVE_NETWORK_SURFACE_CAVE_MOUTH_ROLL_MAX :: f32(0.68)
 CAVE_NETWORK_SURFACE_MOUTH_OFFSET_MIN_SCALE :: f32(0.36)
 CAVE_NETWORK_SURFACE_MOUTH_OFFSET_MAX_SCALE :: f32(0.78)
+CAVE_NETWORK_GRAPH_VERTICAL_WEIGHT_SCALE :: f32(1.85)
+CAVE_NETWORK_GRAPH_BIOME_MISMATCH_WEIGHT_BLOCKS :: f32(96)
+CAVE_NETWORK_GRAPH_REQUIRED_WEIGHT_BONUS_BLOCKS :: f32(80)
+CAVE_NETWORK_GRAPH_LOOP_ROLL_MAX :: f32(0.46)
+CAVE_NETWORK_GRAPH_LOOP_TARGET_NUMERATOR :: u32(7)
+CAVE_NETWORK_GRAPH_LOOP_TARGET_DENOMINATOR :: u32(20)
+CAVE_NETWORK_GRAPH_LOOP_MAX_WEIGHT_BLOCKS :: f32(980)
+CAVE_NETWORK_GRAPH_LOOP_WEIGHT_JITTER_SCALE :: f32(0.24)
+CAVE_NETWORK_GRAPH_LOCAL_EDGE_ROLL_MAX :: f32(0.30)
+CAVE_NETWORK_GRAPH_LOCAL_EDGE_MAX_WEIGHT_BLOCKS :: f32(620)
+CAVE_NETWORK_GRAPH_SEAM_EDGE_FACE_MARGIN_BLOCKS :: f32(256)
+CAVE_NETWORK_GRAPH_SEAM_EDGE_MAX_WEIGHT_BLOCKS :: f32(720)
+CAVE_NETWORK_GRAPH_SEAM_EDGE_REQUIRED_BONUS_BLOCKS :: f32(96)
+CAVE_NETWORK_GRAPH_SEAM_EDGE_WEIGHT_JITTER_SCALE :: f32(0.14)
+CAVE_NETWORK_GRAPH_SEAM_EDGE_MIN_RADIUS_BLOCKS :: f32(12)
+CAVE_NETWORK_GRAPH_SEAM_EDGE_INFLUENCE_RADIUS_SCALE :: f32(1.65)
 
 //////////////////////////////////////
 // Cave Network Feature Methods
@@ -284,7 +301,43 @@ cave_network_edge_from_owners :: proc(
 }
 
 cave_network_edge_from_nodes :: proc(from_node, to_node: CaveNetworkNode) -> CaveNetworkEdge {
-	kind := cave_network_edge_kind_select(from_node, to_node)
+	return cave_network_edge_from_nodes_with_kind(
+		from_node,
+		to_node,
+		cave_network_edge_kind_select(from_node, to_node),
+	)
+}
+
+cave_network_seam_edge_from_nodes :: proc(from_node, to_node: CaveNetworkNode) -> CaveNetworkEdge {
+	kind := cave_network_seam_edge_kind_select(from_node, to_node)
+	edge := cave_network_edge_from_nodes_with_kind(from_node, to_node, kind)
+	edge.radius_blocks = math.max(
+		edge.radius_blocks,
+		CAVE_NETWORK_GRAPH_SEAM_EDGE_MIN_RADIUS_BLOCKS,
+	)
+	edge.influence_radius_blocks = math.max(
+		edge.influence_radius_blocks,
+		edge.radius_blocks * CAVE_NETWORK_GRAPH_SEAM_EDGE_INFLUENCE_RADIUS_SCALE,
+	)
+	edge.guaranteed_connection = true
+	edge.regional_seam_connection = true
+	return edge
+}
+
+cave_network_seam_edge_kind_select :: proc(
+	from_node, to_node: CaveNetworkNode,
+) -> CaveNetworkEdgeKind {
+	base_kind := cave_network_edge_kind_select(from_node, to_node)
+	if base_kind == .Flooded_Passage || base_kind == .Vertical_Shaft {
+		return base_kind
+	}
+	return .Canyon
+}
+
+cave_network_edge_from_nodes_with_kind :: proc(
+	from_node, to_node: CaveNetworkNode,
+	kind: CaveNetworkEdgeKind,
+) -> CaveNetworkEdge {
 	radius := math.max(
 		f32(3),
 		(from_node.connection_radius_blocks + to_node.connection_radius_blocks) * 0.5,
@@ -1039,6 +1092,15 @@ when ODIN_DEBUG {
 		log.assert(
 			worm_seen && collapsed_seen,
 			"Cave Network ordinary edge selection should make worm and collapsed passages reachable",
+		)
+		seam_edge := cave_network_seam_edge_from_nodes(ordinary_from, ordinary_to)
+		log.assert(
+			seam_edge.regional_seam_connection && seam_edge.guaranteed_connection,
+			"Cave Network seam edges should carry explicit regional seam connectivity metadata",
+		)
+		log.assert(
+			seam_edge.radius_blocks >= CAVE_NETWORK_GRAPH_SEAM_EDGE_MIN_RADIUS_BLOCKS,
+			"Cave Network seam edges should keep a minimum cross-region corridor radius",
 		)
 		log.assert(
 			cave_anchor_surface_radius_adjust_blocks(.Cave_Mouth, 1.0) >

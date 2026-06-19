@@ -5557,6 +5557,9 @@ terrain_density_carve_cave_field_route_pocket_cluster :: proc(
 		for y := local_min_y; y <= local_max_y; y += 1 {
 			world_y := f32(chunk_origin.y + y) + 0.5
 			for x := local_min_x; x <= local_max_x; x += 1 {
+				if !terrain_density_local_block_can_carve(view, x, y, z) {
+					continue
+				}
 				world_x := f32(chunk_origin.x + x) + 0.5
 				dx := world_x - center_x
 				dy := world_y - center_y
@@ -5571,7 +5574,7 @@ terrain_density_carve_cave_field_route_pocket_cluster :: proc(
 					route_height,
 					biome_id,
 				)
-				if shape > 1.38 {
+				if shape > f32(1.240001) {
 					continue
 				}
 
@@ -5591,6 +5594,10 @@ terrain_density_carve_cave_field_route_pocket_cluster :: proc(
 					8,
 					noise_salt ~ TERRAIN_CAVE_PASSAGE_RIB_SALT,
 				)
+				threshold_without_cellular := 1.0 + rough * f32(0.11) + detail * f32(0.07)
+				if shape > threshold_without_cellular + f32(0.060001) {
+					continue
+				}
 				cell_gap := terrain_density_cave_room_worley_gap(
 					key,
 					world_x,
@@ -5602,9 +5609,7 @@ terrain_density_carve_cave_field_route_pocket_cluster :: proc(
 				cellular_pocket := math.smoothstep(f32(0.36), f32(0.78), cell_gap)
 				cellular_ridge := 1.0 - math.smoothstep(f32(0.08), f32(0.28), cell_gap)
 				threshold :=
-					1.0 +
-					rough * f32(0.11) +
-					detail * f32(0.07) +
+					threshold_without_cellular +
 					cellular_pocket * f32(0.06) -
 					cellular_ridge * f32(0.05)
 				if shape <= threshold {
@@ -6114,6 +6119,196 @@ terrain_density_cave_node_connectivity_note_route :: proc(
 	}
 }
 
+terrain_density_chunk_aabb_intersects :: proc(
+	chunk_origin: world_async.BlockCoord,
+	min_world_x, max_world_x, min_world_y, max_world_y, min_world_z, max_world_z: f32,
+) -> bool {
+	_, _, _, _, _, _, intersects := terrain_density_carve_bounds_from_extents(
+		chunk_origin,
+		min_world_x,
+		max_world_x,
+		min_world_y,
+		max_world_y,
+		min_world_z,
+		max_world_z,
+	)
+	return intersects
+}
+
+terrain_density_cave_node_base_radii :: proc(
+	node: biomes.CaveNetworkNode,
+) -> (
+	radius_x, radius_y, radius_z: f32,
+) {
+	radius_x = node.radius_blocks
+	radius_y = node.radius_blocks * 0.85
+	radius_z = node.radius_blocks
+
+	#partial switch node.kind {
+	case .Biome_Hub:
+		radius_x *= 1.35
+		radius_y *= 0.78
+		radius_z *= 1.20
+	case .Underground_Lake:
+		radius_x *= 1.45
+		radius_y *= 0.55
+		radius_z *= 1.35
+	case .River_Junction:
+		radius_x *= 1.15
+		radius_y *= 0.72
+		radius_z *= 1.15
+	case .Vertical_Shaft:
+		radius_x *= 0.55
+		radius_y *= 1.75
+		radius_z *= 0.55
+	case .Geode_Chamber:
+		radius_x *= 1.05
+		radius_y *= 1.05
+		radius_z *= 1.05
+	case .Magma_Pocket:
+		radius_x *= 1.15
+		radius_y *= 0.70
+		radius_z *= 1.15
+	}
+	return
+}
+
+terrain_density_cave_node_profile_radii :: proc(
+	node: biomes.CaveNetworkNode,
+) -> (
+	room_radius_x, room_radius_y, room_radius_z: f32,
+	uses_profile_room: bool,
+) {
+	uses_profile_room = terrain_density_cave_node_uses_profile_room(node)
+	if !uses_profile_room {
+		return
+	}
+
+	radius_x, radius_y, radius_z := terrain_density_cave_node_base_radii(node)
+	radius_scale := f32(1)
+	max_radius_xz := TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_XZ
+	max_radius_y := TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_Y
+	if !node.major_region {
+		radius_scale = TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_SCALE
+		max_radius_xz = TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_MAX_XZ
+		max_radius_y = TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_MAX_Y
+	}
+	room_radius_x = math.min(radius_x * radius_scale, max_radius_xz)
+	room_radius_y = math.min(radius_y * radius_scale, max_radius_y)
+	room_radius_z = math.min(radius_z * radius_scale, max_radius_xz)
+	return
+}
+
+terrain_density_cave_node_chunk_may_intersect :: proc(
+	node: biomes.CaveNetworkNode,
+	chunk_origin: world_async.BlockCoord,
+) -> bool {
+	room_radius_x, room_radius_y, room_radius_z, uses_profile_room :=
+		terrain_density_cave_node_profile_radii(node)
+	if uses_profile_room {
+		extent_x := room_radius_x * f32(1.30) + 6
+		extent_y := room_radius_y * f32(1.30) + 6
+		extent_z := room_radius_z * f32(1.30) + 6
+		if node.major_region {
+			room_radius_xz := math.max(room_radius_x, room_radius_z)
+			major_extent_xz := room_radius_xz * f32(4.0) + 48
+			extent_x = math.max(extent_x, major_extent_xz)
+			extent_y = math.max(extent_y, room_radius_y * f32(3.20) + 42)
+			extent_z = math.max(extent_z, major_extent_xz)
+		}
+		return terrain_density_chunk_aabb_intersects(
+			chunk_origin,
+			node.x - extent_x,
+			node.x + extent_x,
+			node.y - extent_y,
+			node.y + extent_y,
+			node.z - extent_z,
+			node.z + extent_z,
+		)
+	}
+
+	radius_x, radius_y, radius_z := terrain_density_cave_node_base_radii(node)
+	extent_x := radius_x * f32(1.22) + 6
+	extent_y := radius_y * f32(1.22) + 6
+	extent_z := radius_z * f32(1.22) + 6
+	return terrain_density_chunk_aabb_intersects(
+		chunk_origin,
+		node.x - extent_x,
+		node.x + extent_x,
+		node.y - extent_y,
+		node.y + extent_y,
+		node.z - extent_z,
+		node.z + extent_z,
+	)
+}
+
+terrain_density_cave_edge_feature_radius :: proc(edge: biomes.CaveNetworkEdge) -> f32 {
+	radius := edge.radius_blocks
+	radius_cap := TERRAIN_CAVE_EDGE_RADIUS_CAP_DEFAULT_BLOCKS
+	#partial switch edge.kind {
+	case .Canyon:
+		radius *= 1.18
+		radius_cap = TERRAIN_CAVE_EDGE_RADIUS_CAP_CANYON_BLOCKS
+	case .Fracture:
+		radius *= 0.72
+		radius_cap = TERRAIN_CAVE_EDGE_RADIUS_CAP_FRACTURE_BLOCKS
+	case .Flooded_Passage:
+		radius *= 1.10
+		radius_cap = TERRAIN_CAVE_EDGE_RADIUS_CAP_FLOODED_BLOCKS
+	case .Vertical_Shaft:
+		radius *= 0.92
+		radius_cap = TERRAIN_CAVE_EDGE_RADIUS_CAP_VERTICAL_BLOCKS
+	case .Collapsed_Corridor:
+		radius *= 0.82
+		radius_cap = TERRAIN_CAVE_EDGE_RADIUS_CAP_COLLAPSED_BLOCKS
+	case .Worm_Path:
+		radius *= 0.92
+		radius_cap = TERRAIN_CAVE_EDGE_RADIUS_CAP_WORM_BLOCKS
+	}
+	if edge.regional_seam_connection && edge.kind == .Canyon {
+		radius *= TERRAIN_CAVE_EDGE_SEAM_BASE_RADIUS_SCALE
+		radius_cap = math.max(radius_cap, TERRAIN_CAVE_EDGE_RADIUS_CAP_SEAM_BLOCKS)
+	}
+	return terrain_density_cave_passage_radius_soft_cap(radius, radius_cap)
+}
+
+terrain_density_cave_edge_chunk_may_intersect :: proc(
+	edge: biomes.CaveNetworkEdge,
+	chunk_origin: world_async.BlockCoord,
+) -> bool {
+	route_x, route_y, route_z := terrain_density_cave_edge_route_point(edge, 0)
+	min_x, max_x := route_x, route_x
+	min_y, max_y := route_y, route_y
+	min_z, max_z := route_z, route_z
+	for segment_index := u32(1);
+	    segment_index <= TERRAIN_CAVE_EDGE_ROUTE_SEGMENT_COUNT;
+	    segment_index += 1 {
+		t := f32(segment_index) / f32(TERRAIN_CAVE_EDGE_ROUTE_SEGMENT_COUNT)
+		route_x, route_y, route_z = terrain_density_cave_edge_route_point(edge, t)
+		min_x = math.min(min_x, route_x)
+		max_x = math.max(max_x, route_x)
+		min_y = math.min(min_y, route_y)
+		max_y = math.max(max_y, route_y)
+		min_z = math.min(min_z, route_z)
+		max_z = math.max(max_z, route_z)
+	}
+
+	feature_radius := terrain_density_cave_edge_feature_radius(edge)
+	margin := math.max(feature_radius * f32(8.0) + 72, edge.radius_blocks * f32(1.35) + 96)
+	if edge.regional_seam_connection && edge.kind == .Canyon {
+		margin = math.max(margin, f32(220))
+	}
+	return terrain_density_chunk_aabb_intersects(
+		chunk_origin,
+		min_x - margin,
+		max_x + margin,
+		min_y - margin,
+		max_y + margin,
+		min_z - margin,
+		max_z + margin,
+	)
+}
+
 terrain_density_cave_network_apply :: proc(
 	view: ^world_async.ChunkVoxelView,
 	region: ^biomes.GenerationRegion,
@@ -6140,12 +6335,18 @@ terrain_density_cave_network_apply :: proc(
 		if !connectivity.should_carve {
 			continue
 		}
+		if !terrain_density_cave_node_chunk_may_intersect(node, chunk_origin) {
+			continue
+		}
 		terrain_density_carve_cave_node(view, region.key, chunk_origin, columns, node)
 		terrain_density_carve_cave_node_edge_portals(view, region, chunk_origin, columns, node)
 	}
 
 	for i := u32(0); i < region.cave_network_edge_count; i += 1 {
 		edge := region.cave_network_edges[i]
+		if !terrain_density_cave_edge_chunk_may_intersect(edge, chunk_origin) {
+			continue
+		}
 		terrain_density_carve_cave_edge(view, region, chunk_origin, columns, edge)
 	}
 
@@ -6289,49 +6490,12 @@ terrain_density_carve_cave_node :: proc(
 	columns: []TerrainBiomeColumn,
 	node: biomes.CaveNetworkNode,
 ) {
-	radius_x := node.radius_blocks
-	radius_y := node.radius_blocks * 0.85
-	radius_z := node.radius_blocks
-
-	#partial switch node.kind {
-	case .Biome_Hub:
-		radius_x *= 1.35
-		radius_y *= 0.78
-		radius_z *= 1.20
-	case .Underground_Lake:
-		radius_x *= 1.45
-		radius_y *= 0.55
-		radius_z *= 1.35
-	case .River_Junction:
-		radius_x *= 1.15
-		radius_y *= 0.72
-		radius_z *= 1.15
-	case .Vertical_Shaft:
-		radius_x *= 0.55
-		radius_y *= 1.75
-		radius_z *= 0.55
-	case .Geode_Chamber:
-		radius_x *= 1.05
-		radius_y *= 1.05
-		radius_z *= 1.05
-	case .Magma_Pocket:
-		radius_x *= 1.15
-		radius_y *= 0.70
-		radius_z *= 1.15
-	}
+	radius_x, radius_y, radius_z := terrain_density_cave_node_base_radii(node)
 
 	if terrain_density_cave_node_uses_profile_room(node) {
-		radius_scale := f32(1)
-		max_radius_xz := TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_XZ
-		max_radius_y := TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_Y
-		if !node.major_region {
-			radius_scale = TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_SCALE
-			max_radius_xz = TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_MAX_XZ
-			max_radius_y = TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_MAX_Y
-		}
-		room_radius_x := math.min(radius_x * radius_scale, max_radius_xz)
-		room_radius_y := math.min(radius_y * radius_scale, max_radius_y)
-		room_radius_z := math.min(radius_z * radius_scale, max_radius_xz)
+		room_radius_x, room_radius_y, room_radius_z, _ := terrain_density_cave_node_profile_radii(
+			node,
+		)
 		terrain_density_carve_cave_room(
 			view,
 			key,
@@ -6423,34 +6587,7 @@ terrain_density_carve_cave_node_edge_portals :: proc(
 		return
 	}
 
-	radius_x := node.radius_blocks
-	radius_y := node.radius_blocks * 0.85
-	radius_z := node.radius_blocks
-	#partial switch node.kind {
-	case .Biome_Hub:
-		radius_x *= 1.35
-		radius_y *= 0.78
-		radius_z *= 1.20
-	case .Underground_Lake:
-		radius_x *= 1.45
-		radius_y *= 0.55
-		radius_z *= 1.35
-	case .River_Junction:
-		radius_x *= 1.15
-		radius_y *= 0.72
-		radius_z *= 1.15
-	case .Geode_Chamber:
-		radius_x *= 1.05
-		radius_y *= 1.05
-		radius_z *= 1.05
-	case .Magma_Pocket:
-		radius_x *= 1.15
-		radius_y *= 0.70
-		radius_z *= 1.15
-	}
-	room_radius_x := math.min(radius_x, TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_XZ)
-	room_radius_y := math.min(radius_y, TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_Y)
-	room_radius_z := math.min(radius_z, TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_XZ)
+	room_radius_x, room_radius_y, room_radius_z, _ := terrain_density_cave_node_profile_radii(node)
 	room_radius_xz := math.min(room_radius_x, room_radius_z)
 
 	portal_count := u32(0)
@@ -6756,6 +6893,9 @@ terrain_density_carve_cave_node_major_room_perimeter_field :: proc(
 		for y := local_min_y; y <= local_max_y; y += 1 {
 			world_y := f32(chunk_origin.y + y) + 0.5
 			for x := local_min_x; x <= local_max_x; x += 1 {
+				if !terrain_density_local_block_can_carve(view, x, y, z) {
+					continue
+				}
 				world_x := f32(chunk_origin.x + x) + 0.5
 				nx := (world_x - node.x) / radius_x
 				ny := (world_y - node.y) / radius_y
@@ -6768,7 +6908,7 @@ terrain_density_carve_cave_node_major_room_perimeter_field :: proc(
 					across,
 					node.biome_id,
 				)
-				if shape > 1.32 {
+				if shape > f32(1.220001) {
 					continue
 				}
 
@@ -6788,6 +6928,10 @@ terrain_density_carve_cave_node_major_room_perimeter_field :: proc(
 					9,
 					TERRAIN_CAVE_ROOM_DETAIL_SALT ~ u64(node.id),
 				)
+				threshold_without_cellular := 1.0 + rough * f32(0.08) + detail * f32(0.06)
+				if shape > threshold_without_cellular + f32(0.080001) {
+					continue
+				}
 				cell_size := math.max(
 					TERRAIN_CAVE_ROOM_CELLULAR_CELL_MIN_BLOCKS,
 					min_radius * TERRAIN_CAVE_NODE_MAJOR_ROOM_FIELD_CELL_SCALE,
@@ -6803,9 +6947,7 @@ terrain_density_carve_cave_node_major_room_perimeter_field :: proc(
 				cellular_pocket := math.smoothstep(f32(0.36), f32(0.82), cell_gap)
 				cellular_ridge := 1.0 - math.smoothstep(f32(0.08), f32(0.28), cell_gap)
 				threshold :=
-					1.0 +
-					rough * f32(0.08) +
-					detail * f32(0.06) +
+					threshold_without_cellular +
 					cellular_pocket * f32(0.08) -
 					cellular_ridge * f32(0.04)
 				if shape <= threshold {
@@ -7358,6 +7500,9 @@ terrain_density_carve_cave_node_macro_satellite_apron_field :: proc(
 		for y := local_min_y; y <= local_max_y; y += 1 {
 			world_y := f32(chunk_origin.y + y) + 0.5
 			for x := local_min_x; x <= local_max_x; x += 1 {
+				if !terrain_density_local_block_can_carve(view, x, y, z) {
+					continue
+				}
 				world_x := f32(chunk_origin.x + x) + 0.5
 				dx := world_x - node.x
 				dy := world_y - node.y
@@ -7446,6 +7591,9 @@ terrain_density_carve_cave_node_macro_satellite_apron_field :: proc(
 					secondary_shape,
 					TERRAIN_CAVE_NODE_MACRO_SATELLITE_APRON_BLEND_RADIUS,
 				)
+				if shape > f32(1.240001) {
+					continue
+				}
 
 				rough := biomes.regional_terrain_field_value_noise_3(
 					key,
@@ -7463,6 +7611,10 @@ terrain_density_carve_cave_node_macro_satellite_apron_field :: proc(
 					9,
 					noise_salt ~ TERRAIN_CAVE_PASSAGE_RIB_SALT,
 				)
+				threshold_without_cellular := 1.0 + rough * f32(0.09) + detail * f32(0.07)
+				if shape > threshold_without_cellular + f32(0.080001) {
+					continue
+				}
 				cell_size := math.max(
 					f32(3.5),
 					apron_radius * TERRAIN_CAVE_NODE_MACRO_SATELLITE_APRON_CELL_SCALE,
@@ -7478,9 +7630,7 @@ terrain_density_carve_cave_node_macro_satellite_apron_field :: proc(
 				cellular_pocket := math.smoothstep(f32(0.36), f32(0.82), cell_gap)
 				cellular_ridge := 1.0 - math.smoothstep(f32(0.08), f32(0.28), cell_gap)
 				threshold :=
-					1.0 +
-					rough * f32(0.09) +
-					detail * f32(0.07) +
+					threshold_without_cellular +
 					cellular_pocket * f32(0.08) -
 					cellular_ridge * f32(0.05)
 				if shape <= threshold {
@@ -7581,6 +7731,9 @@ terrain_density_carve_cave_node_macro_cluster_field :: proc(
 		for y := local_min_y; y <= local_max_y; y += 1 {
 			world_y := f32(chunk_origin.y + y) + 0.5
 			for x := local_min_x; x <= local_max_x; x += 1 {
+				if !terrain_density_local_block_can_carve(view, x, y, z) {
+					continue
+				}
 				world_x := f32(chunk_origin.x + x) + 0.5
 				dx := world_x - center_x
 				dy := world_y - center_y
@@ -7733,6 +7886,9 @@ terrain_density_carve_cave_node_macro_cluster_field :: proc(
 					branch_b_neck_shape,
 					TERRAIN_CAVE_NODE_MACRO_SATELLITE_CLUSTER_FIELD_BLEND_RADIUS,
 				)
+				if shape > f32(1.260001) {
+					continue
+				}
 
 				rough := biomes.regional_terrain_field_value_noise_3(
 					key,
@@ -7750,6 +7906,10 @@ terrain_density_carve_cave_node_macro_cluster_field :: proc(
 					9,
 					noise_salt ~ TERRAIN_CAVE_PASSAGE_RIB_SALT,
 				)
+				threshold_without_cellular := 1.0 + rough * f32(0.10) + detail * f32(0.08)
+				if shape > threshold_without_cellular + f32(0.080001) {
+					continue
+				}
 				cell_size := math.max(
 					f32(3.5),
 					base_radius * TERRAIN_CAVE_NODE_MACRO_SATELLITE_CLUSTER_FIELD_CELL_SCALE,
@@ -7765,9 +7925,7 @@ terrain_density_carve_cave_node_macro_cluster_field :: proc(
 				cellular_pocket := math.smoothstep(f32(0.36), f32(0.82), cell_gap)
 				cellular_ridge := 1.0 - math.smoothstep(f32(0.08), f32(0.28), cell_gap)
 				threshold :=
-					1.0 +
-					rough * f32(0.10) +
-					detail * f32(0.08) +
+					threshold_without_cellular +
 					cellular_pocket * f32(0.08) -
 					cellular_ridge * f32(0.06)
 				if shape <= threshold {
@@ -8556,6 +8714,9 @@ terrain_density_carve_cave_room_lobed_ellipsoid :: proc(
 		for y := local_min_y; y <= local_max_y; y += 1 {
 			world_y := f32(chunk_origin.y + y) + 0.5
 			for x := local_min_x; x <= local_max_x; x += 1 {
+				if !terrain_density_local_block_can_carve(view, x, y, z) {
+					continue
+				}
 				world_x := f32(chunk_origin.x + x) + 0.5
 				nx := (world_x - center_x) / rx
 				ny := (world_y - center_y) / ry
@@ -8583,26 +8744,6 @@ terrain_density_carve_cave_room_lobed_ellipsoid :: proc(
 					math.smoothstep(f32(0.18), f32(1.08), radial) *
 					(1.0 - math.smoothstep(f32(0.76), f32(1.12), math.abs(ny)))
 				core_shelf := 1.0 - math.smoothstep(f32(0.62), f32(1.02), radial)
-				cellular_ridge := f32(0)
-				cellular_pocket := f32(0)
-				if wall_support > 0.001 {
-					cell_size := math.max(
-						TERRAIN_CAVE_ROOM_CELLULAR_CELL_MIN_BLOCKS,
-						math.min(rx, rz) * TERRAIN_CAVE_ROOM_CELLULAR_CELL_SCALE,
-					)
-					cellular_gap := terrain_density_cave_room_worley_gap(
-						key,
-						world_x,
-						world_y,
-						world_z,
-						cell_size,
-						noise_salt,
-					)
-					cellular_ridge =
-						(1.0 - math.smoothstep(f32(0.08), f32(0.30), cellular_gap)) * wall_support
-					cellular_pocket =
-						math.smoothstep(f32(0.38), f32(0.78), cellular_gap) * wall_support
-				}
 				warped_along :=
 					along +
 					detail *
@@ -8635,22 +8776,58 @@ terrain_density_carve_cave_room_lobed_ellipsoid :: proc(
 					(TERRAIN_CAVE_ROUGH_ELLIPSOID_EDGE_SCALE -
 							TERRAIN_CAVE_ROUGH_ELLIPSOID_CORE_SCALE) *
 						core_support
-				threshold :=
+				lobe_adjust := terrain_density_cave_room_lobe_threshold_adjust(
+					nx,
+					ny,
+					nz,
+					axis_x,
+					axis_z,
+				)
+				strata_adjust := terrain_density_cave_room_strata_threshold_adjust(
+					warped_y,
+					radial,
+					warped_along,
+					warped_across,
+					rough,
+					detail,
+					biome_id,
+				)
+				threshold_without_cellular :=
 					1.0 +
 					(rough * 0.68 + detail * 0.32) * rough_scale +
 					detail * TERRAIN_CAVE_ROOM_SCALLOP_SCALE * wall_support +
-					cellular_pocket * TERRAIN_CAVE_ROOM_CELLULAR_POCKET_SCALE -
-					cellular_ridge * TERRAIN_CAVE_ROOM_CELLULAR_RIDGE_SCALE +
-					terrain_density_cave_room_lobe_threshold_adjust(nx, ny, nz, axis_x, axis_z) +
-					terrain_density_cave_room_strata_threshold_adjust(
-						warped_y,
-						radial,
-						warped_along,
-						warped_across,
-						rough,
-						detail,
-						biome_id,
+					lobe_adjust +
+					strata_adjust
+				if shape >
+				   threshold_without_cellular +
+					   TERRAIN_CAVE_ROOM_CELLULAR_POCKET_SCALE * wall_support +
+					   f32(0.000001) {
+					continue
+				}
+				cellular_ridge := f32(0)
+				cellular_pocket := f32(0)
+				if wall_support > 0.001 {
+					cell_size := math.max(
+						TERRAIN_CAVE_ROOM_CELLULAR_CELL_MIN_BLOCKS,
+						math.min(rx, rz) * TERRAIN_CAVE_ROOM_CELLULAR_CELL_SCALE,
 					)
+					cellular_gap := terrain_density_cave_room_worley_gap(
+						key,
+						world_x,
+						world_y,
+						world_z,
+						cell_size,
+						noise_salt,
+					)
+					cellular_ridge =
+						(1.0 - math.smoothstep(f32(0.08), f32(0.30), cellular_gap)) * wall_support
+					cellular_pocket =
+						math.smoothstep(f32(0.38), f32(0.78), cellular_gap) * wall_support
+				}
+				threshold :=
+					threshold_without_cellular +
+					cellular_pocket * TERRAIN_CAVE_ROOM_CELLULAR_POCKET_SCALE -
+					cellular_ridge * TERRAIN_CAVE_ROOM_CELLULAR_RIDGE_SCALE
 				if shape <= threshold {
 					if internal_structure_active &&
 					   terrain_density_cave_room_internal_structure_preserves(
@@ -8960,33 +9137,7 @@ terrain_density_carve_cave_edge :: proc(
 	columns: []TerrainBiomeColumn,
 	edge: biomes.CaveNetworkEdge,
 ) {
-	radius := edge.radius_blocks
-	radius_cap := TERRAIN_CAVE_EDGE_RADIUS_CAP_DEFAULT_BLOCKS
-	#partial switch edge.kind {
-	case .Canyon:
-		radius *= 1.18
-		radius_cap = TERRAIN_CAVE_EDGE_RADIUS_CAP_CANYON_BLOCKS
-	case .Fracture:
-		radius *= 0.72
-		radius_cap = TERRAIN_CAVE_EDGE_RADIUS_CAP_FRACTURE_BLOCKS
-	case .Flooded_Passage:
-		radius *= 1.10
-		radius_cap = TERRAIN_CAVE_EDGE_RADIUS_CAP_FLOODED_BLOCKS
-	case .Vertical_Shaft:
-		radius *= 0.92
-		radius_cap = TERRAIN_CAVE_EDGE_RADIUS_CAP_VERTICAL_BLOCKS
-	case .Collapsed_Corridor:
-		radius *= 0.82
-		radius_cap = TERRAIN_CAVE_EDGE_RADIUS_CAP_COLLAPSED_BLOCKS
-	case .Worm_Path:
-		radius *= 0.92
-		radius_cap = TERRAIN_CAVE_EDGE_RADIUS_CAP_WORM_BLOCKS
-	}
-	if edge.regional_seam_connection && edge.kind == .Canyon {
-		radius *= TERRAIN_CAVE_EDGE_SEAM_BASE_RADIUS_SCALE
-		radius_cap = math.max(radius_cap, TERRAIN_CAVE_EDGE_RADIUS_CAP_SEAM_BLOCKS)
-	}
-	radius = terrain_density_cave_passage_radius_soft_cap(radius, radius_cap)
+	radius := terrain_density_cave_edge_feature_radius(edge)
 	feature_radius := radius
 	core_radius := math.max(
 		f32(2.25),
@@ -13135,6 +13286,9 @@ terrain_density_carve_cave_mouth :: proc(
 		for y := local_min_y; y <= local_max_y; y += 1 {
 			world_y := f32(chunk_origin.y + y) + 0.5
 			for x := local_min_x; x <= local_max_x; x += 1 {
+				if !terrain_density_local_block_can_carve(view, x, y, z) {
+					continue
+				}
 				world_x := f32(chunk_origin.x + x) + 0.5
 				column := columns[x + z * CHUNK_BLOCK_LENGTH]
 				below_surface := column.surface_height_blocks - world_y
@@ -13460,6 +13614,9 @@ terrain_density_carve_sinkhole_throat :: proc(
 			major_radius := radius * terrain_density_sinkhole_major_radius_scale(t)
 			minor_radius := radius * terrain_density_sinkhole_minor_radius_scale(t)
 			for x := local_min_x; x <= local_max_x; x += 1 {
+				if !terrain_density_local_block_can_carve(view, x, y, z) {
+					continue
+				}
 				world_x := f32(chunk_origin.x + x) + 0.5
 				dx := world_x - center_x
 				dz := world_z - center_z
@@ -13566,6 +13723,9 @@ terrain_density_carve_rough_ellipsoid :: proc(
 		for y := local_min_y; y <= local_max_y; y += 1 {
 			world_y := f32(chunk_origin.y + y) + 0.5
 			for x := local_min_x; x <= local_max_x; x += 1 {
+				if !terrain_density_local_block_can_carve(view, x, y, z) {
+					continue
+				}
 				world_x := f32(chunk_origin.x + x) + 0.5
 				nx := (world_x - center_x) / rx
 				ny := (world_y - center_y) / ry
@@ -13830,6 +13990,9 @@ terrain_density_carve_rough_segment_shaped :: proc(
 		for y := local_min_y; y <= local_max_y; y += 1 {
 			world_y := f32(chunk_origin.y + y) + 0.5
 			for x := local_min_x; x <= local_max_x; x += 1 {
+				if !terrain_density_local_block_can_carve(view, x, y, z) {
+					continue
+				}
 				world_x := f32(chunk_origin.x + x) + 0.5
 				rel_from_x := world_x - from_x
 				rel_from_y := world_y - from_y
@@ -13938,6 +14101,20 @@ terrain_density_carve_rough_segment_shaped :: proc(
 					t * (3.10 + wall_phase_b * 1.70) + up_unit * 0.53 + wall_phase,
 				)
 				lip_relief := shape.wall_lip_relief_scale * (lip_wave - 0.46) * lip_band
+				core_support := math.clamp((f32(1.0) - shape_value) * 1.389, f32(0), f32(1))
+				rough_scale :=
+					shape.radius_noise_scale *
+					biomes.regional_terrain_field_lerp(f32(0.58), f32(0.22), core_support)
+				threshold_without_noise :=
+					1.0 +
+					shape.wall_notch_scale * notch_support +
+					shape.wall_scallop_scale * (scallop_mix - 0.48) * wall_support -
+					shape.wall_rib_scale * rib_support +
+					lip_relief
+				if shape_value >
+				   threshold_without_noise + rough_scale * f32(1.34) + f32(0.000001) {
+					continue
+				}
 				rough := biomes.regional_terrain_field_value_noise_3(
 					key,
 					chunk_origin.x + x,
@@ -13946,12 +14123,8 @@ terrain_density_carve_rough_segment_shaped :: proc(
 					18,
 					noise_salt,
 				)
-				core_support := math.clamp((f32(1.0) - shape_value) * 1.389, f32(0), f32(1))
-				rough_scale :=
-					shape.radius_noise_scale *
-					biomes.regional_terrain_field_lerp(f32(0.58), f32(0.22), core_support)
 				threshold :=
-					1.0 +
+					threshold_without_noise +
 					rough *
 						rough_scale *
 						terrain_density_cave_passage_radius_profile_scale(
@@ -13959,11 +14132,6 @@ terrain_density_carve_rough_segment_shaped :: proc(
 							rough,
 							center_bulge,
 						)
-				threshold +=
-					shape.wall_notch_scale * notch_support +
-					shape.wall_scallop_scale * (scallop_mix - 0.48) * wall_support -
-					shape.wall_rib_scale * rib_support +
-					lip_relief
 				if shape_value <= threshold {
 					terrain_density_carve_local_block_with_material(
 						view,
@@ -14002,6 +14170,17 @@ terrain_density_carve_local_block_with_material :: proc(
 		biome_id,
 		directional_material_profile,
 	)
+}
+
+terrain_density_local_block_can_carve :: proc(
+	view: ^world_async.ChunkVoxelView,
+	local_x, local_y, local_z: i32,
+) -> bool {
+	index := chunk_block_index(u32(local_x), u32(local_y), u32(local_z))
+	if view.blocks.occupancy[index] != .Solid {
+		return false
+	}
+	return terrain_material_palette_index(view.blocks.material_id[index]) != TERRAIN_WATER_MAT_ID
 }
 
 terrain_density_carve_local_block_with_material_result :: proc(

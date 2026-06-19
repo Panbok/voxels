@@ -22,6 +22,10 @@ when ODIN_DEBUG {
 		TERRAIN_GENERATION_BENCHMARK_RESET_CACHE,
 		false,
 	)
+	TERRAIN_GENERATION_BENCHMARK_CAVE_ONLY :: #config(
+		TERRAIN_GENERATION_BENCHMARK_CAVE_ONLY,
+		false,
+	)
 	TERRAIN_GENERATION_BENCHMARK_CAPTURE_CAVE_SLICES :: #config(
 		TERRAIN_GENERATION_BENCHMARK_CAPTURE_CAVE_SLICES,
 		false,
@@ -7913,49 +7917,51 @@ when ODIN_DEBUG {
 					transient_arena,
 				)
 			}
-			terrain_generation_benchmark_surface_water_stats_log(
-				"surface_water_pre",
-				surface_water_coords,
-				seed,
-			)
-			terrain_generation_benchmark_surface_cave_scan_stats_log("surface_cave_scan", key)
-			terrain_generation_benchmark_surface_cave_scan_stats_log_multi(
-				"surface_cave_scan_multi",
-			)
-			terrain_generation_benchmark_surface_cave_stats_log(
-				"surface_cave_pre",
-				&view,
-				surface_cave_coords,
-				surface_cave_anchors,
-				seed,
-			)
-			terrain_generation_benchmark_surface_cave_mouth_size_stats_log(
-				"surface_cave_pre",
-				"small",
-				&view,
-				surface_cave_anchors.mouth_small,
-				surface_cave_anchors.mouth_small_node,
-				surface_cave_anchors.mouth_small_found,
-				seed,
-			)
-			terrain_generation_benchmark_surface_cave_mouth_size_stats_log(
-				"surface_cave_pre",
-				"medium",
-				&view,
-				surface_cave_anchors.mouth_medium,
-				surface_cave_anchors.mouth_medium_node,
-				surface_cave_anchors.mouth_medium_found,
-				seed,
-			)
-			terrain_generation_benchmark_surface_cave_mouth_size_stats_log(
-				"surface_cave_pre",
-				"large",
-				&view,
-				surface_cave_anchors.mouth_large,
-				surface_cave_anchors.mouth_large_node,
-				surface_cave_anchors.mouth_large_found,
-				seed,
-			)
+			if !TERRAIN_GENERATION_BENCHMARK_CAVE_ONLY {
+				terrain_generation_benchmark_surface_water_stats_log(
+					"surface_water_pre",
+					surface_water_coords,
+					seed,
+				)
+				terrain_generation_benchmark_surface_cave_scan_stats_log("surface_cave_scan", key)
+				terrain_generation_benchmark_surface_cave_scan_stats_log_multi(
+					"surface_cave_scan_multi",
+				)
+				terrain_generation_benchmark_surface_cave_stats_log(
+					"surface_cave_pre",
+					&view,
+					surface_cave_coords,
+					surface_cave_anchors,
+					seed,
+				)
+				terrain_generation_benchmark_surface_cave_mouth_size_stats_log(
+					"surface_cave_pre",
+					"small",
+					&view,
+					surface_cave_anchors.mouth_small,
+					surface_cave_anchors.mouth_small_node,
+					surface_cave_anchors.mouth_small_found,
+					seed,
+				)
+				terrain_generation_benchmark_surface_cave_mouth_size_stats_log(
+					"surface_cave_pre",
+					"medium",
+					&view,
+					surface_cave_anchors.mouth_medium,
+					surface_cave_anchors.mouth_medium_node,
+					surface_cave_anchors.mouth_medium_found,
+					seed,
+				)
+				terrain_generation_benchmark_surface_cave_mouth_size_stats_log(
+					"surface_cave_pre",
+					"large",
+					&view,
+					surface_cave_anchors.mouth_large,
+					surface_cave_anchors.mouth_large_node,
+					surface_cave_anchors.mouth_large_found,
+					seed,
+				)
+			}
 			terrain_generation_benchmark_run_phase(
 				"cave_hot_region_cache",
 				cave_coords,
@@ -7964,22 +7970,24 @@ when ODIN_DEBUG {
 				false,
 				&view,
 			)
-			terrain_generation_benchmark_run_phase(
-				"surface_water_hot_region_cache",
-				surface_water_coords,
-				seed,
-				iterations,
-				false,
-				&view,
-			)
-			terrain_generation_benchmark_run_phase(
-				"surface_cave_hot_region_cache",
-				surface_cave_coords,
-				seed,
-				iterations,
-				false,
-				&view,
-			)
+			if !TERRAIN_GENERATION_BENCHMARK_CAVE_ONLY {
+				terrain_generation_benchmark_run_phase(
+					"surface_water_hot_region_cache",
+					surface_water_coords,
+					seed,
+					iterations,
+					false,
+					&view,
+				)
+				terrain_generation_benchmark_run_phase(
+					"surface_cave_hot_region_cache",
+					surface_cave_coords,
+					seed,
+					iterations,
+					false,
+					&view,
+				)
+			}
 			when TERRAIN_GENERATION_BENCHMARK_RESET_CACHE {
 				terrain_generation_benchmark_run_phase(
 					"cave_reset_region_cache",
@@ -7989,22 +7997,24 @@ when ODIN_DEBUG {
 					true,
 					&view,
 				)
-				terrain_generation_benchmark_run_phase(
-					"surface_water_reset_region_cache",
-					surface_water_coords,
-					seed,
-					iterations,
-					true,
-					&view,
-				)
-				terrain_generation_benchmark_run_phase(
-					"surface_cave_reset_region_cache",
-					surface_cave_coords,
-					seed,
-					iterations,
-					true,
-					&view,
-				)
+				if !TERRAIN_GENERATION_BENCHMARK_CAVE_ONLY {
+					terrain_generation_benchmark_run_phase(
+						"surface_water_reset_region_cache",
+						surface_water_coords,
+						seed,
+						iterations,
+						true,
+						&view,
+					)
+					terrain_generation_benchmark_run_phase(
+						"surface_cave_reset_region_cache",
+						surface_cave_coords,
+						seed,
+						iterations,
+						true,
+						&view,
+					)
+				}
 			}
 			log.info("TERRAIN_GENERATION_BENCH_END")
 		}
