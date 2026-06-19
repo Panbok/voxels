@@ -538,25 +538,7 @@ generation_region_cave_networks_fill :: proc(region: ^GenerationRegion) {
 		}
 	}
 
-	for i := u32(0); i < region.cave_network_node_count; i += 1 {
-		node := region.cave_network_nodes[i]
-		owner := node.owner
-		generation_region_cave_network_edge_maybe_append(
-			region,
-			node,
-			{x = owner.x + 1, y = owner.y, z = owner.z},
-		)
-		generation_region_cave_network_edge_maybe_append(
-			region,
-			node,
-			{x = owner.x, y = owner.y + 1, z = owner.z},
-		)
-		generation_region_cave_network_edge_maybe_append(
-			region,
-			node,
-			{x = owner.x, y = owner.y, z = owner.z + 1},
-		)
-	}
+	generation_region_cave_network_connected_edges_fill(region)
 
 	for i := u32(0); i < region.water_feature_anchor_count; i += 1 {
 		generation_region_cave_anchor_append(
@@ -578,37 +560,469 @@ generation_region_cave_network_node_append :: proc(
 	region.cave_network_node_count += 1
 }
 
-generation_region_cave_network_edge_maybe_append :: proc(
-	region: ^GenerationRegion,
-	node: CaveNetworkNode,
-	neighbor_owner: FeatureGridCoord3,
-) {
-	neighbor_node, found := generation_region_cave_network_node_find(region, neighbor_owner)
-	if !found {
-		neighbor_node = cave_network_node_from_owner(region.key, neighbor_owner)
+generation_region_cave_network_connected_edges_fill :: proc(region: ^GenerationRegion) {
+	if region.cave_network_node_count <= 1 {
+		return
 	}
-	edge := cave_network_edge_from_nodes(node, neighbor_node)
-	if !cave_network_edge_should_exist(edge, node, neighbor_node) {
+
+	eligible: [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]bool
+	connected: [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]bool
+	eligible_count: u32
+	start_index: u32
+	start_found := false
+	for i := u32(0); i < region.cave_network_node_count; i += 1 {
+		node := region.cave_network_nodes[i]
+		if node.role == .Sealed_Secret {
+			continue
+		}
+		eligible[i] = true
+		eligible_count += 1
+		if !start_found {
+			start_index = i
+			start_found = true
+		}
+	}
+	if eligible_count <= 1 || !start_found {
+		return
+	}
+
+	connected[start_index] = true
+	connected_count := u32(1)
+	for connected_count < eligible_count {
+		from_index, to_index, found := generation_region_cave_network_mst_edge_select(
+			region,
+			eligible,
+			connected,
+		)
+		if !found {
+			break
+		}
+		edge := cave_network_edge_from_nodes(
+			region.cave_network_nodes[from_index],
+			region.cave_network_nodes[to_index],
+		)
+		generation_region_cave_network_edge_append(region, edge)
+		connected[to_index] = true
+		connected_count += 1
+	}
+
+	generation_region_cave_network_loop_edges_fill(region, eligible, eligible_count)
+	generation_region_cave_network_local_edges_fill(region, eligible)
+	generation_region_cave_network_seam_edges_fill(region, eligible)
+}
+
+generation_region_cave_network_mst_edge_select :: proc(
+	region: ^GenerationRegion,
+	eligible: [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]bool,
+	connected: [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]bool,
+) -> (
+	from_index, to_index: u32,
+	found: bool,
+) {
+	best_weight := max(f32)
+	for i := u32(0); i < region.cave_network_node_count; i += 1 {
+		if !eligible[i] || !connected[i] {
+			continue
+		}
+		from_node := region.cave_network_nodes[i]
+		for j := u32(0); j < region.cave_network_node_count; j += 1 {
+			if !eligible[j] || connected[j] {
+				continue
+			}
+			to_node := region.cave_network_nodes[j]
+			weight := generation_region_cave_network_edge_weight(from_node, to_node)
+			if weight < best_weight {
+				best_weight = weight
+				from_index = i
+				to_index = j
+				found = true
+			}
+		}
+	}
+	return
+}
+
+generation_region_cave_network_loop_edges_fill :: proc(
+	region: ^GenerationRegion,
+	eligible: [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]bool,
+	eligible_count: u32,
+) {
+	if eligible_count <= 2 {
+		return
+	}
+	target_loop_count :=
+		(eligible_count * CAVE_NETWORK_GRAPH_LOOP_TARGET_NUMERATOR) /
+		CAVE_NETWORK_GRAPH_LOOP_TARGET_DENOMINATOR
+	if target_loop_count == 0 {
+		target_loop_count = 1
+	}
+
+	loop_count: u32
+	for loop_count < target_loop_count &&
+	    region.cave_network_edge_count < GENERATION_REGION_CAVE_NETWORK_EDGE_CAPACITY {
+		from_index, to_index, found := generation_region_cave_network_loop_edge_select(
+			region,
+			eligible,
+		)
+		if !found {
+			break
+		}
+		edge := cave_network_edge_from_nodes(
+			region.cave_network_nodes[from_index],
+			region.cave_network_nodes[to_index],
+		)
+		generation_region_cave_network_edge_append(region, edge)
+		loop_count += 1
+	}
+}
+
+generation_region_cave_network_loop_edge_select :: proc(
+	region: ^GenerationRegion,
+	eligible: [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]bool,
+) -> (
+	from_index, to_index: u32,
+	found: bool,
+) {
+	best_weight := max(f32)
+	for i := u32(0); i < region.cave_network_node_count; i += 1 {
+		if !eligible[i] {
+			continue
+		}
+		from_node := region.cave_network_nodes[i]
+		for j := i + 1; j < region.cave_network_node_count; j += 1 {
+			if !eligible[j] {
+				continue
+			}
+			to_node := region.cave_network_nodes[j]
+			if generation_region_cave_network_edge_exists(region, from_node.id, to_node.id) {
+				continue
+			}
+			edge := cave_network_edge_from_nodes(from_node, to_node)
+			roll := feature_grid_unit_f32(u64(edge.id), CAVE_NETWORK_EDGE_ROLL_SALT)
+			if roll > CAVE_NETWORK_GRAPH_LOOP_ROLL_MAX {
+				continue
+			}
+			base_weight := generation_region_cave_network_edge_weight(from_node, to_node)
+			if base_weight > CAVE_NETWORK_GRAPH_LOOP_MAX_WEIGHT_BLOCKS {
+				continue
+			}
+			jitter := feature_grid_unit_f32(u64(edge.id), CAVE_NETWORK_EDGE_KIND_SALT)
+			weight :=
+				base_weight *
+				regional_terrain_field_lerp(
+					1.0 - CAVE_NETWORK_GRAPH_LOOP_WEIGHT_JITTER_SCALE,
+					1.0 + CAVE_NETWORK_GRAPH_LOOP_WEIGHT_JITTER_SCALE,
+					jitter,
+				)
+			if weight < best_weight {
+				best_weight = weight
+				from_index = i
+				to_index = j
+				found = true
+			}
+		}
+	}
+	return
+}
+
+generation_region_cave_network_local_edges_fill :: proc(
+	region: ^GenerationRegion,
+	eligible: [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]bool,
+) {
+	for i := u32(0); i < region.cave_network_node_count; i += 1 {
+		if !eligible[i] {
+			continue
+		}
+		from_node := region.cave_network_nodes[i]
+		for j := i + 1; j < region.cave_network_node_count; j += 1 {
+			if !eligible[j] {
+				continue
+			}
+			to_node := region.cave_network_nodes[j]
+			if !generation_region_cave_network_local_edge_should_exist(from_node, to_node) {
+				continue
+			}
+			if generation_region_cave_network_edge_exists(region, from_node.id, to_node.id) {
+				continue
+			}
+			if region.cave_network_edge_count >= GENERATION_REGION_CAVE_NETWORK_EDGE_CAPACITY {
+				return
+			}
+			generation_region_cave_network_edge_append(
+				region,
+				cave_network_edge_from_nodes(from_node, to_node),
+			)
+		}
+	}
+}
+
+generation_region_cave_network_seam_edges_fill :: proc(
+	region: ^GenerationRegion,
+	eligible: [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]bool,
+) {
+	for axis in 0 ..< 3 {
+		generation_region_cave_network_seam_edge_fill(
+			region,
+			eligible,
+			axis,
+			generation_region_bounds_axis_min(region.bounds, axis),
+		)
+		generation_region_cave_network_seam_edge_fill(
+			region,
+			eligible,
+			axis,
+			generation_region_bounds_axis_max(region.bounds, axis),
+		)
+	}
+}
+
+generation_region_cave_network_seam_edge_fill :: proc(
+	region: ^GenerationRegion,
+	eligible: [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]bool,
+	axis: int,
+	face_block: f32,
+) {
+	from_index, to_index, found := generation_region_cave_network_seam_edge_select(
+		region,
+		eligible,
+		axis,
+		face_block,
+	)
+	if !found {
+		return
+	}
+	edge := cave_network_seam_edge_from_nodes(
+		region.cave_network_nodes[from_index],
+		region.cave_network_nodes[to_index],
+	)
+	existing_index, existing_found := generation_region_cave_network_edge_pair_index(
+		region,
+		edge.from_node_id,
+		edge.to_node_id,
+	)
+	if existing_found {
+		region.cave_network_edges[existing_index] = edge
+		return
+	}
+	if generation_region_cave_network_edge_id_exists(region, edge.id) {
+		return
+	}
+	if region.cave_network_edge_count >= GENERATION_REGION_CAVE_NETWORK_EDGE_CAPACITY {
 		return
 	}
 	generation_region_cave_network_edge_append(region, edge)
 }
 
-generation_region_cave_network_node_find :: proc(
+generation_region_cave_network_seam_edge_select :: proc(
 	region: ^GenerationRegion,
-	owner: FeatureGridCoord3,
+	eligible: [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]bool,
+	axis: int,
+	face_block: f32,
 ) -> (
-	node: CaveNetworkNode,
+	from_index, to_index: u32,
 	found: bool,
 ) {
+	best_score := max(f32)
 	for i := u32(0); i < region.cave_network_node_count; i += 1 {
-		if region.cave_network_nodes[i].owner == owner {
-			node = region.cave_network_nodes[i]
-			found = true
-			return
+		if !eligible[i] {
+			continue
+		}
+		a_node := region.cave_network_nodes[i]
+		if !generation_region_cave_network_node_allows_seam_edge(a_node) {
+			continue
+		}
+		a_axis := generation_region_cave_network_node_axis_value(a_node, axis)
+		if math.abs(a_axis - face_block) > CAVE_NETWORK_GRAPH_SEAM_EDGE_FACE_MARGIN_BLOCKS {
+			continue
+		}
+		for j := i + 1; j < region.cave_network_node_count; j += 1 {
+			if !eligible[j] {
+				continue
+			}
+			b_node := region.cave_network_nodes[j]
+			if !generation_region_cave_network_node_allows_seam_edge(b_node) {
+				continue
+			}
+			b_axis := generation_region_cave_network_node_axis_value(b_node, axis)
+			if math.abs(b_axis - face_block) > CAVE_NETWORK_GRAPH_SEAM_EDGE_FACE_MARGIN_BLOCKS {
+				continue
+			}
+			if !generation_region_cave_network_nodes_straddle_face(a_axis, b_axis, face_block) {
+				continue
+			}
+
+			local_from_index := i
+			local_to_index := j
+			from_node := a_node
+			to_node := b_node
+			if a_axis > b_axis {
+				local_from_index = j
+				local_to_index = i
+				from_node = b_node
+				to_node = a_node
+			}
+
+			weight := generation_region_cave_network_edge_weight(from_node, to_node)
+			if weight > CAVE_NETWORK_GRAPH_SEAM_EDGE_MAX_WEIGHT_BLOCKS {
+				continue
+			}
+			score := generation_region_cave_network_seam_edge_score(from_node, to_node, weight)
+			if score < best_score {
+				best_score = score
+				from_index = local_from_index
+				to_index = local_to_index
+				found = true
+			}
 		}
 	}
 	return
+}
+
+generation_region_cave_network_seam_edge_score :: proc(
+	from_node, to_node: CaveNetworkNode,
+	base_weight: f32,
+) -> f32 {
+	edge := cave_network_seam_edge_from_nodes(from_node, to_node)
+	jitter := feature_grid_unit_f32(
+		u64(edge.id),
+		CAVE_NETWORK_EDGE_KIND_SALT ~ CAVE_NETWORK_EDGE_ROLL_SALT,
+	)
+	score :=
+		base_weight *
+		regional_terrain_field_lerp(
+			1.0 - CAVE_NETWORK_GRAPH_SEAM_EDGE_WEIGHT_JITTER_SCALE,
+			1.0 + CAVE_NETWORK_GRAPH_SEAM_EDGE_WEIGHT_JITTER_SCALE,
+			jitter,
+		)
+	if generation_region_cave_network_node_prefers_seam_edge(from_node) {
+		score -= CAVE_NETWORK_GRAPH_SEAM_EDGE_REQUIRED_BONUS_BLOCKS
+	}
+	if generation_region_cave_network_node_prefers_seam_edge(to_node) {
+		score -= CAVE_NETWORK_GRAPH_SEAM_EDGE_REQUIRED_BONUS_BLOCKS
+	}
+	return math.max(f32(1), score)
+}
+
+generation_region_cave_network_node_prefers_seam_edge :: proc(node: CaveNetworkNode) -> bool {
+	return(
+		cave_region_role_requires_connectivity(node.role) ||
+		node.kind == .Entrance ||
+		node.kind == .Vertical_Shaft ||
+		node.kind == .Underground_Lake ||
+		node.kind == .River_Junction \
+	)
+}
+
+generation_region_cave_network_node_allows_seam_edge :: proc(node: CaveNetworkNode) -> bool {
+	return node.owner.y >= 0
+}
+
+generation_region_cave_network_nodes_straddle_face :: proc(
+	a_axis, b_axis, face_block: f32,
+) -> bool {
+	return(
+		(a_axis < face_block && b_axis >= face_block) ||
+		(b_axis < face_block && a_axis >= face_block) \
+	)
+}
+
+generation_region_cave_network_node_axis_value :: proc(node: CaveNetworkNode, axis: int) -> f32 {
+	if axis == 0 {
+		return node.x
+	}
+	if axis == 1 {
+		return node.y
+	}
+	return node.z
+}
+
+generation_region_bounds_axis_min :: proc(bounds: BlockBounds3, axis: int) -> f32 {
+	if axis == 0 {
+		return f32(bounds.min.x)
+	}
+	if axis == 1 {
+		return f32(bounds.min.y)
+	}
+	return f32(bounds.min.z)
+}
+
+generation_region_bounds_axis_max :: proc(bounds: BlockBounds3, axis: int) -> f32 {
+	if axis == 0 {
+		return f32(bounds.max.x)
+	}
+	if axis == 1 {
+		return f32(bounds.max.y)
+	}
+	return f32(bounds.max.z)
+}
+
+generation_region_cave_network_edge_weight :: proc(from_node, to_node: CaveNetworkNode) -> f32 {
+	dx := to_node.x - from_node.x
+	dy := to_node.y - from_node.y
+	dz := to_node.z - from_node.z
+	horizontal := math.sqrt_f32(dx * dx + dz * dz)
+	vertical := math.abs(dy) * CAVE_NETWORK_GRAPH_VERTICAL_WEIGHT_SCALE
+	weight := math.sqrt_f32(horizontal * horizontal + vertical * vertical)
+	if from_node.biome_id != to_node.biome_id {
+		weight += CAVE_NETWORK_GRAPH_BIOME_MISMATCH_WEIGHT_BLOCKS
+	}
+	if cave_region_role_requires_connectivity(from_node.role) ||
+	   cave_region_role_requires_connectivity(to_node.role) {
+		weight -= CAVE_NETWORK_GRAPH_REQUIRED_WEIGHT_BONUS_BLOCKS
+	}
+	return math.max(f32(1), weight)
+}
+
+generation_region_cave_network_local_edge_should_exist :: proc(
+	from_node, to_node: CaveNetworkNode,
+) -> bool {
+	weight := generation_region_cave_network_edge_weight(from_node, to_node)
+	if weight > CAVE_NETWORK_GRAPH_LOCAL_EDGE_MAX_WEIGHT_BLOCKS {
+		return false
+	}
+	edge := cave_network_edge_from_nodes(from_node, to_node)
+	roll := feature_grid_unit_f32(
+		u64(edge.id),
+		CAVE_NETWORK_EDGE_ROLL_SALT ~ CAVE_NETWORK_EDGE_ID_SALT,
+	)
+	return roll < CAVE_NETWORK_GRAPH_LOCAL_EDGE_ROLL_MAX
+}
+
+generation_region_cave_network_edge_exists :: proc(
+	region: ^GenerationRegion,
+	from_node_id, to_node_id: FeatureID,
+) -> bool {
+	_, found := generation_region_cave_network_edge_pair_index(region, from_node_id, to_node_id)
+	return found
+}
+
+generation_region_cave_network_edge_pair_index :: proc(
+	region: ^GenerationRegion,
+	from_node_id, to_node_id: FeatureID,
+) -> (
+	index: u32,
+	found: bool,
+) {
+	for i := u32(0); i < region.cave_network_edge_count; i += 1 {
+		edge := region.cave_network_edges[i]
+		if (edge.from_node_id == from_node_id && edge.to_node_id == to_node_id) ||
+		   (edge.from_node_id == to_node_id && edge.to_node_id == from_node_id) {
+			return i, true
+		}
+	}
+	return
+}
+
+generation_region_cave_network_edge_id_exists :: proc(
+	region: ^GenerationRegion,
+	edge_id: FeatureID,
+) -> bool {
+	for i := u32(0); i < region.cave_network_edge_count; i += 1 {
+		if region.cave_network_edges[i].id == edge_id {
+			return true
+		}
+	}
+	return false
 }
 
 generation_region_cave_network_edge_append :: proc(
@@ -1313,6 +1727,17 @@ when ODIN_DEBUG {
 			origin_region.cave_anchor_count > 0,
 			"origin region should store sparse Cave Network data",
 		)
+		debug_generation_region_cave_network_graph_assert_connected(origin_region)
+		debug_generation_region_cave_network_local_edges_assert_shared(
+			key,
+			{x = 0, y = 0, z = 0},
+			{x = 1, y = 0, z = 0},
+		)
+		debug_generation_region_cave_network_seam_edges_assert_shared(
+			key,
+			{x = 0, y = 0, z = 0},
+			{x = 1, y = 0, z = 0},
+		)
 		log.assert(
 			generation_region_coord_from_block(-1, -1, -1) ==
 			GenerationRegionCoord{x = -1, y = -1, z = -1},
@@ -1517,6 +1942,278 @@ when ODIN_DEBUG {
 		)
 
 		log.debug("Generation Region contract checks passed")
+	}
+
+	debug_generation_region_cave_network_graph_assert_connected :: proc(
+		region: ^GenerationRegion,
+	) {
+		eligible: [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]bool
+		visited: [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]bool
+		queue: [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]u32
+		eligible_count: u32
+		start_index: u32
+		start_found := false
+		for i := u32(0); i < region.cave_network_node_count; i += 1 {
+			if region.cave_network_nodes[i].role == .Sealed_Secret {
+				continue
+			}
+			eligible[i] = true
+			eligible_count += 1
+			if !start_found {
+				start_index = i
+				start_found = true
+			}
+		}
+		if eligible_count <= 1 || !start_found {
+			return
+		}
+
+		queue_head: u32
+		queue_tail: u32
+		queue[queue_tail] = start_index
+		queue_tail += 1
+		visited[start_index] = true
+		visited_count := u32(1)
+		for queue_head < queue_tail {
+			node_index := queue[queue_head]
+			queue_head += 1
+			node := region.cave_network_nodes[node_index]
+			for edge_index := u32(0);
+			    edge_index < region.cave_network_edge_count;
+			    edge_index += 1 {
+				edge := region.cave_network_edges[edge_index]
+				neighbor_id := FeatureID(0)
+				if edge.from_node_id == node.id {
+					neighbor_id = edge.to_node_id
+				} else if edge.to_node_id == node.id {
+					neighbor_id = edge.from_node_id
+				} else {
+					continue
+				}
+				neighbor_index, found := debug_generation_region_cave_network_node_index_by_id(
+					region,
+					neighbor_id,
+				)
+				if !found || !eligible[neighbor_index] || visited[neighbor_index] {
+					continue
+				}
+				visited[neighbor_index] = true
+				queue[queue_tail] = neighbor_index
+				queue_tail += 1
+				visited_count += 1
+			}
+		}
+
+		log.assertf(
+			visited_count == eligible_count,
+			"Generation Region Cave Network graph must connect non-sealed nodes: visited=%d eligible=%d",
+			visited_count,
+			eligible_count,
+		)
+		tree_edge_count := eligible_count - 1
+		log.assertf(
+			region.cave_network_edge_count >= tree_edge_count,
+			"Generation Region Cave Network graph has fewer than tree edges: edges=%d tree=%d",
+			region.cave_network_edge_count,
+			tree_edge_count,
+		)
+		if eligible_count > 3 {
+			log.assertf(
+				region.cave_network_edge_count > tree_edge_count,
+				"Generation Region Cave Network graph should include augmented loop edges: edges=%d tree=%d",
+				region.cave_network_edge_count,
+				tree_edge_count,
+			)
+		}
+	}
+
+	debug_generation_region_cave_network_local_edges_assert_shared :: proc(
+		key: FeatureGridKey,
+		from_coord, to_coord: GenerationRegionCoord,
+	) {
+		from_region := new(GenerationRegion)
+		to_region := new(GenerationRegion)
+		generation_region_build_with_margins_into(
+			from_region,
+			key,
+			from_coord,
+			GENERATION_REGION_DEFAULT_INFLUENCE_MARGINS,
+		)
+		generation_region_build_with_margins_into(
+			to_region,
+			key,
+			to_coord,
+			GENERATION_REGION_DEFAULT_INFLUENCE_MARGINS,
+		)
+
+		shared_local_edges: u32
+		for i := u32(0); i < from_region.cave_network_node_count; i += 1 {
+			from_node := from_region.cave_network_nodes[i]
+			if from_node.role == .Sealed_Secret ||
+			   !generation_region_owner_range_contains_owner_3(
+					   to_region.cave_network_owner_range,
+					   from_node.owner,
+				   ) {
+				continue
+			}
+			for j := i + 1; j < from_region.cave_network_node_count; j += 1 {
+				to_node := from_region.cave_network_nodes[j]
+				if to_node.role == .Sealed_Secret ||
+				   !generation_region_owner_range_contains_owner_3(
+						   to_region.cave_network_owner_range,
+						   to_node.owner,
+					   ) {
+					continue
+				}
+				if !generation_region_cave_network_local_edge_should_exist(from_node, to_node) {
+					continue
+				}
+				shared_local_edges += 1
+				log.assert(
+					generation_region_cave_network_edge_exists(
+						from_region,
+						from_node.id,
+						to_node.id,
+					),
+					"left Generation Region missing canonical local Cave Network edge",
+				)
+				log.assert(
+					generation_region_cave_network_edge_exists(
+						to_region,
+						from_node.id,
+						to_node.id,
+					),
+					"right Generation Region missing shared canonical local Cave Network edge",
+				)
+			}
+		}
+		log.assert(
+			shared_local_edges > 0,
+			"adjacent Generation Regions should share canonical local Cave Network edges",
+		)
+	}
+
+	debug_generation_region_cave_network_seam_edges_assert_shared :: proc(
+		key: FeatureGridKey,
+		from_coord, to_coord: GenerationRegionCoord,
+	) {
+		from_region := new(GenerationRegion)
+		to_region := new(GenerationRegion)
+		generation_region_build_with_margins_into(
+			from_region,
+			key,
+			from_coord,
+			GENERATION_REGION_DEFAULT_INFLUENCE_MARGINS,
+		)
+		generation_region_build_with_margins_into(
+			to_region,
+			key,
+			to_coord,
+			GENERATION_REGION_DEFAULT_INFLUENCE_MARGINS,
+		)
+
+		axis, face_block, face_found := debug_generation_region_cave_network_shared_face(
+			from_coord,
+			to_coord,
+			from_region.bounds,
+		)
+		log.assert(face_found, "debug seam check requires directly adjacent Generation Regions")
+
+		from_eligible: [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]bool
+		for i := u32(0); i < from_region.cave_network_node_count; i += 1 {
+			from_eligible[i] = from_region.cave_network_nodes[i].role != .Sealed_Secret
+		}
+		to_eligible: [GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]bool
+		for i := u32(0); i < to_region.cave_network_node_count; i += 1 {
+			to_eligible[i] = to_region.cave_network_nodes[i].role != .Sealed_Secret
+		}
+
+		from_from_index, from_to_index, from_found :=
+			generation_region_cave_network_seam_edge_select(
+				from_region,
+				from_eligible,
+				axis,
+				face_block,
+			)
+		to_from_index, to_to_index, to_found := generation_region_cave_network_seam_edge_select(
+			to_region,
+			to_eligible,
+			axis,
+			face_block,
+		)
+		log.assert(
+			from_found && to_found,
+			"adjacent Generation Regions should select a shared Cave Network seam edge",
+		)
+
+		from_from_node := from_region.cave_network_nodes[from_from_index]
+		from_to_node := from_region.cave_network_nodes[from_to_index]
+		to_from_node := to_region.cave_network_nodes[to_from_index]
+		to_to_node := to_region.cave_network_nodes[to_to_index]
+		log.assert(
+			from_from_node.id == to_from_node.id && from_to_node.id == to_to_node.id,
+			"adjacent Generation Regions selected different Cave Network seam endpoints",
+		)
+
+		seam_edge := cave_network_seam_edge_from_nodes(from_from_node, from_to_node)
+		log.assert(
+			generation_region_cave_network_edge_id_exists(from_region, seam_edge.id),
+			"left Generation Region missing deterministic Cave Network seam edge",
+		)
+		log.assert(
+			generation_region_cave_network_edge_id_exists(to_region, seam_edge.id),
+			"right Generation Region missing shared deterministic Cave Network seam edge",
+		)
+	}
+
+	debug_generation_region_cave_network_shared_face :: proc(
+		from_coord, to_coord: GenerationRegionCoord,
+		from_bounds: BlockBounds3,
+	) -> (
+		axis: int,
+		face_block: f32,
+		found: bool,
+	) {
+		if from_coord.y == to_coord.y && from_coord.z == to_coord.z {
+			if to_coord.x == from_coord.x + 1 {
+				return 0, f32(from_bounds.max.x), true
+			}
+			if to_coord.x == from_coord.x - 1 {
+				return 0, f32(from_bounds.min.x), true
+			}
+		}
+		if from_coord.x == to_coord.x && from_coord.z == to_coord.z {
+			if to_coord.y == from_coord.y + 1 {
+				return 1, f32(from_bounds.max.y), true
+			}
+			if to_coord.y == from_coord.y - 1 {
+				return 1, f32(from_bounds.min.y), true
+			}
+		}
+		if from_coord.x == to_coord.x && from_coord.y == to_coord.y {
+			if to_coord.z == from_coord.z + 1 {
+				return 2, f32(from_bounds.max.z), true
+			}
+			if to_coord.z == from_coord.z - 1 {
+				return 2, f32(from_bounds.min.z), true
+			}
+		}
+		return
+	}
+
+	debug_generation_region_cave_network_node_index_by_id :: proc(
+		region: ^GenerationRegion,
+		node_id: FeatureID,
+	) -> (
+		index: u32,
+		found: bool,
+	) {
+		for i := u32(0); i < region.cave_network_node_count; i += 1 {
+			if region.cave_network_nodes[i].id == node_id {
+				return i, true
+			}
+		}
+		return
 	}
 
 	debug_surface_biome_samples_assert_equal :: proc(a, b: SurfaceBiomeFieldSample) {

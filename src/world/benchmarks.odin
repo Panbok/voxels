@@ -1,7 +1,7 @@
 package world
 
-import biomes "world:biomes"
 import world_async "async:world"
+import biomes "world:biomes"
 
 import "core:log"
 import "core:math"
@@ -18,10 +18,47 @@ when ODIN_DEBUG {
 	MESH_BENCHMARK_ITERATIONS :: #config(MESH_BENCHMARK_ITERATIONS, 8)
 	RUN_TERRAIN_GENERATION_BENCHMARK :: #config(RUN_TERRAIN_GENERATION_BENCHMARK, false)
 	TERRAIN_GENERATION_BENCHMARK_ITERATIONS :: #config(TERRAIN_GENERATION_BENCHMARK_ITERATIONS, 1)
-	TERRAIN_GENERATION_BENCHMARK_RESET_CACHE :: #config(TERRAIN_GENERATION_BENCHMARK_RESET_CACHE, false)
+	TERRAIN_GENERATION_BENCHMARK_RESET_CACHE :: #config(
+		TERRAIN_GENERATION_BENCHMARK_RESET_CACHE,
+		false,
+	)
+	TERRAIN_GENERATION_BENCHMARK_CAPTURE_CAVE_SLICES :: #config(
+		TERRAIN_GENERATION_BENCHMARK_CAPTURE_CAVE_SLICES,
+		false,
+	)
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_ALL :: 0
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_FUNGAL :: 1
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_FUNGAL_ROUTE :: 2
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_FUNGAL_PORTAL :: 3
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_FUNGAL_CLUSTER :: 4
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_SEAMS :: 5
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CRYSTAL :: 6
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CRYSTAL_PORTAL :: 7
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CRYSTAL_CLUSTER :: 8
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_AQUIFER :: 9
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_AQUIFER_PORTAL :: 10
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_AQUIFER_CLUSTER :: 11
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_AQUIFER_WATER :: 12
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_SURFACE :: 13
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_PROFILE :: 14
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CAVE_FIELD_POCKET :: 15
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CAVE_FIELD_CRYSTAL_POCKET :: 16
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CAVE_FIELD_AQUIFER_POCKET :: 17
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CHAMBERLET_CHAIN :: 18
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CHAMBERLET_GALLERY :: 19
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_MACRO_CLUSTERS :: 20
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_SEAM_VIEW :: 21
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_PROFILE_VIEW :: 22
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_MAX ::
+		TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_PROFILE_VIEW
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET :: #config(
+		TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET,
+		TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_ALL,
+	)
 	TERRAIN_GENERATION_BENCHMARK_COORD_COUNT :: 8
 	TERRAIN_GENERATION_BENCHMARK_BIOME_OWNER_SCAN_RADIUS_XZ :: 4
 	TERRAIN_GENERATION_BENCHMARK_CAVE_FIELD_PATH_NEIGHBOR_RADIUS :: 1
+	TERRAIN_GENERATION_BENCHMARK_CAVE_FIELD_POCKET_NEIGHBOR_RADIUS :: 2
 	TERRAIN_GENERATION_BENCHMARK_SURFACE_CAVE_OWNER_SCAN_RADIUS_XZ :: 8
 	TERRAIN_GENERATION_BENCHMARK_LEGACY_SURFACE_ANCHOR_EMIT_ROLL_MAX :: f32(0.42)
 	TERRAIN_GENERATION_BENCHMARK_LEGACY_SURFACE_CAVE_MOUTH_ROLL_MAX :: f32(0.62)
@@ -29,6 +66,24 @@ when ODIN_DEBUG {
 	TERRAIN_GENERATION_BENCHMARK_BIOME_OWNER_SCAN_Y_MAX :: 0
 	TERRAIN_GENERATION_BENCHMARK_TINY_CAVE_COMPONENT_NODE_MAX :: u32(3)
 	TERRAIN_GENERATION_BENCHMARK_SURFACE_CAVE_SCAN_SEED_COUNT :: u32(4)
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH :: 128
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT :: 96
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_STEP_BLOCKS :: i32(2)
+	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_CHUNK_CACHE_CAPACITY :: 16
+	TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH :: 128
+	TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_HEIGHT :: 72
+	TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_MAX_DISTANCE_BLOCKS :: f32(160)
+	TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_STEP_BLOCKS :: f32(1.5)
+	TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_MAX_STEPS :: i32(107)
+	TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_FOV_DEGREES :: f32(78)
+	#assert(
+		TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET >=
+		TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_ALL,
+	)
+	#assert(
+		TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET <=
+		TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_MAX,
+	)
 
 	chunk_mesher_benchmarks_debug_contracts_run :: proc(transient_arena: ^mem.Arena) {
 		log.assert(transient_arena != nil, "benchmark transient arena must not be nil")
@@ -368,9 +423,37 @@ when ODIN_DEBUG {
 	when RUN_TERRAIN_GENERATION_BENCHMARK {
 
 		TerrainGenerationBenchmarkCoords :: [TERRAIN_GENERATION_BENCHMARK_COORD_COUNT]world_async.ChunkCoord
+		TerrainGenerationBenchmarkCaveSlicePixels :: [TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH *
+		TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT]u8
+		TerrainGenerationBenchmarkCaveViewPixels :: [TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH *
+		TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_HEIGHT]u8
+
+		TerrainGenerationBenchmarkCaveSliceMode :: enum u32 {
+			Horizontal_XZ,
+			Vertical_XY,
+			Route_Longitudinal,
+			Route_Cross_Section,
+			Route_Plan,
+			Route_Oblique,
+			Route_Endpoint_Plan,
+			Mouth_Longitudinal,
+			Mouth_Plan,
+		}
+
+		TerrainGenerationBenchmarkCaveSliceChunkCacheEntry :: struct {
+			coord: world_async.ChunkCoord,
+			view:  world_async.ChunkVoxelView,
+			valid: bool,
+		}
+
+		TerrainGenerationBenchmarkCaveSliceChunkCache :: struct {
+			entries:          [TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_CHUNK_CACHE_CAPACITY]TerrainGenerationBenchmarkCaveSliceChunkCacheEntry,
+			count:            u32,
+			next_reuse_index: u32,
+		}
 
 		TerrainGenerationBenchmarkSurfaceWaterStats :: struct {
-			column_count:                  u32,
+			column_count:                 u32,
 			local_water_feature_columns:  u32,
 			local_water_below_columns:    u32,
 			local_water_fill_columns:     u32,
@@ -392,161 +475,162 @@ when ODIN_DEBUG {
 			shore_low_green_columns:      u32,
 			shore_mid_green_columns:      u32,
 			shore_upper_green_columns:    u32,
-			min_surface_height_blocks:     f32,
-			max_surface_height_blocks:     f32,
-			top_soft_zone_columns:         u32,
-			bottom_soft_zone_columns:      u32,
+			min_surface_height_blocks:    f32,
+			max_surface_height_blocks:    f32,
+			top_soft_zone_columns:        u32,
+			bottom_soft_zone_columns:     u32,
 		}
 
 		TerrainGenerationBenchmarkSurfaceCaveAnchors :: struct {
-			mouth:             biomes.CaveAnchor,
-			sinkhole:          biomes.CaveAnchor,
-			mouth_small:       biomes.CaveAnchor,
-			mouth_medium:      biomes.CaveAnchor,
-			mouth_large:       biomes.CaveAnchor,
-			mouth_node:        biomes.CaveNetworkNode,
-			sinkhole_node:     biomes.CaveNetworkNode,
-			mouth_small_node:  biomes.CaveNetworkNode,
-			mouth_medium_node: biomes.CaveNetworkNode,
-			mouth_large_node:  biomes.CaveNetworkNode,
-			mouth_found:       bool,
-			sinkhole_found:    bool,
-			mouth_small_found: bool,
+			mouth:              biomes.CaveAnchor,
+			sinkhole:           biomes.CaveAnchor,
+			mouth_small:        biomes.CaveAnchor,
+			mouth_medium:       biomes.CaveAnchor,
+			mouth_large:        biomes.CaveAnchor,
+			mouth_node:         biomes.CaveNetworkNode,
+			sinkhole_node:      biomes.CaveNetworkNode,
+			mouth_small_node:   biomes.CaveNetworkNode,
+			mouth_medium_node:  biomes.CaveNetworkNode,
+			mouth_large_node:   biomes.CaveNetworkNode,
+			mouth_found:        bool,
+			sinkhole_found:     bool,
+			mouth_small_found:  bool,
 			mouth_medium_found: bool,
-			mouth_large_found: bool,
+			mouth_large_found:  bool,
 		}
 
 		TerrainGenerationBenchmarkSurfaceCaveStats :: struct {
-			selected_anchor_count: u32,
-			mouth_count:          u32,
-			sinkhole_count:       u32,
-			open_anchor_count:    u32,
-			sealed_anchor_count:  u32,
-			open_blocks:          u32,
-			mouth_open_blocks:    u32,
-			sinkhole_open_blocks: u32,
-			mouth_aperture_open_blocks: u32,
-			mouth_throat_open_blocks:   u32,
-			mouth_inner_open_blocks:    u32,
-			mouth_outer_carve_open_blocks: u32,
-			mouth_lower_center_open_blocks: u32,
-			mouth_lower_side_band_open_blocks: u32,
-			mouth_side_pocket_open_blocks: u32,
-			sinkhole_upper_center_open_blocks: u32,
-			sinkhole_upper_ledge_open_blocks:  u32,
-			sinkhole_upper_outer_open_blocks:  u32,
+			selected_anchor_count:                u32,
+			mouth_count:                          u32,
+			sinkhole_count:                       u32,
+			open_anchor_count:                    u32,
+			sealed_anchor_count:                  u32,
+			open_blocks:                          u32,
+			mouth_open_blocks:                    u32,
+			sinkhole_open_blocks:                 u32,
+			mouth_aperture_open_blocks:           u32,
+			mouth_throat_open_blocks:             u32,
+			mouth_inner_open_blocks:              u32,
+			mouth_outer_carve_open_blocks:        u32,
+			mouth_exterior_apron_open_blocks:     u32,
+			mouth_lower_center_open_blocks:       u32,
+			mouth_lower_side_band_open_blocks:    u32,
+			mouth_side_pocket_open_blocks:        u32,
+			sinkhole_upper_center_open_blocks:    u32,
+			sinkhole_upper_ledge_open_blocks:     u32,
+			sinkhole_upper_outer_open_blocks:     u32,
 			sinkhole_upper_side_band_open_blocks: u32,
 			sinkhole_upper_end_band_open_blocks:  u32,
-			water_blocks:         u32,
-			solid_blocks:         u32,
-			near_surface_open:    u32,
-			sub_surface_open:     u32,
-			max_open_depth:       i32,
-			min_open_blocks:      u32,
-			mouth_link_horizontal_blocks: f32,
-			mouth_link_vertical_blocks:   f32,
-			mouth_link_drop_per_run:      f32,
-			mouth_bend_horizontal_blocks: f32,
-			mouth_bend_vertical_blocks:   f32,
-			mouth_bend_drop_per_run:      f32,
-			mouth_handoff_horizontal_blocks: f32,
-			mouth_handoff_vertical_blocks:   f32,
-			mouth_handoff_drop_per_run:      f32,
+			water_blocks:                         u32,
+			solid_blocks:                         u32,
+			near_surface_open:                    u32,
+			sub_surface_open:                     u32,
+			max_open_depth:                       i32,
+			min_open_blocks:                      u32,
+			mouth_link_horizontal_blocks:         f32,
+			mouth_link_vertical_blocks:           f32,
+			mouth_link_drop_per_run:              f32,
+			mouth_bend_horizontal_blocks:         f32,
+			mouth_bend_vertical_blocks:           f32,
+			mouth_bend_drop_per_run:              f32,
+			mouth_handoff_horizontal_blocks:      f32,
+			mouth_handoff_vertical_blocks:        f32,
+			mouth_handoff_drop_per_run:           f32,
 		}
 
 		TerrainGenerationBenchmarkSurfaceCaveScanStats :: struct {
-			owner_count:            u32,
-			legacy_emit_count:      u32,
-			current_emit_count:     u32,
-			additional_emit_count:  u32,
-			legacy_mouth_count:     u32,
-			legacy_sinkhole_count:  u32,
-			current_mouth_count:    u32,
-			current_sinkhole_count: u32,
-			current_mouth_small_count:  u32,
-			current_mouth_medium_count: u32,
-			current_mouth_large_count:  u32,
-			current_mouth_vestibule_count: u32,
-			current_mouth_shallow_transition_count: u32,
-			current_mouth_steep_transition_count:   u32,
-			current_mouth_raw_vertical_count:       u32,
-			current_mouth_sloped_tube_count:        u32,
-			current_mouth_curved_ramp_count:        u32,
-			current_mouth_spiral_ramp_count:        u32,
-			current_anchor_component_tiny_count:    u32,
-			current_mouth_component_tiny_count:     u32,
-			current_sinkhole_component_tiny_count:  u32,
-			current_anchor_component_missing_count: u32,
+			owner_count:                                  u32,
+			legacy_emit_count:                            u32,
+			current_emit_count:                           u32,
+			additional_emit_count:                        u32,
+			legacy_mouth_count:                           u32,
+			legacy_sinkhole_count:                        u32,
+			current_mouth_count:                          u32,
+			current_sinkhole_count:                       u32,
+			current_mouth_small_count:                    u32,
+			current_mouth_medium_count:                   u32,
+			current_mouth_large_count:                    u32,
+			current_mouth_vestibule_count:                u32,
+			current_mouth_shallow_transition_count:       u32,
+			current_mouth_steep_transition_count:         u32,
+			current_mouth_raw_vertical_count:             u32,
+			current_mouth_sloped_tube_count:              u32,
+			current_mouth_curved_ramp_count:              u32,
+			current_mouth_spiral_ramp_count:              u32,
+			current_anchor_component_tiny_count:          u32,
+			current_mouth_component_tiny_count:           u32,
+			current_sinkhole_component_tiny_count:        u32,
+			current_anchor_component_missing_count:       u32,
 			current_anchor_component_external_link_count: u32,
-			current_anchor_component_max_nodes:     u32,
-			current_mouth_radius_total:             f32,
-			current_mouth_radius_max:               f32,
-			guaranteed_count:       u32,
-			vertical_count:         u32,
+			current_anchor_component_max_nodes:           u32,
+			current_mouth_radius_total:                   f32,
+			current_mouth_radius_max:                     f32,
+			guaranteed_count:                             u32,
+			vertical_count:                               u32,
 		}
 
 		TerrainGenerationBenchmarkCavePhysicalStats :: struct {
-			chunk_count:                 u32,
-			open_blocks:                 u32,
-			water_blocks:                u32,
-			solid_blocks:                u32,
-			open_core_6_blocks:          u32,
-			open_core_27_blocks:         u32,
-			exposed_solid_blocks:        u32,
-			exposed_grass_blocks:        u32,
-			exposed_dirt_blocks:         u32,
-			exposed_stone_blocks:        u32,
-			exposed_wet_blocks:          u32,
-			exposed_ash_blocks:          u32,
-			exposed_aquifer_wall_blocks: u32,
-			exposed_crystal_blocks:      u32,
+			chunk_count:                   u32,
+			open_blocks:                   u32,
+			water_blocks:                  u32,
+			solid_blocks:                  u32,
+			open_core_6_blocks:            u32,
+			open_core_27_blocks:           u32,
+			exposed_solid_blocks:          u32,
+			exposed_grass_blocks:          u32,
+			exposed_dirt_blocks:           u32,
+			exposed_stone_blocks:          u32,
+			exposed_wet_blocks:            u32,
+			exposed_ash_blocks:            u32,
+			exposed_aquifer_wall_blocks:   u32,
+			exposed_crystal_blocks:        u32,
 			exposed_fungal_floor_blocks:   u32,
 			exposed_fungal_ceiling_blocks: u32,
-			cave_biome_exposed_blocks:   u32,
-			open_neighbor_low_blocks:     u32,
-			open_neighbor_mid_blocks:     u32,
-			open_neighbor_high_blocks:    u32,
-			chamber_span_blocks:          u32,
-			narrow_span_blocks:           u32,
-			axis_span_x_total:            u32,
-			axis_span_y_total:            u32,
-			axis_span_z_total:            u32,
-			max_open_core_27_per_chunk:  u32,
-			min_open_core_27_per_chunk:  u32,
-			max_exposed_biome_per_chunk: u32,
-			min_exposed_biome_per_chunk: u32,
+			cave_biome_exposed_blocks:     u32,
+			open_neighbor_low_blocks:      u32,
+			open_neighbor_mid_blocks:      u32,
+			open_neighbor_high_blocks:     u32,
+			chamber_span_blocks:           u32,
+			narrow_span_blocks:            u32,
+			axis_span_x_total:             u32,
+			axis_span_y_total:             u32,
+			axis_span_z_total:             u32,
+			max_open_core_27_per_chunk:    u32,
+			min_open_core_27_per_chunk:    u32,
+			max_exposed_biome_per_chunk:   u32,
+			min_exposed_biome_per_chunk:   u32,
 		}
 
 		TerrainGenerationBenchmarkCaveFieldStats :: struct {
-			chunk_count:             u32,
-			candidate_count:         u32,
-			path_candidate_count:    u32,
-			chamber_candidate_count: u32,
-			stamp_count:             u32,
-			path_stamp_count:        u32,
-			route_pocket_stamp_count: u32,
-			chamber_stamp_count:     u32,
-			network_connected_candidate_count: u32,
-			network_bridge_candidate_count:    u32,
-			network_culled_candidate_count:    u32,
-			network_bridge_stamp_count:        u32,
-			route_pocket_candidate_count:      u32,
-			route_promoted_path_candidate_count: u32,
-			route_promoted_path_stamp_count:     u32,
-			route_follow_path_candidate_count: u32,
-			route_follow_path_stamp_count:     u32,
+			chunk_count:                            u32,
+			candidate_count:                        u32,
+			path_candidate_count:                   u32,
+			chamber_candidate_count:                u32,
+			stamp_count:                            u32,
+			path_stamp_count:                       u32,
+			route_pocket_stamp_count:               u32,
+			chamber_stamp_count:                    u32,
+			network_connected_candidate_count:      u32,
+			network_bridge_candidate_count:         u32,
+			network_culled_candidate_count:         u32,
+			network_bridge_stamp_count:             u32,
+			route_pocket_candidate_count:           u32,
+			route_promoted_path_candidate_count:    u32,
+			route_promoted_path_stamp_count:        u32,
+			route_follow_path_candidate_count:      u32,
+			route_follow_path_stamp_count:          u32,
 			route_follow_path_vertical_stamp_count: u32,
-			fungal_stamp_count:      u32,
-			crystal_stamp_count:     u32,
-			aquifer_stamp_count:     u32,
+			fungal_stamp_count:                     u32,
+			crystal_stamp_count:                    u32,
+			aquifer_stamp_count:                    u32,
 		}
 
 		TerrainGenerationBenchmarkCaveSelection :: struct {
-			node:                  biomes.CaveNetworkNode,
-			chunk:                 world_async.ChunkCoord,
-			vertical_support:      f32,
-			found_matching_biome:  bool,
-			streamed_underground:  bool,
+			node:                 biomes.CaveNetworkNode,
+			chunk:                world_async.ChunkCoord,
+			vertical_support:     f32,
+			found_matching_biome: bool,
+			streamed_underground: bool,
 		}
 
 		TerrainGenerationBenchmarkCaveFieldPathSelection :: struct {
@@ -558,6 +642,25 @@ when ODIN_DEBUG {
 			vertical_follow_count: u32,
 		}
 
+		TerrainGenerationBenchmarkCaveFieldPocketSelection :: struct {
+			chunk:                  world_async.ChunkCoord,
+			found:                  bool,
+			pocket_candidate_count: u32,
+			pocket_stamp_count:     u32,
+			center_x:               f32,
+			center_y:               f32,
+			center_z:               f32,
+			nearest_x:              f32,
+			nearest_y:              f32,
+			nearest_z:              f32,
+			route_dir_x:            f32,
+			route_dir_z:            f32,
+			radius:                 f32,
+			route_radius:           f32,
+			biome_id:               biomes.BiomeID,
+			score:                  i64,
+		}
+
 		TerrainGenerationBenchmarkCaveComponentMeasure :: struct {
 			found:               bool,
 			node_count:          u32,
@@ -565,53 +668,55 @@ when ODIN_DEBUG {
 		}
 
 		TerrainGenerationBenchmarkRegionStats :: struct {
-			node_count:                 u32,
-			edge_count:                 u32,
-			anchor_count:               u32,
-			water_feature_node_count:   u32,
-			water_feature_segment_count: u32,
-			water_feature_anchor_count: u32,
-			major_count:                u32,
-			water_linked_count:         u32,
-			connector_count:            u32,
-			pocket_count:               u32,
-			resource_count:             u32,
-			sealed_count:               u32,
-			fungal_count:               u32,
-			crystal_count:              u32,
-			aquifer_count:              u32,
-			rooted_macro_count:         u32,
-			mineral_macro_count:        u32,
-			aquifer_macro_count:        u32,
-			shallow_depth_count:        u32,
-			mid_depth_count:            u32,
-			deep_depth_count:           u32,
-			cave_mouth_count:           u32,
-			sinkhole_count:             u32,
-			water_anchor_count:         u32,
-			tunnel_edge_count:          u32,
-			canyon_edge_count:          u32,
-			worm_edge_count:            u32,
-			flooded_edge_count:         u32,
-			fracture_edge_count:        u32,
-			collapsed_edge_count:       u32,
-			vertical_edge_count:        u32,
-			node_edge_connected_count:  u32,
-			node_anchor_connected_count: u32,
-			node_bridge_count:          u32,
-			node_culled_count:          u32,
-			profile_room_node_count:    u32,
-			profile_room_nonmajor_count: u32,
-			component_count:            u32,
-			component_tiny_count:       u32,
-			component_tiny_node_count:  u32,
-			component_external_link_count: u32,
-			component_anchored_tiny_count: u32,
-			component_mouth_tiny_count: u32,
-			component_sinkhole_tiny_count: u32,
-			component_required_tiny_count: u32,
+			node_count:                      u32,
+			edge_count:                      u32,
+			anchor_count:                    u32,
+			water_feature_node_count:        u32,
+			water_feature_segment_count:     u32,
+			water_feature_anchor_count:      u32,
+			major_count:                     u32,
+			water_linked_count:              u32,
+			connector_count:                 u32,
+			pocket_count:                    u32,
+			resource_count:                  u32,
+			sealed_count:                    u32,
+			fungal_count:                    u32,
+			crystal_count:                   u32,
+			aquifer_count:                   u32,
+			rooted_macro_count:              u32,
+			mineral_macro_count:             u32,
+			aquifer_macro_count:             u32,
+			shallow_depth_count:             u32,
+			mid_depth_count:                 u32,
+			deep_depth_count:                u32,
+			cave_mouth_count:                u32,
+			sinkhole_count:                  u32,
+			water_anchor_count:              u32,
+			tunnel_edge_count:               u32,
+			canyon_edge_count:               u32,
+			worm_edge_count:                 u32,
+			flooded_edge_count:              u32,
+			fracture_edge_count:             u32,
+			collapsed_edge_count:            u32,
+			vertical_edge_count:             u32,
+			node_edge_connected_count:       u32,
+			node_anchor_connected_count:     u32,
+			node_bridge_count:               u32,
+			node_culled_count:               u32,
+			profile_room_node_count:         u32,
+			profile_room_nonmajor_count:     u32,
+			component_count:                 u32,
+			component_tiny_count:            u32,
+			component_tiny_node_count:       u32,
+			component_playable_tiny_count:   u32,
+			component_sealed_tiny_count:     u32,
+			component_external_link_count:   u32,
+			component_anchored_tiny_count:   u32,
+			component_mouth_tiny_count:      u32,
+			component_sinkhole_tiny_count:   u32,
+			component_required_tiny_count:   u32,
 			component_large_room_tiny_count: u32,
-			component_max_nodes:        u32,
+			component_max_nodes:             u32,
 		}
 
 		terrain_generation_benchmark_cache_clear :: proc() {
@@ -629,31 +734,37 @@ when ODIN_DEBUG {
 		terrain_generation_benchmark_chunk_for_cave_node :: proc(
 			node: biomes.CaveNetworkNode,
 		) -> world_async.ChunkCoord {
-			return chunk_coord_from_block_coord({
-				x = terrain_generation_benchmark_floor_i32(node.x),
-				y = terrain_generation_benchmark_floor_i32(node.y),
-				z = terrain_generation_benchmark_floor_i32(node.z),
-			})
+			return chunk_coord_from_block_coord(
+				{
+					x = terrain_generation_benchmark_floor_i32(node.x),
+					y = terrain_generation_benchmark_floor_i32(node.y),
+					z = terrain_generation_benchmark_floor_i32(node.z),
+				},
+			)
 		}
 
 		terrain_generation_benchmark_chunk_for_surface_water_node :: proc(
 			node: biomes.WaterFeatureNode,
 		) -> world_async.ChunkCoord {
-			return chunk_coord_from_block_coord({
-				x = terrain_generation_benchmark_floor_i32(node.x),
-				y = terrain_generation_benchmark_floor_i32(node.water_level_blocks),
-				z = terrain_generation_benchmark_floor_i32(node.z),
-			})
+			return chunk_coord_from_block_coord(
+				{
+					x = terrain_generation_benchmark_floor_i32(node.x),
+					y = terrain_generation_benchmark_floor_i32(node.water_level_blocks),
+					z = terrain_generation_benchmark_floor_i32(node.z),
+				},
+			)
 		}
 
 		terrain_generation_benchmark_chunk_for_cave_anchor :: proc(
 			anchor: biomes.CaveAnchor,
 		) -> world_async.ChunkCoord {
-			return chunk_coord_from_block_coord({
-				x = terrain_generation_benchmark_floor_i32(anchor.x),
-				y = terrain_generation_benchmark_floor_i32(anchor.y),
-				z = terrain_generation_benchmark_floor_i32(anchor.z),
-			})
+			return chunk_coord_from_block_coord(
+				{
+					x = terrain_generation_benchmark_floor_i32(anchor.x),
+					y = terrain_generation_benchmark_floor_i32(anchor.y),
+					z = terrain_generation_benchmark_floor_i32(anchor.z),
+				},
+			)
 		}
 
 		terrain_generation_benchmark_coord_append_unique :: proc(
@@ -686,7 +797,10 @@ when ODIN_DEBUG {
 				for x := -TERRAIN_GENERATION_BENCHMARK_BIOME_OWNER_SCAN_RADIUS_XZ;
 				    x <= TERRAIN_GENERATION_BENCHMARK_BIOME_OWNER_SCAN_RADIUS_XZ;
 				    x += 1 {
-					owner := biomes.FeatureGridCoord2{x = i32(x), z = i32(z)}
+					owner := biomes.FeatureGridCoord2 {
+						x = i32(x),
+						z = i32(z),
+					}
 					node := biomes.water_feature_surface_node_from_owner(key, owner)
 					if want_lake && node.kind != .Surface_Lake {
 						continue
@@ -778,8 +892,10 @@ when ODIN_DEBUG {
 			region: ^biomes.GenerationRegion,
 			node_id: biomes.FeatureID,
 		) -> TerrainGenerationBenchmarkCaveComponentMeasure {
-			start_index, start_found :=
-				terrain_generation_benchmark_cave_node_index_by_id(region, node_id)
+			start_index, start_found := terrain_generation_benchmark_cave_node_index_by_id(
+				region,
+				node_id,
+			)
 			if !start_found {
 				return {}
 			}
@@ -813,10 +929,7 @@ when ODIN_DEBUG {
 						continue
 					}
 					neighbor_index, neighbor_found :=
-						terrain_generation_benchmark_cave_node_index_by_id(
-							region,
-							neighbor_id,
-						)
+						terrain_generation_benchmark_cave_node_index_by_id(region, neighbor_id)
 					if !neighbor_found {
 						measure.external_link_count += 1
 						continue
@@ -854,14 +967,15 @@ when ODIN_DEBUG {
 						biomes.CAVE_NETWORK_SURFACE_ANCHOR_SALT,
 					)
 					legacy_emit :=
-						node.major_region || node.kind == .Vertical_Shaft ||
+						node.major_region ||
+						node.kind == .Vertical_Shaft ||
 						roll < TERRAIN_GENERATION_BENCHMARK_LEGACY_SURFACE_ANCHOR_EMIT_ROLL_MAX
 					current_emit := biomes.cave_node_should_emit_anchor(node)
 					if legacy_emit {
 						stats.legacy_emit_count += 1
 						if node.kind == .Vertical_Shaft ||
 						   roll >=
-						   TERRAIN_GENERATION_BENCHMARK_LEGACY_SURFACE_CAVE_MOUTH_ROLL_MAX {
+							   TERRAIN_GENERATION_BENCHMARK_LEGACY_SURFACE_CAVE_MOUTH_ROLL_MAX {
 							stats.legacy_sinkhole_count += 1
 						} else {
 							stats.legacy_mouth_count += 1
@@ -896,7 +1010,7 @@ when ODIN_DEBUG {
 							)
 							component_tiny =
 								component_measure.node_count <=
-								TERRAIN_GENERATION_BENCHMARK_TINY_CAVE_COMPONENT_NODE_MAX &&
+									TERRAIN_GENERATION_BENCHMARK_TINY_CAVE_COMPONENT_NODE_MAX &&
 								component_measure.external_link_count == 0
 							if component_tiny {
 								stats.current_anchor_component_tiny_count += 1
@@ -913,8 +1027,10 @@ when ODIN_DEBUG {
 							stats.current_mouth_count += 1
 							radius := math.max(f32(4), anchor.influence_radius_blocks)
 							stats.current_mouth_radius_total += radius
-							stats.current_mouth_radius_max =
-								math.max(stats.current_mouth_radius_max, radius)
+							stats.current_mouth_radius_max = math.max(
+								stats.current_mouth_radius_max,
+								radius,
+							)
 							if radius < TERRAIN_CAVE_MOUTH_SMALL_RADIUS_BLOCKS {
 								stats.current_mouth_small_count += 1
 							} else if radius < TERRAIN_CAVE_MOUTH_LARGE_RADIUS_BLOCKS {
@@ -943,8 +1059,12 @@ when ODIN_DEBUG {
 								f32(3),
 								math.min(anchor_radius * 0.75, node.connection_radius_blocks),
 							)
-							plan :=
-								terrain_density_cave_mouth_transition_plan(anchor, node, radius, link_radius)
+							plan := terrain_density_cave_mouth_transition_plan(
+								anchor,
+								node,
+								radius,
+								link_radius,
+							)
 							drop_per_run :=
 								plan.near_drop_blocks / math.max(f32(1), plan.near_run_blocks)
 							if drop_per_run <= 0.80 {
@@ -1043,8 +1163,7 @@ when ODIN_DEBUG {
 			total.current_mouth_sloped_tube_count += stats.current_mouth_sloped_tube_count
 			total.current_mouth_curved_ramp_count += stats.current_mouth_curved_ramp_count
 			total.current_mouth_spiral_ramp_count += stats.current_mouth_spiral_ramp_count
-			total.current_anchor_component_tiny_count +=
-				stats.current_anchor_component_tiny_count
+			total.current_anchor_component_tiny_count += stats.current_anchor_component_tiny_count
 			total.current_mouth_component_tiny_count += stats.current_mouth_component_tiny_count
 			total.current_sinkhole_component_tiny_count +=
 				stats.current_sinkhole_component_tiny_count
@@ -1065,9 +1184,7 @@ when ODIN_DEBUG {
 			total.vertical_count += stats.vertical_count
 		}
 
-		terrain_generation_benchmark_surface_cave_scan_stats_log_multi :: proc(
-			phase: string,
-		) {
+		terrain_generation_benchmark_surface_cave_scan_stats_log_multi :: proc(phase: string) {
 			total := TerrainGenerationBenchmarkSurfaceCaveScanStats{}
 			worst_seed: u32
 			worst_tiny_count: u32
@@ -1172,7 +1289,11 @@ when ODIN_DEBUG {
 						}
 						chunk := terrain_generation_benchmark_chunk_for_cave_node(node)
 						support := terrain_density_cave_vertical_support(node.y)
-						score := terrain_generation_benchmark_cave_selection_score(node, chunk, support)
+						score := terrain_generation_benchmark_cave_selection_score(
+							node,
+							chunk,
+							support,
+						)
 						if score > best_score {
 							best_node = node
 							best_chunk = chunk
@@ -1188,8 +1309,8 @@ when ODIN_DEBUG {
 				chunk = best_chunk,
 				vertical_support = best_support,
 				found_matching_biome = found,
-				streamed_underground =
-					best_chunk.y < 0 && best_chunk.y >= -i32(CHUNK_STREAMING_RADIUS_Y_DOWN),
+				streamed_underground = best_chunk.y < 0 &&
+				best_chunk.y >= -i32(CHUNK_STREAMING_RADIUS_Y_DOWN),
 			}
 		}
 
@@ -1249,11 +1370,13 @@ when ODIN_DEBUG {
 						if !connected {
 							continue
 						}
-						score := terrain_generation_benchmark_cave_selection_score(
-							node,
-							chunk,
-							support,
-						) + 400
+						score :=
+							terrain_generation_benchmark_cave_selection_score(
+								node,
+								chunk,
+								support,
+							) +
+							400
 						if node.role == .Resource_Chamber {
 							score += 75
 						}
@@ -1275,8 +1398,8 @@ when ODIN_DEBUG {
 				chunk = best_chunk,
 				vertical_support = best_support,
 				found_matching_biome = found,
-				streamed_underground =
-					best_chunk.y < 0 && best_chunk.y >= -i32(CHUNK_STREAMING_RADIUS_Y_DOWN),
+				streamed_underground = best_chunk.y < 0 &&
+				best_chunk.y >= -i32(CHUNK_STREAMING_RADIUS_Y_DOWN),
 			}
 		}
 
@@ -1284,10 +1407,11 @@ when ODIN_DEBUG {
 			selection: TerrainGenerationBenchmarkCaveFieldPathSelection,
 			chunk: world_async.ChunkCoord,
 		) -> i64 {
-			score := i64(selection.route_follow_count) * 1000 +
-			         i64(selection.vertical_follow_count) * 180 +
-			         i64(selection.path_stamp_count) * 90 +
-			         i64(selection.path_candidate_count) * 9
+			score :=
+				i64(selection.route_follow_count) * 1000 +
+				i64(selection.vertical_follow_count) * 180 +
+				i64(selection.path_stamp_count) * 90 +
+				i64(selection.path_candidate_count) * 9
 			score -= i64(math.abs(f32(chunk.x))) + i64(math.abs(f32(chunk.z)))
 			score -= i64(math.abs(f32(chunk.y + 1))) * 3
 			return score
@@ -1298,11 +1422,7 @@ when ODIN_DEBUG {
 			chunk: world_async.ChunkCoord,
 		) -> TerrainGenerationBenchmarkCaveFieldPathSelection {
 			origin := chunk_origin_from_coord(chunk)
-			region_coord := biomes.generation_region_coord_from_block(
-				origin.x,
-				origin.y,
-				origin.z,
-			)
+			region_coord := biomes.generation_region_coord_from_block(origin.x, origin.y, origin.z)
 			region := terrain_generation_region_for_fill(key, region_coord)
 			selection := TerrainGenerationBenchmarkCaveFieldPathSelection {
 				chunk = chunk,
@@ -1342,11 +1462,10 @@ when ODIN_DEBUG {
 						) {
 							continue
 						}
-						path_candidate :=
-							terrain_density_cave_field_sample_prefers_path(
-								field_sample,
-								vertical_support,
-							)
+						path_candidate := terrain_density_cave_field_sample_prefers_path(
+							field_sample,
+							vertical_support,
+						)
 						open_strength := field_sample.open_strength * vertical_support
 						radius := biomes.regional_terrain_field_lerp(
 							f32(3.5),
@@ -1361,11 +1480,9 @@ when ODIN_DEBUG {
 						)
 						if subterranean_sample.cells[0].biome_id == .Fungal_Vaults {
 							radius *= 1.25
-						} else if subterranean_sample.cells[0].biome_id ==
-						          .Crystal_Geode_Network {
+						} else if subterranean_sample.cells[0].biome_id == .Crystal_Geode_Network {
 							radius *= 0.82
-						} else if subterranean_sample.cells[0].biome_id ==
-						          .Buried_Aquifer_Caves {
+						} else if subterranean_sample.cells[0].biome_id == .Buried_Aquifer_Caves {
 							radius *= 1.05
 						}
 						network_sample := terrain_density_cave_field_network_sample(
@@ -1392,10 +1509,7 @@ when ODIN_DEBUG {
 						}
 						selection.path_candidate_count += 1
 						_, path_dir_y, _, route_follow :=
-							terrain_density_cave_field_path_direction(
-								field_sample,
-								network_sample,
-							)
+							terrain_density_cave_field_path_direction(field_sample, network_sample)
 						if route_follow {
 							selection.route_follow_count += 1
 							if math.abs(path_dir_y) > 0.001 {
@@ -1454,7 +1568,8 @@ when ODIN_DEBUG {
 					    offset_z <= TERRAIN_GENERATION_BENCHMARK_CAVE_FIELD_PATH_NEIGHBOR_RADIUS;
 					    offset_z += 1 {
 						for offset_x := -TERRAIN_GENERATION_BENCHMARK_CAVE_FIELD_PATH_NEIGHBOR_RADIUS;
-						    offset_x <= TERRAIN_GENERATION_BENCHMARK_CAVE_FIELD_PATH_NEIGHBOR_RADIUS;
+						    offset_x <=
+						    TERRAIN_GENERATION_BENCHMARK_CAVE_FIELD_PATH_NEIGHBOR_RADIUS;
 						    offset_x += 1 {
 							chunk := world_async.ChunkCoord {
 								x = base_chunk.x + i32(offset_x),
@@ -1469,11 +1584,10 @@ when ODIN_DEBUG {
 							if !selection.found {
 								continue
 							}
-							score :=
-								terrain_generation_benchmark_cave_field_path_selection_score(
-									selection,
-									chunk,
-								)
+							score := terrain_generation_benchmark_cave_field_path_selection_score(
+								selection,
+								chunk,
+							)
 							if score > best_score {
 								best = selection
 								best_score = score
@@ -1483,6 +1597,276 @@ when ODIN_DEBUG {
 				}
 			}
 			return best
+		}
+
+		terrain_generation_benchmark_cave_field_pocket_selection_score :: proc(
+			radius, open_strength: f32,
+			network_sample: TerrainCaveFieldNetworkSample,
+			chunk: world_async.ChunkCoord,
+		) -> i64 {
+			proximity := math.max(
+				f32(0),
+				network_sample.route_radius +
+				TERRAIN_CAVE_FIELD_ROUTE_POCKET_DISTANCE_MARGIN_BLOCKS -
+				network_sample.distance,
+			)
+			score :=
+				i64(radius * 120) +
+				i64(open_strength * 1400) +
+				i64(proximity * 75) +
+				i64(network_sample.route_radius * 55)
+			score -= i64(math.abs(f32(chunk.x))) + i64(math.abs(f32(chunk.z)))
+			score -= i64(math.abs(f32(chunk.y + 1))) * 3
+			return score
+		}
+
+		terrain_generation_benchmark_cave_field_pocket_selection_for_chunk :: proc(
+			key: biomes.FeatureGridKey,
+			chunk: world_async.ChunkCoord,
+			biome_filter: biomes.BiomeID,
+			filter_active: bool,
+		) -> TerrainGenerationBenchmarkCaveFieldPocketSelection {
+			origin := chunk_origin_from_coord(chunk)
+			region_coord := biomes.generation_region_coord_from_block(origin.x, origin.y, origin.z)
+			region := terrain_generation_region_for_fill(key, region_coord)
+			selection := TerrainGenerationBenchmarkCaveFieldPocketSelection {
+				chunk = chunk,
+				score = i64(-9223372036854775807),
+			}
+			chunk_stamp_count: u32
+			for z := TERRAIN_CAVE_FIELD_SAMPLE_STEP_BLOCKS / 2;
+			    z < CHUNK_BLOCK_LENGTH;
+			    z += TERRAIN_CAVE_FIELD_SAMPLE_STEP_BLOCKS {
+				world_z := origin.z + z
+				for y := TERRAIN_CAVE_FIELD_SAMPLE_STEP_BLOCKS / 2;
+				    y < CHUNK_BLOCK_LENGTH;
+				    y += TERRAIN_CAVE_FIELD_SAMPLE_STEP_BLOCKS {
+					world_y := origin.y + y
+					vertical_support := terrain_density_cave_vertical_support(f32(world_y))
+					if vertical_support <= 0 {
+						continue
+					}
+					for x := TERRAIN_CAVE_FIELD_SAMPLE_STEP_BLOCKS / 2;
+					    x < CHUNK_BLOCK_LENGTH;
+					    x += TERRAIN_CAVE_FIELD_SAMPLE_STEP_BLOCKS {
+						world_x := origin.x + x
+						column := terrain_biome_column_sample_direct(key, world_x, world_z)
+						depth_below_surface := column.surface_height_blocks - f32(world_y)
+						if depth_below_surface < 18 {
+							continue
+						}
+						field_sample := terrain_density_subterranean_cave_field_sample(
+							key,
+							world_x,
+							world_y,
+							world_z,
+							depth_below_surface,
+						)
+						if !terrain_density_cave_field_sample_is_candidate(
+							field_sample,
+							vertical_support,
+						) {
+							continue
+						}
+
+						path_candidate := terrain_density_cave_field_sample_prefers_path(
+							field_sample,
+							vertical_support,
+						)
+						open_strength := field_sample.open_strength * vertical_support
+						radius := biomes.regional_terrain_field_lerp(
+							f32(3.5),
+							f32(10.5),
+							open_strength,
+						)
+						subterranean_sample := biomes.subterranean_biome_field_sample(
+							key,
+							world_x,
+							world_y,
+							world_z,
+						)
+						biome_id := subterranean_sample.cells[0].biome_id
+						if filter_active && biome_id != biome_filter {
+							continue
+						}
+						if biome_id == .Fungal_Vaults {
+							radius *= 1.25
+						} else if biome_id == .Crystal_Geode_Network {
+							radius *= 0.82
+						} else if biome_id == .Buried_Aquifer_Caves {
+							radius *= 1.05
+						}
+						network_sample := terrain_density_cave_field_network_sample(
+							&region,
+							f32(world_x) + 0.5,
+							f32(world_y) + 0.5,
+							f32(world_z) + 0.5,
+							radius,
+							path_candidate,
+						)
+						if !network_sample.found ||
+						   (!network_sample.connected && !network_sample.bridgeable) {
+							continue
+						}
+						if !path_candidate &&
+						   terrain_density_cave_field_sample_prefers_route_path(
+							   field_sample,
+							   vertical_support,
+							   network_sample,
+						   ) {
+							path_candidate = true
+						}
+						route_pocket_candidate :=
+							!path_candidate &&
+							terrain_density_cave_field_sample_prefers_route_pocket(
+								field_sample,
+								vertical_support,
+								network_sample,
+							)
+						if route_pocket_candidate {
+							selection.pocket_candidate_count += 1
+						}
+						if chunk_stamp_count >= TERRAIN_CAVE_FIELD_STAMP_CAPACITY_PER_CHUNK {
+							continue
+						}
+						if path_candidate {
+							chunk_stamp_count += 1
+							continue
+						}
+						if !route_pocket_candidate &&
+						   chunk_stamp_count >=
+							   TERRAIN_CAVE_FIELD_STAMP_CAPACITY_PER_CHUNK -
+								   TERRAIN_CAVE_FIELD_PATH_STAMP_RESERVE_PER_CHUNK {
+							continue
+						}
+						if !route_pocket_candidate {
+							chunk_stamp_count += 1
+							continue
+						}
+
+						selection.pocket_stamp_count += 1
+						chunk_stamp_count += 1
+						score := terrain_generation_benchmark_cave_field_pocket_selection_score(
+							radius,
+							open_strength,
+							network_sample,
+							chunk,
+						)
+						if !selection.found || score > selection.score {
+							selection.found = true
+							selection.center_x = f32(world_x) + 0.5
+							selection.center_y = f32(world_y) + 0.5
+							selection.center_z = f32(world_z) + 0.5
+							selection.nearest_x = network_sample.nearest_x
+							selection.nearest_y = network_sample.nearest_y
+							selection.nearest_z = network_sample.nearest_z
+							selection.route_dir_x = network_sample.route_dir_x
+							selection.route_dir_z = network_sample.route_dir_z
+							selection.radius = radius
+							selection.route_radius = network_sample.route_radius
+							selection.biome_id = biome_id
+							selection.score = score
+						}
+					}
+				}
+			}
+			return selection
+		}
+
+		terrain_generation_benchmark_cave_field_pocket_selection :: proc(
+			key: biomes.FeatureGridKey,
+			biome_filter: biomes.BiomeID = {},
+			filter_active: bool = false,
+		) -> TerrainGenerationBenchmarkCaveFieldPocketSelection {
+			best := TerrainGenerationBenchmarkCaveFieldPocketSelection {
+				score = i64(-9223372036854775807),
+			}
+			fungal_selection := terrain_generation_benchmark_cave_selection_for_biome(
+				key,
+				.Fungal_Vaults,
+				{x = 0, y = -1, z = 0},
+			)
+			crystal_selection := terrain_generation_benchmark_cave_selection_for_biome(
+				key,
+				.Crystal_Geode_Network,
+				{x = 1, y = -1, z = 0},
+			)
+			aquifer_selection := terrain_generation_benchmark_cave_selection_for_biome(
+				key,
+				.Buried_Aquifer_Caves,
+				{x = 0, y = -1, z = 1},
+			)
+			profile_room_selection := terrain_generation_benchmark_cave_profile_room_selection(
+				key,
+				{x = 0, y = -1, z = 0},
+			)
+			base_chunks := [?]world_async.ChunkCoord {
+				{0, -1, 0},
+				{0, -2, 0},
+				fungal_selection.chunk,
+				crystal_selection.chunk,
+				aquifer_selection.chunk,
+				profile_room_selection.chunk,
+			}
+			for base_chunk in base_chunks {
+				for chunk_y := base_chunk.y - 1; chunk_y <= base_chunk.y + 1; chunk_y += 1 {
+					if chunk_y >= 0 || chunk_y < -i32(CHUNK_STREAMING_RADIUS_Y_DOWN) {
+						continue
+					}
+					for offset_z := -TERRAIN_GENERATION_BENCHMARK_CAVE_FIELD_POCKET_NEIGHBOR_RADIUS;
+					    offset_z <= TERRAIN_GENERATION_BENCHMARK_CAVE_FIELD_POCKET_NEIGHBOR_RADIUS;
+					    offset_z += 1 {
+						for offset_x := -TERRAIN_GENERATION_BENCHMARK_CAVE_FIELD_POCKET_NEIGHBOR_RADIUS;
+						    offset_x <=
+						    TERRAIN_GENERATION_BENCHMARK_CAVE_FIELD_POCKET_NEIGHBOR_RADIUS;
+						    offset_x += 1 {
+							chunk := world_async.ChunkCoord {
+								x = base_chunk.x + i32(offset_x),
+								y = chunk_y,
+								z = base_chunk.z + i32(offset_z),
+							}
+							selection :=
+								terrain_generation_benchmark_cave_field_pocket_selection_for_chunk(
+									key,
+									chunk,
+									biome_filter,
+									filter_active,
+								)
+							if !selection.found {
+								continue
+							}
+							if !best.found || selection.score > best.score {
+								best = selection
+							}
+						}
+					}
+				}
+			}
+			return best
+		}
+
+		terrain_generation_benchmark_cave_field_pocket_selection_log :: proc(
+			selection: TerrainGenerationBenchmarkCaveFieldPocketSelection,
+		) {
+			log.infof(
+				"TERRAIN_GENERATION_BENCH_CAVE_FIELD_POCKET_SELECTION found=%v chunk=(%d,%d,%d) center=(%.2f,%.2f,%.2f) nearest=(%.2f,%.2f,%.2f) radius=%.2f route_radius=%.2f biome=%v pocket_candidates=%d pocket_stamps=%d score=%d",
+				selection.found,
+				selection.chunk.x,
+				selection.chunk.y,
+				selection.chunk.z,
+				selection.center_x,
+				selection.center_y,
+				selection.center_z,
+				selection.nearest_x,
+				selection.nearest_y,
+				selection.nearest_z,
+				selection.radius,
+				selection.route_radius,
+				selection.biome_id,
+				selection.pocket_candidate_count,
+				selection.pocket_stamp_count,
+				selection.score,
+			)
 		}
 
 		terrain_generation_benchmark_cave_field_path_selection_log :: proc(
@@ -1506,11 +1890,7 @@ when ODIN_DEBUG {
 			selection: TerrainGenerationBenchmarkCaveSelection,
 		) {
 			origin := chunk_origin_from_coord(selection.chunk)
-			region_coord := biomes.generation_region_coord_from_block(
-				origin.x,
-				origin.y,
-				origin.z,
-			)
+			region_coord := biomes.generation_region_coord_from_block(origin.x, origin.y, origin.z)
 			node := selection.node
 			log.infof(
 				"TERRAIN_GENERATION_BENCH_CAVE_SELECTION label=%s found=%v streamed_underground=%v owner=(%d,%d,%d) node=(%.2f,%.2f,%.2f) chunk=(%d,%d,%d) origin_y=%d region=(%d,%d,%d) support=%.3f radius=%.2f major=%v kind=%v role=%v biome=%v",
@@ -1539,9 +1919,7 @@ when ODIN_DEBUG {
 			)
 		}
 
-		terrain_generation_benchmark_cave_selections_log :: proc(
-			key: biomes.FeatureGridKey,
-		) {
+		terrain_generation_benchmark_cave_selections_log :: proc(key: biomes.FeatureGridKey) {
 			terrain_generation_benchmark_cave_selection_log(
 				"fungal",
 				terrain_generation_benchmark_cave_selection_for_biome(
@@ -1661,10 +2039,15 @@ when ODIN_DEBUG {
 
 			if anchors.mouth_found {
 				mouth_chunk := terrain_generation_benchmark_chunk_for_cave_anchor(anchors.mouth)
-				mouth_node_chunk :=
-					terrain_generation_benchmark_chunk_for_cave_node(anchors.mouth_node)
+				mouth_node_chunk := terrain_generation_benchmark_chunk_for_cave_node(
+					anchors.mouth_node,
+				)
 				base = mouth_chunk
-				terrain_generation_benchmark_coord_append_unique(&coords, &coord_count, mouth_chunk)
+				terrain_generation_benchmark_coord_append_unique(
+					&coords,
+					&coord_count,
+					mouth_chunk,
+				)
 				terrain_generation_benchmark_coord_append_unique(
 					&coords,
 					&coord_count,
@@ -1683,10 +2066,12 @@ when ODIN_DEBUG {
 			}
 
 			if anchors.sinkhole_found {
-				sinkhole_chunk :=
-					terrain_generation_benchmark_chunk_for_cave_anchor(anchors.sinkhole)
-				sinkhole_node_chunk :=
-					terrain_generation_benchmark_chunk_for_cave_node(anchors.sinkhole_node)
+				sinkhole_chunk := terrain_generation_benchmark_chunk_for_cave_anchor(
+					anchors.sinkhole,
+				)
+				sinkhole_node_chunk := terrain_generation_benchmark_chunk_for_cave_node(
+					anchors.sinkhole_node,
+				)
 				if !anchors.mouth_found {
 					base = sinkhole_chunk
 				}
@@ -1737,7 +2122,9 @@ when ODIN_DEBUG {
 			return coords
 		}
 
-		terrain_generation_benchmark_checksum :: proc(view: world_async.ChunkVoxelView) -> (
+		terrain_generation_benchmark_checksum :: proc(
+			view: world_async.ChunkVoxelView,
+		) -> (
 			checksum: u64,
 			solid_count: u32,
 			water_count: u32,
@@ -1785,9 +2172,9 @@ when ODIN_DEBUG {
 		) -> TerrainGenerationBenchmarkSurfaceWaterStats {
 			key := terrain_generation_key_make(seed)
 			stats := TerrainGenerationBenchmarkSurfaceWaterStats {
-				min_surface_height_blocks = max(f32),
-				max_surface_height_blocks = -max(f32),
-			}
+					min_surface_height_blocks = max(f32),
+					max_surface_height_blocks = -max(f32),
+				}
 			for chunk_coord in coords {
 				origin := chunk_origin_from_coord(chunk_coord)
 				region_coord := biomes.generation_region_coord_from_block(
@@ -1903,21 +2290,21 @@ when ODIN_DEBUG {
 							continue
 						}
 						stats.local_water_feature_columns += 1
-						local_water_below := column.surface_height_blocks <
-						                     hydrology_sample.water_level_blocks
+						local_water_below :=
+							column.surface_height_blocks < hydrology_sample.water_level_blocks
 						if local_water_below {
 							stats.local_water_below_columns += 1
 						}
-						local_water_fill := column.water_fill_active &&
-						                    column.water_level_blocks + 0.001 >=
-						                    hydrology_sample.water_level_blocks
+						local_water_fill :=
+							column.water_fill_active &&
+							column.water_level_blocks + 0.001 >=
+								hydrology_sample.water_level_blocks
 						if local_water_fill {
 							stats.local_water_fill_columns += 1
 						}
 						if local_water_below && !local_water_fill {
 							water_depth :=
-								hydrology_sample.water_level_blocks -
-								column.surface_height_blocks
+								hydrology_sample.water_level_blocks - column.surface_height_blocks
 							stats.local_water_gap_columns += 1
 							if water_influence > stats.max_unfilled_water_influence {
 								stats.max_unfilled_water_influence = water_influence
@@ -2007,8 +2394,7 @@ when ODIN_DEBUG {
 					for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
 						world_x := origin.x + x
 						dx := world_x - anchor_x
-						mouth_anchor :=
-							anchor.kind == .Cave_Mouth || anchor.kind == .Ravine_Breach
+						mouth_anchor := anchor.kind == .Cave_Mouth || anchor.kind == .Ravine_Breach
 						forward_unit := f32(0)
 						side_unit := f32(0)
 						if mouth_anchor {
@@ -2036,42 +2422,55 @@ when ODIN_DEBUG {
 								side_abs := math.abs(side_unit)
 								if depth_below_surface >= -1 &&
 								   depth_below_surface <= radius / 2 &&
-								   forward_unit >= -0.28 && forward_unit <= 0.45 &&
+								   forward_unit >= -0.28 &&
+								   forward_unit <= 0.45 &&
 								   side_abs <= 0.52 {
 									stats.mouth_aperture_open_blocks += 1
 								}
 								if depth_below_surface >= 0 &&
 								   depth_below_surface <= radius * 3 / 2 &&
-								   forward_unit >= 0.35 && forward_unit <= 1.35 &&
+								   forward_unit >= 0.35 &&
+								   forward_unit <= 1.35 &&
 								   side_abs <= 0.72 {
 									stats.mouth_throat_open_blocks += 1
 								}
 								if depth_below_surface >= radius / 2 &&
 								   depth_below_surface <= radius * 3 &&
-								   forward_unit >= 1.35 && forward_unit <= 2.65 &&
+								   forward_unit >= 1.35 &&
+								   forward_unit <= 2.65 &&
 								   side_abs <= 0.82 {
 									stats.mouth_inner_open_blocks += 1
 								}
 								if depth_below_surface >= 0 &&
 								   depth_below_surface <= radius &&
-								   forward_unit >= -0.10 && forward_unit <= 1.25 &&
+								   forward_unit >= -0.10 &&
+								   forward_unit <= 1.25 &&
 								   side_abs >= 0.95 {
 									stats.mouth_outer_carve_open_blocks += 1
 								}
-								if depth_below_surface >= 0 &&
-								   depth_below_surface <= radius {
+								if depth_below_surface >= -1 &&
+								   depth_below_surface <= radius / 2 &&
+								   forward_unit >= -0.78 &&
+								   forward_unit <= 0.20 &&
+								   side_abs <= 1.18 {
+									stats.mouth_exterior_apron_open_blocks += 1
+								}
+								if depth_below_surface >= 0 && depth_below_surface <= radius {
 									if side_abs <= 0.34 && forward_abs <= 0.82 {
 										stats.mouth_lower_center_open_blocks += 1
 									}
-									if side_abs >= 0.36 && side_abs <= 0.86 &&
+									if side_abs >= 0.36 &&
+									   side_abs <= 0.86 &&
 									   forward_abs <= 0.88 {
 										stats.mouth_lower_side_band_open_blocks += 1
 									}
 								}
 								if depth_below_surface >= radius / 3 &&
 								   depth_below_surface <= radius * 2 &&
-								   side_abs >= 0.46 && side_abs <= 0.94 &&
-								   forward_unit >= -0.12 && forward_unit <= 2.35 {
+								   side_abs >= 0.46 &&
+								   side_abs <= 0.94 &&
+								   forward_unit >= -0.12 &&
+								   forward_unit <= 2.35 {
 									stats.mouth_side_pocket_open_blocks += 1
 								}
 							}
@@ -2127,18 +2526,9 @@ when ODIN_DEBUG {
 			stats := TerrainGenerationBenchmarkSurfaceCaveStats {
 				min_open_blocks = 0xffffffff,
 			}
-				selected := [?]biomes.CaveAnchor {
-				anchors.mouth,
-				anchors.sinkhole,
-			}
-			nodes := [?]biomes.CaveNetworkNode {
-				anchors.mouth_node,
-				anchors.sinkhole_node,
-			}
-			found := [?]bool {
-				anchors.mouth_found,
-				anchors.sinkhole_found,
-			}
+			selected := [?]biomes.CaveAnchor{anchors.mouth, anchors.sinkhole}
+			nodes := [?]biomes.CaveNetworkNode{anchors.mouth_node, anchors.sinkhole_node}
+			found := [?]bool{anchors.mouth_found, anchors.sinkhole_found}
 
 			for anchor, anchor_index in selected {
 				if !found[anchor_index] {
@@ -2149,10 +2539,7 @@ when ODIN_DEBUG {
 				case .Cave_Mouth:
 					stats.mouth_count += 1
 					opening_radius := math.max(f32(4), anchor.influence_radius_blocks)
-					anchor_radius := math.max(
-						f32(3),
-						anchor.influence_radius_blocks * 0.55,
-					)
+					anchor_radius := math.max(f32(3), anchor.influence_radius_blocks * 0.55)
 					link_radius := math.max(
 						f32(3),
 						math.min(
@@ -2230,7 +2617,7 @@ when ODIN_DEBUG {
 				seed,
 			)
 			log.infof(
-				"TERRAIN_GENERATION_BENCH_SURFACE_CAVE phase=%s selected=%d mouth=%d sinkhole=%d open_anchor=%d sealed_anchor=%d open_blocks=%d mouth_open=%d sinkhole_open=%d mouth_aperture=%d mouth_throat=%d mouth_inner=%d mouth_outer=%d mouth_lower_center=%d mouth_lower_side=%d mouth_side_pocket=%d sinkhole_upper_center=%d sinkhole_upper_ledge=%d sinkhole_upper_outer=%d sinkhole_upper_side=%d sinkhole_upper_end=%d water_blocks=%d solid_blocks=%d near_surface_open=%d sub_surface_open=%d max_open_depth=%d min_open_blocks=%d mouth_link_run=%.2f mouth_link_drop=%.2f mouth_drop_per_run=%.3f mouth_bend_run=%.2f mouth_bend_drop=%.2f mouth_bend_drop_per_run=%.3f mouth_handoff_run=%.2f mouth_handoff_drop=%.2f mouth_handoff_drop_per_run=%.3f",
+				"TERRAIN_GENERATION_BENCH_SURFACE_CAVE phase=%s selected=%d mouth=%d sinkhole=%d open_anchor=%d sealed_anchor=%d open_blocks=%d mouth_open=%d sinkhole_open=%d mouth_aperture=%d mouth_throat=%d mouth_inner=%d mouth_outer=%d mouth_apron=%d mouth_lower_center=%d mouth_lower_side=%d mouth_side_pocket=%d sinkhole_upper_center=%d sinkhole_upper_ledge=%d sinkhole_upper_outer=%d sinkhole_upper_side=%d sinkhole_upper_end=%d water_blocks=%d solid_blocks=%d near_surface_open=%d sub_surface_open=%d max_open_depth=%d min_open_blocks=%d mouth_link_run=%.2f mouth_link_drop=%.2f mouth_drop_per_run=%.3f mouth_bend_run=%.2f mouth_bend_drop=%.2f mouth_bend_drop_per_run=%.3f mouth_handoff_run=%.2f mouth_handoff_drop=%.2f mouth_handoff_drop_per_run=%.3f",
 				phase,
 				stats.selected_anchor_count,
 				stats.mouth_count,
@@ -2244,6 +2631,7 @@ when ODIN_DEBUG {
 				stats.mouth_throat_open_blocks,
 				stats.mouth_inner_open_blocks,
 				stats.mouth_outer_carve_open_blocks,
+				stats.mouth_exterior_apron_open_blocks,
 				stats.mouth_lower_center_open_blocks,
 				stats.mouth_lower_side_band_open_blocks,
 				stats.mouth_side_pocket_open_blocks,
@@ -2290,8 +2678,8 @@ when ODIN_DEBUG {
 			}
 
 			anchors := TerrainGenerationBenchmarkSurfaceCaveAnchors {
-				mouth = anchor,
-				mouth_node = node,
+				mouth       = anchor,
+				mouth_node  = node,
 				mouth_found = true,
 			}
 			coords := terrain_generation_benchmark_surface_cave_coords_make(anchors)
@@ -2313,8 +2701,7 @@ when ODIN_DEBUG {
 					f32(stats.mouth_outer_carve_open_blocks) /
 					f32(stats.mouth_aperture_open_blocks)
 				throat_per_aperture =
-					f32(stats.mouth_throat_open_blocks) /
-					f32(stats.mouth_aperture_open_blocks)
+					f32(stats.mouth_throat_open_blocks) / f32(stats.mouth_aperture_open_blocks)
 			}
 			if stats.mouth_throat_open_blocks > 0 {
 				inner_per_throat =
@@ -2322,7 +2709,7 @@ when ODIN_DEBUG {
 			}
 
 			log.infof(
-				"TERRAIN_GENERATION_BENCH_SURFACE_CAVE_MOUTH_SIZE phase=%s label=%s found=%v style=%v owner=(%d,%d,%d) anchor=(%.2f,%.2f,%.2f) node=(%.2f,%.2f,%.2f) radius=%.2f size_support=%.3f open_blocks=%d aperture=%d throat=%d inner=%d outer=%d lower_center=%d lower_side=%d side_pocket=%d water_blocks=%d solid_blocks=%d max_open_depth=%d min_open_blocks=%d link_run=%.2f link_drop=%.2f drop_per_run=%.3f bend_run=%.2f bend_drop=%.2f bend_drop_per_run=%.3f handoff_run=%.2f handoff_drop=%.2f handoff_drop_per_run=%.3f outer_per_aperture=%.3f throat_per_aperture=%.3f inner_per_throat=%.3f",
+				"TERRAIN_GENERATION_BENCH_SURFACE_CAVE_MOUTH_SIZE phase=%s label=%s found=%v style=%v owner=(%d,%d,%d) anchor=(%.2f,%.2f,%.2f) node=(%.2f,%.2f,%.2f) radius=%.2f size_support=%.3f open_blocks=%d aperture=%d throat=%d inner=%d outer=%d apron=%d lower_center=%d lower_side=%d side_pocket=%d water_blocks=%d solid_blocks=%d max_open_depth=%d min_open_blocks=%d link_run=%.2f link_drop=%.2f drop_per_run=%.3f bend_run=%.2f bend_drop=%.2f bend_drop_per_run=%.3f handoff_run=%.2f handoff_drop=%.2f handoff_drop_per_run=%.3f outer_per_aperture=%.3f throat_per_aperture=%.3f inner_per_throat=%.3f",
 				phase,
 				label,
 				found,
@@ -2343,6 +2730,7 @@ when ODIN_DEBUG {
 				stats.mouth_throat_open_blocks,
 				stats.mouth_inner_open_blocks,
 				stats.mouth_outer_carve_open_blocks,
+				stats.mouth_exterior_apron_open_blocks,
 				stats.mouth_lower_center_open_blocks,
 				stats.mouth_lower_side_band_open_blocks,
 				stats.mouth_side_pocket_open_blocks,
@@ -2758,11 +3146,10 @@ when ODIN_DEBUG {
 								continue
 							}
 
-							path_candidate :=
-								terrain_density_cave_field_sample_prefers_path(
-									field_sample,
-									vertical_support,
-								)
+							path_candidate := terrain_density_cave_field_sample_prefers_path(
+								field_sample,
+								vertical_support,
+							)
 							stats.candidate_count += 1
 							open_strength := field_sample.open_strength * vertical_support
 							radius := biomes.regional_terrain_field_lerp(
@@ -2778,9 +3165,11 @@ when ODIN_DEBUG {
 							)
 							if subterranean_sample.cells[0].biome_id == .Fungal_Vaults {
 								radius *= 1.25
-							} else if subterranean_sample.cells[0].biome_id == .Crystal_Geode_Network {
+							} else if subterranean_sample.cells[0].biome_id ==
+							   .Crystal_Geode_Network {
 								radius *= 0.82
-							} else if subterranean_sample.cells[0].biome_id == .Buried_Aquifer_Caves {
+							} else if subterranean_sample.cells[0].biome_id ==
+							   .Buried_Aquifer_Caves {
 								radius *= 1.05
 							}
 							network_sample := terrain_density_cave_field_network_sample(
@@ -2846,8 +3235,8 @@ when ODIN_DEBUG {
 							}
 							if !path_candidate &&
 							   chunk_stamp_count >=
-							   TERRAIN_CAVE_FIELD_STAMP_CAPACITY_PER_CHUNK -
-							   TERRAIN_CAVE_FIELD_PATH_STAMP_RESERVE_PER_CHUNK {
+								   TERRAIN_CAVE_FIELD_STAMP_CAPACITY_PER_CHUNK -
+									   TERRAIN_CAVE_FIELD_PATH_STAMP_RESERVE_PER_CHUNK {
 								continue
 							}
 
@@ -2949,6 +3338,7 @@ when ODIN_DEBUG {
 				component_sinkhole_count: u32
 				component_required_count: u32
 				component_large_room_count: u32
+				component_sealed_count: u32
 				component_external_link_count: u32
 
 				visited[start_index] = true
@@ -2961,19 +3351,23 @@ when ODIN_DEBUG {
 					component_node_count += 1
 					node := region.cave_network_nodes[node_index]
 
+					if node.role == .Sealed_Secret {
+						component_sealed_count += 1
+					}
 					if biomes.cave_region_role_requires_connectivity(node.role) {
 						component_required_count += 1
 					}
-					if terrain_density_cave_node_uses_profile_room(node) ||
-					   node.radius_blocks >= TERRAIN_CAVE_NODE_ISOLATED_CULL_RADIUS_BLOCKS {
+					if node.role != .Sealed_Secret &&
+					   (terrain_density_cave_node_uses_profile_room(node) ||
+							   node.radius_blocks >=
+								   TERRAIN_CAVE_NODE_ISOLATED_CULL_RADIUS_BLOCKS) {
 						component_large_room_count += 1
 					}
 					for anchor_index := u32(0);
 					    anchor_index < region.cave_anchor_count;
 					    anchor_index += 1 {
 						anchor := region.cave_anchors[anchor_index]
-						if anchor.feature_id != node.id &&
-						   anchor.target_feature_id != node.id {
+						if anchor.feature_id != node.id && anchor.target_feature_id != node.id {
 							continue
 						}
 						component_anchor_count += 1
@@ -2998,10 +3392,7 @@ when ODIN_DEBUG {
 							continue
 						}
 						neighbor_index, neighbor_found :=
-							terrain_generation_benchmark_cave_node_index_by_id(
-								region,
-								neighbor_id,
-							)
+							terrain_generation_benchmark_cave_node_index_by_id(region, neighbor_id)
 						if !neighbor_found {
 							component_external_link_count += 1
 							continue
@@ -3020,11 +3411,16 @@ when ODIN_DEBUG {
 				}
 				tiny_component :=
 					component_node_count <=
-					TERRAIN_GENERATION_BENCHMARK_TINY_CAVE_COMPONENT_NODE_MAX &&
+						TERRAIN_GENERATION_BENCHMARK_TINY_CAVE_COMPONENT_NODE_MAX &&
 					component_external_link_count == 0
 				if tiny_component {
 					stats.component_tiny_count += 1
 					stats.component_tiny_node_count += component_node_count
+					if component_sealed_count == component_node_count {
+						stats.component_sealed_tiny_count += 1
+					} else {
+						stats.component_playable_tiny_count += 1
+					}
 					if component_anchor_count > 0 {
 						stats.component_anchored_tiny_count += 1
 					}
@@ -3048,13 +3444,13 @@ when ODIN_DEBUG {
 			region: ^biomes.GenerationRegion,
 		) -> TerrainGenerationBenchmarkRegionStats {
 			stats := TerrainGenerationBenchmarkRegionStats {
-				node_count                  = region.cave_network_node_count,
-				edge_count                  = region.cave_network_edge_count,
-				anchor_count                = region.cave_anchor_count,
-				water_feature_node_count    = region.water_feature_node_count,
-				water_feature_segment_count = region.water_feature_segment_count,
-				water_feature_anchor_count  = region.water_feature_anchor_count,
-			}
+					node_count                  = region.cave_network_node_count,
+					edge_count                  = region.cave_network_edge_count,
+					anchor_count                = region.cave_anchor_count,
+					water_feature_node_count    = region.water_feature_node_count,
+					water_feature_segment_count = region.water_feature_segment_count,
+					water_feature_anchor_count  = region.water_feature_anchor_count,
+				}
 			terrain_generation_benchmark_region_component_stats_add(&stats, region)
 			for i := u32(0); i < region.cave_network_node_count; i += 1 {
 				node := region.cave_network_nodes[i]
@@ -3146,7 +3542,9 @@ when ODIN_DEBUG {
 					stats.cave_mouth_count += 1
 				case .Sinkhole:
 					stats.sinkhole_count += 1
-				case .Lakebed_Breach, .Seabed_Breach, .Underground_River_Source,
+				case .Lakebed_Breach,
+				     .Seabed_Breach,
+				     .Underground_River_Source,
 				     .Underground_River_Sink:
 					stats.water_anchor_count += 1
 				}
@@ -3198,6 +3596,8 @@ when ODIN_DEBUG {
 			total.component_count += stats.component_count
 			total.component_tiny_count += stats.component_tiny_count
 			total.component_tiny_node_count += stats.component_tiny_node_count
+			total.component_playable_tiny_count += stats.component_playable_tiny_count
+			total.component_sealed_tiny_count += stats.component_sealed_tiny_count
 			total.component_external_link_count += stats.component_external_link_count
 			total.component_anchored_tiny_count += stats.component_anchored_tiny_count
 			total.component_mouth_tiny_count += stats.component_mouth_tiny_count
@@ -3215,7 +3615,7 @@ when ODIN_DEBUG {
 			stats: TerrainGenerationBenchmarkRegionStats,
 		) {
 			log.infof(
-				"TERRAIN_GENERATION_BENCH_REGION coord=(%d,%d,%d) nodes=%d edges=%d anchors=%d water_nodes=%d water_segments=%d water_feature_anchors=%d major=%d water_linked=%d connector=%d pocket=%d resource=%d sealed=%d fungal=%d crystal=%d aquifer=%d rooted_macro=%d mineral_macro=%d aquifer_macro=%d shallow=%d mid=%d deep=%d cave_mouth=%d sinkhole=%d water_anchor=%d edge_tunnel=%d edge_canyon=%d edge_worm=%d edge_flooded=%d edge_fracture=%d edge_collapsed=%d edge_vertical=%d node_edge_connected=%d node_anchor_connected=%d node_bridge=%d node_culled=%d profile_room=%d profile_room_nonmajor=%d components=%d tiny_components=%d tiny_component_nodes=%d component_external_links=%d anchored_tiny_components=%d mouth_tiny_components=%d sinkhole_tiny_components=%d required_tiny_components=%d large_room_tiny_components=%d max_component_nodes=%d",
+				"TERRAIN_GENERATION_BENCH_REGION coord=(%d,%d,%d) nodes=%d edges=%d anchors=%d water_nodes=%d water_segments=%d water_feature_anchors=%d major=%d water_linked=%d connector=%d pocket=%d resource=%d sealed=%d fungal=%d crystal=%d aquifer=%d rooted_macro=%d mineral_macro=%d aquifer_macro=%d shallow=%d mid=%d deep=%d cave_mouth=%d sinkhole=%d water_anchor=%d edge_tunnel=%d edge_canyon=%d edge_worm=%d edge_flooded=%d edge_fracture=%d edge_collapsed=%d edge_vertical=%d node_edge_connected=%d node_anchor_connected=%d node_bridge=%d node_culled=%d profile_room=%d profile_room_nonmajor=%d components=%d tiny_components=%d tiny_component_nodes=%d playable_tiny_components=%d sealed_tiny_components=%d component_external_links=%d anchored_tiny_components=%d mouth_tiny_components=%d sinkhole_tiny_components=%d required_tiny_components=%d large_room_tiny_components=%d max_component_nodes=%d",
 				region_coord.x,
 				region_coord.y,
 				region_coord.z,
@@ -3259,6 +3659,8 @@ when ODIN_DEBUG {
 				stats.component_count,
 				stats.component_tiny_count,
 				stats.component_tiny_node_count,
+				stats.component_playable_tiny_count,
+				stats.component_sealed_tiny_count,
 				stats.component_external_link_count,
 				stats.component_anchored_tiny_count,
 				stats.component_mouth_tiny_count,
@@ -3304,7 +3706,7 @@ when ODIN_DEBUG {
 				terrain_generation_benchmark_region_stats_log_one(region_coord, stats)
 			}
 			log.infof(
-				"TERRAIN_GENERATION_BENCH_REGION_SUMMARY regions=%d nodes=%d edges=%d anchors=%d water_nodes=%d water_segments=%d water_feature_anchors=%d major=%d water_linked=%d connector=%d pocket=%d resource=%d sealed=%d fungal=%d crystal=%d aquifer=%d rooted_macro=%d mineral_macro=%d aquifer_macro=%d shallow=%d mid=%d deep=%d cave_mouth=%d sinkhole=%d water_anchor=%d edge_tunnel=%d edge_canyon=%d edge_worm=%d edge_flooded=%d edge_fracture=%d edge_collapsed=%d edge_vertical=%d node_edge_connected=%d node_anchor_connected=%d node_bridge=%d node_culled=%d profile_room=%d profile_room_nonmajor=%d components=%d tiny_components=%d tiny_component_nodes=%d component_external_links=%d anchored_tiny_components=%d mouth_tiny_components=%d sinkhole_tiny_components=%d required_tiny_components=%d large_room_tiny_components=%d max_component_nodes=%d",
+				"TERRAIN_GENERATION_BENCH_REGION_SUMMARY regions=%d nodes=%d edges=%d anchors=%d water_nodes=%d water_segments=%d water_feature_anchors=%d major=%d water_linked=%d connector=%d pocket=%d resource=%d sealed=%d fungal=%d crystal=%d aquifer=%d rooted_macro=%d mineral_macro=%d aquifer_macro=%d shallow=%d mid=%d deep=%d cave_mouth=%d sinkhole=%d water_anchor=%d edge_tunnel=%d edge_canyon=%d edge_worm=%d edge_flooded=%d edge_fracture=%d edge_collapsed=%d edge_vertical=%d node_edge_connected=%d node_anchor_connected=%d node_bridge=%d node_culled=%d profile_room=%d profile_room_nonmajor=%d components=%d tiny_components=%d tiny_component_nodes=%d playable_tiny_components=%d sealed_tiny_components=%d component_external_links=%d anchored_tiny_components=%d mouth_tiny_components=%d sinkhole_tiny_components=%d required_tiny_components=%d large_room_tiny_components=%d max_component_nodes=%d",
 				seen_count,
 				total.node_count,
 				total.edge_count,
@@ -3346,6 +3748,8 @@ when ODIN_DEBUG {
 				total.component_count,
 				total.component_tiny_count,
 				total.component_tiny_node_count,
+				total.component_playable_tiny_count,
+				total.component_sealed_tiny_count,
 				total.component_external_link_count,
 				total.component_anchored_tiny_count,
 				total.component_mouth_tiny_count,
@@ -3363,7 +3767,10 @@ when ODIN_DEBUG {
 			reset_cache_each_iteration: bool,
 			view: ^world_async.ChunkVoxelView,
 		) {
-			log.assertf(iterations > 0, "terrain generation benchmark iterations must be greater than zero")
+			log.assertf(
+				iterations > 0,
+				"terrain generation benchmark iterations must be greater than zero",
+			)
 			terrain_generation_benchmark_cache_clear()
 			for coord in coords {
 				terrain_heightfield_voxel_view_fill(view, coord, seed)
@@ -3381,8 +3788,11 @@ when ODIN_DEBUG {
 			duration := time.tick_since(start)
 
 			chunk_iterations := iterations * u32(len(coords))
-			checksum, solid_count, water_count :=
-				terrain_generation_benchmark_checksum_coords(view, coords, seed)
+			checksum, solid_count, water_count := terrain_generation_benchmark_checksum_coords(
+				view,
+				coords,
+				seed,
+			)
 			total_ms := time.duration_milliseconds(duration)
 			avg_us := time.duration_microseconds(duration) / f64(chunk_iterations)
 			log.infof(
@@ -3399,12 +3809,4058 @@ when ODIN_DEBUG {
 			)
 		}
 
+		when TERRAIN_GENERATION_BENCHMARK_CAPTURE_CAVE_SLICES {
+			terrain_generation_benchmark_cave_slice_chunk_view_get :: proc(
+				cache: ^TerrainGenerationBenchmarkCaveSliceChunkCache,
+				coord: world_async.ChunkCoord,
+				seed: u32,
+				allocator: mem.Allocator,
+			) -> ^world_async.ChunkVoxelView {
+				for i := u32(0); i < cache.count; i += 1 {
+					if cache.entries[i].valid && cache.entries[i].coord == coord {
+						return &cache.entries[i].view
+					}
+				}
+				entry: ^TerrainGenerationBenchmarkCaveSliceChunkCacheEntry
+				if cache.count < TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_CHUNK_CACHE_CAPACITY {
+					entry = &cache.entries[cache.count]
+					cache.count += 1
+				} else {
+					entry = &cache.entries[cache.next_reuse_index]
+					cache.next_reuse_index =
+						(cache.next_reuse_index + 1) %
+						TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_CHUNK_CACHE_CAPACITY
+				}
+				entry.coord = coord
+				entry.valid = true
+				if len(entry.view.blocks) != CHUNK_BLOCK_COUNT {
+					chunk_voxel_view_alloc(&entry.view, allocator)
+				}
+				terrain_heightfield_voxel_view_fill(&entry.view, coord, seed)
+				return &entry.view
+			}
+
+			terrain_generation_benchmark_cave_slice_pixel :: proc(
+				view: ^world_async.ChunkVoxelView,
+				local: world_async.BlockCoord,
+			) -> u8 {
+				index := chunk_block_index(u32(local.x), u32(local.y), u32(local.z))
+				palette := terrain_material_palette_index(view.blocks.material_id[index])
+				if palette == TERRAIN_WATER_MAT_ID {
+					return '~'
+				}
+				if view.blocks.occupancy[index] == .Empty {
+					return '.'
+				}
+				switch palette {
+				case TERRAIN_GRASS_MAT_ID:
+					return 'g'
+				case TERRAIN_DIRT_MAT_ID:
+					return 'd'
+				case TERRAIN_WET_MARSH_MAT_ID:
+					return 'm'
+				case TERRAIN_CORRUPTED_ASH_MAT_ID:
+					return 'x'
+				case TERRAIN_AQUIFER_WALL_MAT_ID:
+					return 'a'
+				case TERRAIN_CRYSTAL_MAT_ID:
+					return 'c'
+				}
+				return '#'
+			}
+
+			terrain_generation_benchmark_cave_view_sample_pixel :: proc(
+				cache: ^TerrainGenerationBenchmarkCaveSliceChunkCache,
+				block: world_async.BlockCoord,
+				seed: u32,
+				allocator: mem.Allocator,
+			) -> u8 {
+				chunk_coord := chunk_coord_from_block_coord(block)
+				view := terrain_generation_benchmark_cave_slice_chunk_view_get(
+					cache,
+					chunk_coord,
+					seed,
+					allocator,
+				)
+				local := block_coord_local_from_chunk_coord(block, chunk_coord)
+				if !chunk_block_coord_is_inside(local.x, local.y, local.z) {
+					return '?'
+				}
+				return terrain_generation_benchmark_cave_slice_pixel(view, local)
+			}
+
+			terrain_generation_benchmark_cave_view_depth_char :: proc(distance: f32) -> u8 {
+				normalized := math.clamp(
+					distance / TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_MAX_DISTANCE_BLOCKS,
+					f32(0),
+					f32(1),
+				)
+				index := i32(normalized * f32(15) + f32(0.5))
+				if index < 10 {
+					return u8('0' + index)
+				}
+				return u8('a' + index - 10)
+			}
+
+			terrain_generation_benchmark_cave_view_ray_sample :: proc(
+				cache: ^TerrainGenerationBenchmarkCaveSliceChunkCache,
+				camera_x, camera_y, camera_z: f32,
+				dir_x, dir_y, dir_z: f32,
+				seed: u32,
+				allocator: mem.Allocator,
+			) -> (
+				pixel: u8,
+				depth: u8,
+				distance: f32,
+				hit: bool,
+			) {
+				for step := i32(0);
+				    step <= TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_MAX_STEPS;
+				    step += 1 {
+					distance =
+						f32(1.0) + f32(step) * TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_STEP_BLOCKS
+					block := world_async.BlockCoord {
+						x = terrain_generation_benchmark_floor_i32(camera_x + dir_x * distance),
+						y = terrain_generation_benchmark_floor_i32(camera_y + dir_y * distance),
+						z = terrain_generation_benchmark_floor_i32(camera_z + dir_z * distance),
+					}
+					pixel = terrain_generation_benchmark_cave_view_sample_pixel(
+						cache,
+						block,
+						seed,
+						allocator,
+					)
+					if pixel != '.' {
+						depth = terrain_generation_benchmark_cave_view_depth_char(distance)
+						hit = true
+						return
+					}
+				}
+				pixel = '.'
+				depth = 'f'
+				distance = TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_MAX_DISTANCE_BLOCKS
+				hit = false
+				return
+			}
+
+			terrain_generation_benchmark_cave_slice_block_coord :: proc(
+				center: world_async.BlockCoord,
+				mode: TerrainGenerationBenchmarkCaveSliceMode,
+				column, row: i32,
+			) -> world_async.BlockCoord {
+				half_width := i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH / 2)
+				half_height := i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT / 2)
+				offset_x :=
+					(column - half_width) * TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_STEP_BLOCKS
+				offset_b :=
+					(row - half_height) * TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_STEP_BLOCKS
+				switch mode {
+				case .Horizontal_XZ:
+					return {x = center.x + offset_x, y = center.y, z = center.z + offset_b}
+				case .Vertical_XY:
+					return {x = center.x + offset_x, y = center.y - offset_b, z = center.z}
+				case .Route_Longitudinal,
+				     .Route_Cross_Section,
+				     .Route_Plan,
+				     .Route_Oblique,
+				     .Route_Endpoint_Plan,
+				     .Mouth_Longitudinal,
+				     .Mouth_Plan:
+					return center
+				}
+				return center
+			}
+
+			terrain_generation_benchmark_cave_slice_basis_block_coord :: proc(
+				center_x, center_y, center_z: f32,
+				axis_u_x, axis_u_y, axis_u_z: f32,
+				axis_v_x, axis_v_y, axis_v_z: f32,
+				column, row: i32,
+			) -> world_async.BlockCoord {
+				half_width := i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH / 2)
+				half_height := i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT / 2)
+				offset_u := f32(
+					(column - half_width) * TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_STEP_BLOCKS,
+				)
+				offset_v := f32(
+					(row - half_height) * TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_STEP_BLOCKS,
+				)
+				return {
+					x = terrain_generation_benchmark_floor_i32(
+						center_x + axis_u_x * offset_u - axis_v_x * offset_v,
+					),
+					y = terrain_generation_benchmark_floor_i32(
+						center_y + axis_u_y * offset_u - axis_v_y * offset_v,
+					),
+					z = terrain_generation_benchmark_floor_i32(
+						center_z + axis_u_z * offset_u - axis_v_z * offset_v,
+					),
+				}
+			}
+
+			terrain_generation_benchmark_cave_route_frame :: proc(
+				edge: biomes.CaveNetworkEdge,
+				t: f32,
+			) -> (
+				tangent_x, tangent_y, tangent_z: f32,
+				side_x, side_y, side_z: f32,
+				up_x, up_y, up_z: f32,
+			) {
+				delta_t := f32(0.018)
+				prev_x, prev_y, prev_z := terrain_density_cave_edge_route_point(
+					edge,
+					math.max(f32(0), t - delta_t),
+				)
+				next_x, next_y, next_z := terrain_density_cave_edge_route_point(
+					edge,
+					math.min(f32(1), t + delta_t),
+				)
+				tangent_x, tangent_y, tangent_z = terrain_density_delta_3(
+					prev_x,
+					prev_y,
+					prev_z,
+					next_x,
+					next_y,
+					next_z,
+				)
+				tangent_length := math.sqrt_f32(
+					tangent_x * tangent_x + tangent_y * tangent_y + tangent_z * tangent_z,
+				)
+				if tangent_length <= 0.001 {
+					tangent_x, tangent_y, tangent_z = 0, 0, 1
+				} else {
+					tangent_x /= tangent_length
+					tangent_y /= tangent_length
+					tangent_z /= tangent_length
+				}
+
+				horizontal_length := math.sqrt_f32(tangent_x * tangent_x + tangent_z * tangent_z)
+				side_x, side_y, side_z = 1, 0, 0
+				if horizontal_length > 0.001 {
+					side_x = -tangent_z / horizontal_length
+					side_z = tangent_x / horizontal_length
+				}
+				up_x = side_y * tangent_z - side_z * tangent_y
+				up_y = side_z * tangent_x - side_x * tangent_z
+				up_z = side_x * tangent_y - side_y * tangent_x
+				up_length := math.sqrt_f32(up_x * up_x + up_y * up_y + up_z * up_z)
+				if up_length <= 0.001 {
+					up_x, up_y, up_z = 0, 1, 0
+				} else {
+					up_x /= up_length
+					up_y /= up_length
+					up_z /= up_length
+				}
+				return
+			}
+
+			terrain_generation_benchmark_cave_view_capture_basis :: proc(
+				label: string,
+				route_t: f32,
+				camera_x, camera_y, camera_z: f32,
+				forward_x, forward_y, forward_z: f32,
+				right_hint_x, right_hint_y, right_hint_z: f32,
+				up_hint_x, up_hint_y, up_hint_z: f32,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				temp := mem.begin_arena_temp_memory(transient_arena)
+				defer mem.end_arena_temp_memory(temp)
+				allocator := mem.arena_allocator(transient_arena)
+				cache := TerrainGenerationBenchmarkCaveSliceChunkCache{}
+				pixels := new(TerrainGenerationBenchmarkCaveViewPixels, allocator)
+				depths := new(TerrainGenerationBenchmarkCaveViewPixels, allocator)
+
+				view_forward_x := forward_x
+				view_forward_y := forward_y
+				view_forward_z := forward_z
+				forward_len := math.sqrt_f32(
+					view_forward_x * view_forward_x +
+					view_forward_y * view_forward_y +
+					view_forward_z * view_forward_z,
+				)
+				if forward_len <= 0.001 {
+					view_forward_x, view_forward_y, view_forward_z = 0, 0, 1
+				} else {
+					view_forward_x /= forward_len
+					view_forward_y /= forward_len
+					view_forward_z /= forward_len
+				}
+
+				right_x := right_hint_x
+				right_y := right_hint_y
+				right_z := right_hint_z
+				right_dot :=
+					right_x * view_forward_x + right_y * view_forward_y + right_z * view_forward_z
+				right_x -= view_forward_x * right_dot
+				right_y -= view_forward_y * right_dot
+				right_z -= view_forward_z * right_dot
+				right_len := math.sqrt_f32(
+					right_x * right_x + right_y * right_y + right_z * right_z,
+				)
+				if right_len <= 0.001 {
+					horizontal_len := math.sqrt_f32(
+						view_forward_x * view_forward_x + view_forward_z * view_forward_z,
+					)
+					if horizontal_len > 0.001 {
+						right_x = -view_forward_z / horizontal_len
+						right_y = 0
+						right_z = view_forward_x / horizontal_len
+					} else {
+						right_x, right_y, right_z = 1, 0, 0
+					}
+				} else {
+					right_x /= right_len
+					right_y /= right_len
+					right_z /= right_len
+				}
+
+				view_up_x := right_y * view_forward_z - right_z * view_forward_y
+				view_up_y := right_z * view_forward_x - right_x * view_forward_z
+				view_up_z := right_x * view_forward_y - right_y * view_forward_x
+				view_up_len := math.sqrt_f32(
+					view_up_x * view_up_x + view_up_y * view_up_y + view_up_z * view_up_z,
+				)
+				if view_up_len <= 0.001 {
+					view_up_x, view_up_y, view_up_z = up_hint_x, up_hint_y, up_hint_z
+					view_up_len = math.sqrt_f32(
+						view_up_x * view_up_x + view_up_y * view_up_y + view_up_z * view_up_z,
+					)
+					if view_up_len <= 0.001 {
+						view_up_x, view_up_y, view_up_z = 0, 1, 0
+					} else {
+						view_up_x /= view_up_len
+						view_up_y /= view_up_len
+						view_up_z /= view_up_len
+					}
+				} else {
+					view_up_x /= view_up_len
+					view_up_y /= view_up_len
+					view_up_z /= view_up_len
+				}
+
+				fov_radians := math.to_radians_f32(
+					TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_FOV_DEGREES,
+				)
+				tan_y := math.tan_f32(fov_radians * f32(0.5))
+				aspect :=
+					f32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH) /
+					f32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_HEIGHT)
+				tan_x := tan_y * aspect
+
+				hit_count: u32
+				miss_count: u32
+				water_hit_count: u32
+				distance_sum := f32(0)
+				for row := i32(0);
+				    row < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_HEIGHT);
+				    row += 1 {
+					screen_y :=
+						(1.0 -
+							((f32(row) + f32(0.5)) /
+									f32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_HEIGHT)) *
+								f32(2.0)) *
+						tan_y
+					for column := i32(0);
+					    column < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH);
+					    column += 1 {
+						screen_x :=
+							(((f32(column) + f32(0.5)) /
+										f32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH)) *
+									f32(2.0) -
+								1.0) *
+							tan_x
+						dir_x := view_forward_x + right_x * screen_x + view_up_x * screen_y
+						dir_y := view_forward_y + right_y * screen_x + view_up_y * screen_y
+						dir_z := view_forward_z + right_z * screen_x + view_up_z * screen_y
+						dir_len := math.sqrt_f32(dir_x * dir_x + dir_y * dir_y + dir_z * dir_z)
+						if dir_len > 0.001 {
+							dir_x /= dir_len
+							dir_y /= dir_len
+							dir_z /= dir_len
+						}
+						pixel, depth, distance, hit :=
+							terrain_generation_benchmark_cave_view_ray_sample(
+								&cache,
+								camera_x,
+								camera_y,
+								camera_z,
+								dir_x,
+								dir_y,
+								dir_z,
+								seed,
+								allocator,
+							)
+						pixel_index :=
+							row * i32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH) + column
+						pixels[pixel_index] = pixel
+						depths[pixel_index] = depth
+						if hit {
+							hit_count += 1
+							distance_sum += distance
+							if pixel == '~' {
+								water_hit_count += 1
+							}
+						} else {
+							miss_count += 1
+						}
+					}
+				}
+				avg_distance := f32(0)
+				if hit_count > 0 {
+					avg_distance = distance_sum / f32(hit_count)
+				}
+				log.infof(
+					"TERRAIN_GENERATION_CAVE_VIEW_BEGIN label=%s route_t=%.3f camera=(%.2f,%.2f,%.2f) forward=(%.3f,%.3f,%.3f) width=%d height=%d fov=%.1f max_distance=%.1f chunks=%d hits=%d misses=%d water_hits=%d avg_hit_distance=%.2f",
+					label,
+					route_t,
+					camera_x,
+					camera_y,
+					camera_z,
+					view_forward_x,
+					view_forward_y,
+					view_forward_z,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_HEIGHT,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_FOV_DEGREES,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_MAX_DISTANCE_BLOCKS,
+					cache.count,
+					hit_count,
+					miss_count,
+					water_hit_count,
+					avg_distance,
+				)
+				for row := i32(0);
+				    row < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_HEIGHT);
+				    row += 1 {
+					row_bytes: [TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH]u8
+					depth_bytes: [TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH]u8
+					for column := i32(0);
+					    column < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH);
+					    column += 1 {
+						pixel_index :=
+							row * i32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH) + column
+						row_bytes[column] = pixels[pixel_index]
+						depth_bytes[column] = depths[pixel_index]
+					}
+					log.infof(
+						"TERRAIN_GENERATION_CAVE_VIEW_ROW label=%s row=%d data=%s depth=%s",
+						label,
+						row,
+						string(row_bytes[:]),
+						string(depth_bytes[:]),
+					)
+				}
+				log.infof("TERRAIN_GENERATION_CAVE_VIEW_END label=%s", label)
+			}
+
+			terrain_generation_benchmark_cave_view_capture :: proc(
+				label: string,
+				edge: biomes.CaveNetworkEdge,
+				route_t: f32,
+				side_look_scale, up_look_scale: f32,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				temp := mem.begin_arena_temp_memory(transient_arena)
+				defer mem.end_arena_temp_memory(temp)
+				allocator := mem.arena_allocator(transient_arena)
+				cache := TerrainGenerationBenchmarkCaveSliceChunkCache{}
+				pixels := new(TerrainGenerationBenchmarkCaveViewPixels, allocator)
+				depths := new(TerrainGenerationBenchmarkCaveViewPixels, allocator)
+
+				route_x, route_y, route_z := terrain_density_cave_edge_route_point(edge, route_t)
+				tangent_x, tangent_y, tangent_z, side_x, side_y, side_z, up_x, up_y, up_z :=
+					terrain_generation_benchmark_cave_route_frame(edge, route_t)
+
+				camera_back := math.max(f32(12), edge.radius_blocks * f32(1.35))
+				camera_lift := math.max(f32(2), edge.radius_blocks * f32(0.18))
+				camera_x := route_x - tangent_x * camera_back + up_x * camera_lift
+				camera_y := route_y - tangent_y * camera_back + up_y * camera_lift
+				camera_z := route_z - tangent_z * camera_back + up_z * camera_lift
+
+				forward_x := tangent_x + side_x * side_look_scale + up_x * up_look_scale
+				forward_y := tangent_y + side_y * side_look_scale + up_y * up_look_scale
+				forward_z := tangent_z + side_z * side_look_scale + up_z * up_look_scale
+				forward_len := math.sqrt_f32(
+					forward_x * forward_x + forward_y * forward_y + forward_z * forward_z,
+				)
+				if forward_len <= 0.001 {
+					forward_x, forward_y, forward_z = tangent_x, tangent_y, tangent_z
+				} else {
+					forward_x /= forward_len
+					forward_y /= forward_len
+					forward_z /= forward_len
+				}
+
+				right_x := side_x
+				right_y := side_y
+				right_z := side_z
+				right_dot := right_x * forward_x + right_y * forward_y + right_z * forward_z
+				right_x -= forward_x * right_dot
+				right_y -= forward_y * right_dot
+				right_z -= forward_z * right_dot
+				right_len := math.sqrt_f32(
+					right_x * right_x + right_y * right_y + right_z * right_z,
+				)
+				if right_len <= 0.001 {
+					right_x, right_y, right_z = side_x, side_y, side_z
+				} else {
+					right_x /= right_len
+					right_y /= right_len
+					right_z /= right_len
+				}
+
+				view_up_x := right_y * forward_z - right_z * forward_y
+				view_up_y := right_z * forward_x - right_x * forward_z
+				view_up_z := right_x * forward_y - right_y * forward_x
+				view_up_len := math.sqrt_f32(
+					view_up_x * view_up_x + view_up_y * view_up_y + view_up_z * view_up_z,
+				)
+				if view_up_len <= 0.001 {
+					view_up_x, view_up_y, view_up_z = up_x, up_y, up_z
+				} else {
+					view_up_x /= view_up_len
+					view_up_y /= view_up_len
+					view_up_z /= view_up_len
+				}
+
+				fov_radians := math.to_radians_f32(
+					TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_FOV_DEGREES,
+				)
+				tan_y := math.tan_f32(fov_radians * f32(0.5))
+				aspect :=
+					f32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH) /
+					f32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_HEIGHT)
+				tan_x := tan_y * aspect
+
+				hit_count: u32
+				miss_count: u32
+				water_hit_count: u32
+				distance_sum := f32(0)
+				for row := i32(0);
+				    row < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_HEIGHT);
+				    row += 1 {
+					screen_y :=
+						(1.0 -
+							((f32(row) + f32(0.5)) /
+									f32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_HEIGHT)) *
+								f32(2.0)) *
+						tan_y
+					for column := i32(0);
+					    column < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH);
+					    column += 1 {
+						screen_x :=
+							(((f32(column) + f32(0.5)) /
+										f32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH)) *
+									f32(2.0) -
+								1.0) *
+							tan_x
+						dir_x := forward_x + right_x * screen_x + view_up_x * screen_y
+						dir_y := forward_y + right_y * screen_x + view_up_y * screen_y
+						dir_z := forward_z + right_z * screen_x + view_up_z * screen_y
+						dir_len := math.sqrt_f32(dir_x * dir_x + dir_y * dir_y + dir_z * dir_z)
+						if dir_len > 0.001 {
+							dir_x /= dir_len
+							dir_y /= dir_len
+							dir_z /= dir_len
+						}
+						pixel, depth, distance, hit :=
+							terrain_generation_benchmark_cave_view_ray_sample(
+								&cache,
+								camera_x,
+								camera_y,
+								camera_z,
+								dir_x,
+								dir_y,
+								dir_z,
+								seed,
+								allocator,
+							)
+						pixel_index :=
+							row * i32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH) + column
+						pixels[pixel_index] = pixel
+						depths[pixel_index] = depth
+						if hit {
+							hit_count += 1
+							distance_sum += distance
+							if pixel == '~' {
+								water_hit_count += 1
+							}
+						} else {
+							miss_count += 1
+						}
+					}
+				}
+				avg_distance := f32(0)
+				if hit_count > 0 {
+					avg_distance = distance_sum / f32(hit_count)
+				}
+				log.infof(
+					"TERRAIN_GENERATION_CAVE_VIEW_BEGIN label=%s route_t=%.3f camera=(%.2f,%.2f,%.2f) forward=(%.3f,%.3f,%.3f) width=%d height=%d fov=%.1f max_distance=%.1f chunks=%d hits=%d misses=%d water_hits=%d avg_hit_distance=%.2f",
+					label,
+					route_t,
+					camera_x,
+					camera_y,
+					camera_z,
+					forward_x,
+					forward_y,
+					forward_z,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_HEIGHT,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_FOV_DEGREES,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_MAX_DISTANCE_BLOCKS,
+					cache.count,
+					hit_count,
+					miss_count,
+					water_hit_count,
+					avg_distance,
+				)
+				for row := i32(0);
+				    row < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_HEIGHT);
+				    row += 1 {
+					row_bytes: [TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH]u8
+					depth_bytes: [TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH]u8
+					for column := i32(0);
+					    column < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH);
+					    column += 1 {
+						pixel_index :=
+							row * i32(TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH) + column
+						row_bytes[column] = pixels[pixel_index]
+						depth_bytes[column] = depths[pixel_index]
+					}
+					log.infof(
+						"TERRAIN_GENERATION_CAVE_VIEW_ROW label=%s row=%d data=%s depth=%s",
+						label,
+						row,
+						string(row_bytes[:]),
+						string(depth_bytes[:]),
+					)
+				}
+				log.infof("TERRAIN_GENERATION_CAVE_VIEW_END label=%s", label)
+			}
+
+			terrain_generation_benchmark_cave_route_slice_block_coord :: proc(
+				edge: biomes.CaveNetworkEdge,
+				mode: TerrainGenerationBenchmarkCaveSliceMode,
+				column, row: i32,
+			) -> world_async.BlockCoord {
+				width_max := f32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH - 1)
+				t := math.clamp(f32(column) / width_max, f32(0), f32(1))
+				center_x, center_y, center_z := terrain_density_cave_edge_route_point(edge, t)
+				_, _, _, side_x, side_y, side_z, up_x, up_y, up_z :=
+					terrain_generation_benchmark_cave_route_frame(edge, t)
+
+				half_height := i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT / 2)
+				offset_v := f32(
+					(row - half_height) * TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_STEP_BLOCKS,
+				)
+				axis_v_x := up_x
+				axis_v_y := up_y
+				axis_v_z := up_z
+				if mode == .Route_Plan {
+					axis_v_x = side_x
+					axis_v_y = side_y
+					axis_v_z = side_z
+				} else if mode == .Route_Oblique {
+					axis_v_x = side_x * f32(0.68) + up_x * f32(0.74)
+					axis_v_y = side_y * f32(0.68) + up_y * f32(0.74)
+					axis_v_z = side_z * f32(0.68) + up_z * f32(0.74)
+					axis_length := math.sqrt_f32(
+						axis_v_x * axis_v_x + axis_v_y * axis_v_y + axis_v_z * axis_v_z,
+					)
+					if axis_length > 0.001 {
+						axis_v_x /= axis_length
+						axis_v_y /= axis_length
+						axis_v_z /= axis_length
+					}
+				}
+
+				return {
+					x = terrain_generation_benchmark_floor_i32(center_x - axis_v_x * offset_v),
+					y = terrain_generation_benchmark_floor_i32(center_y - axis_v_y * offset_v),
+					z = terrain_generation_benchmark_floor_i32(center_z - axis_v_z * offset_v),
+				}
+			}
+
+			terrain_generation_benchmark_cave_route_slice_capture :: proc(
+				label: string,
+				edge: biomes.CaveNetworkEdge,
+				mode: TerrainGenerationBenchmarkCaveSliceMode,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				temp := mem.begin_arena_temp_memory(transient_arena)
+				defer mem.end_arena_temp_memory(temp)
+				allocator := mem.arena_allocator(transient_arena)
+				cache := TerrainGenerationBenchmarkCaveSliceChunkCache{}
+				pixels := new(TerrainGenerationBenchmarkCaveSlicePixels, allocator)
+				center_x, center_y, center_z := terrain_density_cave_edge_route_point(edge, 0.5)
+				center := world_async.BlockCoord {
+					x = terrain_generation_benchmark_floor_i32(center_x),
+					y = terrain_generation_benchmark_floor_i32(center_y),
+					z = terrain_generation_benchmark_floor_i32(center_z),
+				}
+
+				open_count: u32
+				water_count: u32
+				solid_count: u32
+				for row := i32(0);
+				    row < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT);
+				    row += 1 {
+					for column := i32(0);
+					    column < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH);
+					    column += 1 {
+						block := terrain_generation_benchmark_cave_route_slice_block_coord(
+							edge,
+							mode,
+							column,
+							row,
+						)
+						chunk_coord := chunk_coord_from_block_coord(block)
+						view := terrain_generation_benchmark_cave_slice_chunk_view_get(
+							&cache,
+							chunk_coord,
+							seed,
+							allocator,
+						)
+						local := block_coord_local_from_chunk_coord(block, chunk_coord)
+						pixel := u8('?')
+						if chunk_block_coord_is_inside(local.x, local.y, local.z) {
+							pixel = terrain_generation_benchmark_cave_slice_pixel(view, local)
+						}
+						pixel_index :=
+							row * i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH) + column
+						pixels[pixel_index] = pixel
+						if pixel == '.' {
+							open_count += 1
+						} else if pixel == '~' {
+							water_count += 1
+						} else {
+							solid_count += 1
+						}
+					}
+				}
+
+				log.infof(
+					"TERRAIN_GENERATION_CAVE_SLICE_BEGIN label=%s mode=%v center=(%d,%d,%d) width=%d height=%d step=%d chunks=%d open=%d water=%d solid=%d",
+					label,
+					mode,
+					center.x,
+					center.y,
+					center.z,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_STEP_BLOCKS,
+					cache.count,
+					open_count,
+					water_count,
+					solid_count,
+				)
+				for row := i32(0);
+				    row < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT);
+				    row += 1 {
+					row_bytes: [TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH]u8
+					for column := i32(0);
+					    column < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH);
+					    column += 1 {
+						pixel_index :=
+							row * i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH) + column
+						row_bytes[column] = pixels[pixel_index]
+					}
+					log.infof(
+						"TERRAIN_GENERATION_CAVE_SLICE_ROW label=%s mode=%v row=%d data=%s",
+						label,
+						mode,
+						row,
+						string(row_bytes[:]),
+					)
+				}
+				log.infof("TERRAIN_GENERATION_CAVE_SLICE_END label=%s mode=%v", label, mode)
+			}
+
+			terrain_generation_benchmark_mouth_transition_slice_block_coord :: proc(
+				anchor: biomes.CaveAnchor,
+				node: biomes.CaveNetworkNode,
+				plan: TerrainCaveMouthTransitionPlan,
+				mode: TerrainGenerationBenchmarkCaveSliceMode,
+				column, row: i32,
+			) -> world_async.BlockCoord {
+				width_max := f32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH - 1)
+				route_t := math.clamp(f32(column) / width_max, f32(0), f32(1))
+
+				near_dx := plan.landing_x - anchor.x
+				near_dy := plan.landing_y - anchor.y
+				near_dz := plan.landing_z - anchor.z
+				bend_dx := plan.bend_x - plan.landing_x
+				bend_dy := plan.bend_y - plan.landing_y
+				bend_dz := plan.bend_z - plan.landing_z
+				handoff_dx := node.x - plan.bend_x
+				handoff_dy := node.y - plan.bend_y
+				handoff_dz := node.z - plan.bend_z
+				near_len := math.sqrt_f32(
+					near_dx * near_dx + near_dy * near_dy + near_dz * near_dz,
+				)
+				bend_len := math.sqrt_f32(
+					bend_dx * bend_dx + bend_dy * bend_dy + bend_dz * bend_dz,
+				)
+				handoff_len := math.sqrt_f32(
+					handoff_dx * handoff_dx + handoff_dy * handoff_dy + handoff_dz * handoff_dz,
+				)
+				total_len := math.max(f32(1), near_len + bend_len + handoff_len)
+				distance := route_t * total_len
+
+				from_x, from_y, from_z := anchor.x, anchor.y, anchor.z
+				to_x, to_y, to_z := plan.landing_x, plan.landing_y, plan.landing_z
+				segment_len := near_len
+				if distance > segment_len && bend_len > 0.001 {
+					distance -= segment_len
+					from_x, from_y, from_z = plan.landing_x, plan.landing_y, plan.landing_z
+					to_x, to_y, to_z = plan.bend_x, plan.bend_y, plan.bend_z
+					segment_len = bend_len
+				}
+				if distance > segment_len && handoff_len > 0.001 {
+					distance -= segment_len
+					from_x, from_y, from_z = plan.bend_x, plan.bend_y, plan.bend_z
+					to_x, to_y, to_z = node.x, node.y, node.z
+					segment_len = handoff_len
+				}
+				segment_t := math.clamp(distance / math.max(f32(1), segment_len), f32(0), f32(1))
+				center_x := biomes.regional_terrain_field_lerp(from_x, to_x, segment_t)
+				center_y := biomes.regional_terrain_field_lerp(from_y, to_y, segment_t)
+				center_z := biomes.regional_terrain_field_lerp(from_z, to_z, segment_t)
+
+				tangent_x := to_x - from_x
+				tangent_y := to_y - from_y
+				tangent_z := to_z - from_z
+				tangent_len := math.sqrt_f32(
+					tangent_x * tangent_x + tangent_y * tangent_y + tangent_z * tangent_z,
+				)
+				if tangent_len > 0.001 {
+					tangent_x /= tangent_len
+					tangent_y /= tangent_len
+					tangent_z /= tangent_len
+				}
+
+				axis_v_x, axis_v_y, axis_v_z := f32(0), f32(1), f32(0)
+				if mode == .Mouth_Plan {
+					horizontal_len := math.sqrt_f32(tangent_x * tangent_x + tangent_z * tangent_z)
+					if horizontal_len > 0.001 {
+						axis_v_x = -tangent_z / horizontal_len
+						axis_v_y = 0
+						axis_v_z = tangent_x / horizontal_len
+					} else {
+						axis_v_x = plan.side_x
+						axis_v_y = 0
+						axis_v_z = plan.side_z
+					}
+				}
+
+				half_height := i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT / 2)
+				offset_v := f32(
+					(row - half_height) * TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_STEP_BLOCKS,
+				)
+				return {
+					x = terrain_generation_benchmark_floor_i32(center_x - axis_v_x * offset_v),
+					y = terrain_generation_benchmark_floor_i32(center_y - axis_v_y * offset_v),
+					z = terrain_generation_benchmark_floor_i32(center_z - axis_v_z * offset_v),
+				}
+			}
+
+			terrain_generation_benchmark_mouth_aperture_slice_block_coord :: proc(
+				anchor: biomes.CaveAnchor,
+				node: biomes.CaveNetworkNode,
+				mode: TerrainGenerationBenchmarkCaveSliceMode,
+				column, row: i32,
+			) -> world_async.BlockCoord {
+				dir_x, dir_z := terrain_density_cave_entrance_planar_direction(anchor, node)
+				side_x := -dir_z
+				side_z := dir_x
+				half_width := i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH / 2)
+				half_height := i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT / 2)
+				offset_u := f32(
+					(column - half_width) * TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_STEP_BLOCKS,
+				)
+				offset_v := f32(
+					(row - half_height) * TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_STEP_BLOCKS,
+				)
+				center_x := anchor.x + dir_x * offset_u
+				center_y := anchor.y
+				center_z := anchor.z + dir_z * offset_u
+				if mode == .Mouth_Plan {
+					return {
+						x = terrain_generation_benchmark_floor_i32(center_x - side_x * offset_v),
+						y = terrain_generation_benchmark_floor_i32(center_y),
+						z = terrain_generation_benchmark_floor_i32(center_z - side_z * offset_v),
+					}
+				}
+				return {
+					x = terrain_generation_benchmark_floor_i32(center_x),
+					y = terrain_generation_benchmark_floor_i32(center_y - offset_v),
+					z = terrain_generation_benchmark_floor_i32(center_z),
+				}
+			}
+
+			terrain_generation_benchmark_mouth_transition_slice_capture :: proc(
+				label: string,
+				anchor: biomes.CaveAnchor,
+				node: biomes.CaveNetworkNode,
+				mode: TerrainGenerationBenchmarkCaveSliceMode,
+				center_on_aperture: bool,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				temp := mem.begin_arena_temp_memory(transient_arena)
+				defer mem.end_arena_temp_memory(temp)
+				allocator := mem.arena_allocator(transient_arena)
+				cache := TerrainGenerationBenchmarkCaveSliceChunkCache{}
+				pixels := new(TerrainGenerationBenchmarkCaveSlicePixels, allocator)
+				opening_radius := math.max(f32(4), anchor.influence_radius_blocks)
+				anchor_radius := math.max(f32(3), anchor.influence_radius_blocks * 0.55)
+				link_radius := math.max(
+					f32(3),
+					math.min(anchor_radius * 0.75, node.connection_radius_blocks),
+				)
+				plan := terrain_density_cave_mouth_transition_plan(
+					anchor,
+					node,
+					opening_radius,
+					link_radius,
+				)
+				center := world_async.BlockCoord {
+					x = terrain_generation_benchmark_floor_i32(plan.bend_x),
+					y = terrain_generation_benchmark_floor_i32(plan.bend_y),
+					z = terrain_generation_benchmark_floor_i32(plan.bend_z),
+				}
+				if center_on_aperture {
+					center = {
+						x = terrain_generation_benchmark_floor_i32(anchor.x),
+						y = terrain_generation_benchmark_floor_i32(anchor.y),
+						z = terrain_generation_benchmark_floor_i32(anchor.z),
+					}
+				}
+
+				open_count: u32
+				water_count: u32
+				solid_count: u32
+				for row := i32(0);
+				    row < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT);
+				    row += 1 {
+					for column := i32(0);
+					    column < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH);
+					    column += 1 {
+						block := terrain_generation_benchmark_mouth_transition_slice_block_coord(
+							anchor,
+							node,
+							plan,
+							mode,
+							column,
+							row,
+						)
+						if center_on_aperture {
+							block = terrain_generation_benchmark_mouth_aperture_slice_block_coord(
+								anchor,
+								node,
+								mode,
+								column,
+								row,
+							)
+						}
+						chunk_coord := chunk_coord_from_block_coord(block)
+						view := terrain_generation_benchmark_cave_slice_chunk_view_get(
+							&cache,
+							chunk_coord,
+							seed,
+							allocator,
+						)
+						local := block_coord_local_from_chunk_coord(block, chunk_coord)
+						pixel := u8('?')
+						if chunk_block_coord_is_inside(local.x, local.y, local.z) {
+							pixel = terrain_generation_benchmark_cave_slice_pixel(view, local)
+						}
+						pixel_index :=
+							row * i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH) + column
+						pixels[pixel_index] = pixel
+						if pixel == '.' {
+							open_count += 1
+						} else if pixel == '~' {
+							water_count += 1
+						} else {
+							solid_count += 1
+						}
+					}
+				}
+
+				log.infof(
+					"TERRAIN_GENERATION_CAVE_SLICE_BEGIN label=%s mode=%v center=(%d,%d,%d) width=%d height=%d step=%d chunks=%d open=%d water=%d solid=%d",
+					label,
+					mode,
+					center.x,
+					center.y,
+					center.z,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_STEP_BLOCKS,
+					cache.count,
+					open_count,
+					water_count,
+					solid_count,
+				)
+				for row := i32(0);
+				    row < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT);
+				    row += 1 {
+					row_bytes: [TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH]u8
+					for column := i32(0);
+					    column < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH);
+					    column += 1 {
+						pixel_index :=
+							row * i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH) + column
+						row_bytes[column] = pixels[pixel_index]
+					}
+					log.infof(
+						"TERRAIN_GENERATION_CAVE_SLICE_ROW label=%s mode=%v row=%d data=%s",
+						label,
+						mode,
+						row,
+						string(row_bytes[:]),
+					)
+				}
+				log.infof("TERRAIN_GENERATION_CAVE_SLICE_END label=%s mode=%v", label, mode)
+			}
+
+			terrain_generation_benchmark_cave_slice_capture_basis :: proc(
+				label: string,
+				mode: TerrainGenerationBenchmarkCaveSliceMode,
+				center_x, center_y, center_z: f32,
+				axis_u_x, axis_u_y, axis_u_z: f32,
+				axis_v_x, axis_v_y, axis_v_z: f32,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				temp := mem.begin_arena_temp_memory(transient_arena)
+				defer mem.end_arena_temp_memory(temp)
+				allocator := mem.arena_allocator(transient_arena)
+				cache := TerrainGenerationBenchmarkCaveSliceChunkCache{}
+				pixels := new(TerrainGenerationBenchmarkCaveSlicePixels, allocator)
+				center := world_async.BlockCoord {
+					x = terrain_generation_benchmark_floor_i32(center_x),
+					y = terrain_generation_benchmark_floor_i32(center_y),
+					z = terrain_generation_benchmark_floor_i32(center_z),
+				}
+
+				open_count: u32
+				water_count: u32
+				solid_count: u32
+				for row := i32(0);
+				    row < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT);
+				    row += 1 {
+					for column := i32(0);
+					    column < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH);
+					    column += 1 {
+						block := terrain_generation_benchmark_cave_slice_basis_block_coord(
+							center_x,
+							center_y,
+							center_z,
+							axis_u_x,
+							axis_u_y,
+							axis_u_z,
+							axis_v_x,
+							axis_v_y,
+							axis_v_z,
+							column,
+							row,
+						)
+						chunk_coord := chunk_coord_from_block_coord(block)
+						view := terrain_generation_benchmark_cave_slice_chunk_view_get(
+							&cache,
+							chunk_coord,
+							seed,
+							allocator,
+						)
+						local := block_coord_local_from_chunk_coord(block, chunk_coord)
+						pixel := u8('?')
+						if chunk_block_coord_is_inside(local.x, local.y, local.z) {
+							pixel = terrain_generation_benchmark_cave_slice_pixel(view, local)
+						}
+						pixel_index :=
+							row * i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH) + column
+						pixels[pixel_index] = pixel
+						if pixel == '.' {
+							open_count += 1
+						} else if pixel == '~' {
+							water_count += 1
+						} else {
+							solid_count += 1
+						}
+					}
+				}
+
+				log.infof(
+					"TERRAIN_GENERATION_CAVE_SLICE_BEGIN label=%s mode=%v center=(%d,%d,%d) width=%d height=%d step=%d chunks=%d open=%d water=%d solid=%d",
+					label,
+					mode,
+					center.x,
+					center.y,
+					center.z,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_STEP_BLOCKS,
+					cache.count,
+					open_count,
+					water_count,
+					solid_count,
+				)
+				for row := i32(0);
+				    row < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT);
+				    row += 1 {
+					row_bytes: [TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH]u8
+					for column := i32(0);
+					    column < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH);
+					    column += 1 {
+						pixel_index :=
+							row * i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH) + column
+						row_bytes[column] = pixels[pixel_index]
+					}
+					log.infof(
+						"TERRAIN_GENERATION_CAVE_SLICE_ROW label=%s mode=%v row=%d data=%s",
+						label,
+						mode,
+						row,
+						string(row_bytes[:]),
+					)
+				}
+				log.infof("TERRAIN_GENERATION_CAVE_SLICE_END label=%s mode=%v", label, mode)
+			}
+
+			terrain_generation_benchmark_cave_slice_capture :: proc(
+				label: string,
+				node: biomes.CaveNetworkNode,
+				mode: TerrainGenerationBenchmarkCaveSliceMode,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				temp := mem.begin_arena_temp_memory(transient_arena)
+				defer mem.end_arena_temp_memory(temp)
+				allocator := mem.arena_allocator(transient_arena)
+				cache := TerrainGenerationBenchmarkCaveSliceChunkCache{}
+				pixels := new(TerrainGenerationBenchmarkCaveSlicePixels, allocator)
+				center := world_async.BlockCoord {
+					x = terrain_generation_benchmark_floor_i32(node.x),
+					y = terrain_generation_benchmark_floor_i32(node.y),
+					z = terrain_generation_benchmark_floor_i32(node.z),
+				}
+
+				open_count: u32
+				water_count: u32
+				solid_count: u32
+				for row := i32(0);
+				    row < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT);
+				    row += 1 {
+					for column := i32(0);
+					    column < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH);
+					    column += 1 {
+						block := terrain_generation_benchmark_cave_slice_block_coord(
+							center,
+							mode,
+							column,
+							row,
+						)
+						chunk_coord := chunk_coord_from_block_coord(block)
+						view := terrain_generation_benchmark_cave_slice_chunk_view_get(
+							&cache,
+							chunk_coord,
+							seed,
+							allocator,
+						)
+						local := block_coord_local_from_chunk_coord(block, chunk_coord)
+						pixel := u8('?')
+						if chunk_block_coord_is_inside(local.x, local.y, local.z) {
+							pixel = terrain_generation_benchmark_cave_slice_pixel(view, local)
+						}
+						pixel_index :=
+							row * i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH) + column
+						pixels[pixel_index] = pixel
+						if pixel == '.' {
+							open_count += 1
+						} else if pixel == '~' {
+							water_count += 1
+						} else {
+							solid_count += 1
+						}
+					}
+				}
+
+				log.infof(
+					"TERRAIN_GENERATION_CAVE_SLICE_BEGIN label=%s mode=%v center=(%d,%d,%d) width=%d height=%d step=%d chunks=%d open=%d water=%d solid=%d",
+					label,
+					mode,
+					center.x,
+					center.y,
+					center.z,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT,
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_STEP_BLOCKS,
+					cache.count,
+					open_count,
+					water_count,
+					solid_count,
+				)
+				for row := i32(0);
+				    row < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT);
+				    row += 1 {
+					row_bytes: [TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH]u8
+					for column := i32(0);
+					    column < i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH);
+					    column += 1 {
+						pixel_index :=
+							row * i32(TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH) + column
+						row_bytes[column] = pixels[pixel_index]
+					}
+					log.infof(
+						"TERRAIN_GENERATION_CAVE_SLICE_ROW label=%s mode=%v row=%d data=%s",
+						label,
+						mode,
+						row,
+						string(row_bytes[:]),
+					)
+				}
+				log.infof("TERRAIN_GENERATION_CAVE_SLICE_END label=%s mode=%v", label, mode)
+			}
+
+			terrain_generation_benchmark_cave_route_edge_select :: proc(
+				key: biomes.FeatureGridKey,
+				selection: TerrainGenerationBenchmarkCaveSelection,
+			) -> (
+				best_edge: biomes.CaveNetworkEdge,
+				found: bool,
+			) {
+				origin := chunk_origin_from_coord(selection.chunk)
+				region_coord := biomes.generation_region_coord_from_block(
+					origin.x,
+					origin.y,
+					origin.z,
+				)
+				region := terrain_generation_region_for_fill(key, region_coord)
+				best_score := -max(f32)
+				for i := u32(0); i < region.cave_network_edge_count; i += 1 {
+					edge := region.cave_network_edges[i]
+					if edge.from_node_id != selection.node.id &&
+					   edge.to_node_id != selection.node.id {
+						continue
+					}
+					if edge.kind == .Vertical_Shaft {
+						continue
+					}
+					dx := edge.to_x - edge.from_x
+					dy := edge.to_y - edge.from_y
+					dz := edge.to_z - edge.from_z
+					length := math.sqrt_f32(dx * dx + dy * dy + dz * dz)
+					if length <= 0.001 {
+						continue
+					}
+					vertical_fraction := math.abs(dy) / length
+					if vertical_fraction > 0.48 {
+						continue
+					}
+					score := edge.radius_blocks * 8.0 + length * 0.04 - vertical_fraction * 24.0
+					if edge.from_biome_id == selection.node.biome_id &&
+					   edge.to_biome_id == selection.node.biome_id {
+						score += 18.0
+					}
+					if edge.kind == .Worm_Path {
+						score += 12.0
+					}
+					if edge.guaranteed_connection {
+						score += 4.0
+					}
+					if score > best_score {
+						best_edge = edge
+						best_score = score
+						found = true
+					}
+				}
+				return
+			}
+
+			terrain_generation_benchmark_cave_route_slice_capture_for_selection :: proc(
+				label: string,
+				selection: TerrainGenerationBenchmarkCaveSelection,
+				key: biomes.FeatureGridKey,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				if !selection.found_matching_biome {
+					log.infof("TERRAIN_GENERATION_CAVE_ROUTE_SLICE_SKIP label=%s", label)
+					return
+				}
+				edge, edge_found := terrain_generation_benchmark_cave_route_edge_select(
+					key,
+					selection,
+				)
+				if !edge_found {
+					log.infof("TERRAIN_GENERATION_CAVE_ROUTE_SLICE_SKIP label=%s", label)
+					return
+				}
+
+				center_x, center_y, center_z := terrain_density_cave_edge_route_point(edge, 0.5)
+				prev_x, prev_y, prev_z := terrain_density_cave_edge_route_point(edge, 0.42)
+				next_x, next_y, next_z := terrain_density_cave_edge_route_point(edge, 0.58)
+				tangent_x, tangent_y, tangent_z := terrain_density_delta_3(
+					prev_x,
+					prev_y,
+					prev_z,
+					next_x,
+					next_y,
+					next_z,
+				)
+				tangent_length := math.sqrt_f32(
+					tangent_x * tangent_x + tangent_y * tangent_y + tangent_z * tangent_z,
+				)
+				if tangent_length <= 0.001 {
+					log.infof("TERRAIN_GENERATION_CAVE_ROUTE_SLICE_SKIP label=%s", label)
+					return
+				}
+				tangent_x /= tangent_length
+				tangent_y /= tangent_length
+				tangent_z /= tangent_length
+
+				horizontal_length := math.sqrt_f32(tangent_x * tangent_x + tangent_z * tangent_z)
+				side_x := f32(1)
+				side_y := f32(0)
+				side_z := f32(0)
+				if horizontal_length > 0.001 {
+					side_x = -tangent_z / horizontal_length
+					side_z = tangent_x / horizontal_length
+				}
+				up_x := side_y * tangent_z - side_z * tangent_y
+				up_y := side_z * tangent_x - side_x * tangent_z
+				up_z := side_x * tangent_y - side_y * tangent_x
+				up_length := math.sqrt_f32(up_x * up_x + up_y * up_y + up_z * up_z)
+				if up_length <= 0.001 {
+					up_x, up_y, up_z = 0, 1, 0
+				} else {
+					up_x /= up_length
+					up_y /= up_length
+					up_z /= up_length
+				}
+
+				route_dx := edge.to_x - edge.from_x
+				route_dy := edge.to_y - edge.from_y
+				route_dz := edge.to_z - edge.from_z
+				route_length := math.sqrt_f32(
+					route_dx * route_dx + route_dy * route_dy + route_dz * route_dz,
+				)
+				log.infof(
+					"TERRAIN_GENERATION_CAVE_ROUTE_SLICE_SELECTION label=%s edge=%d kind=%v radius=%.2f length=%.2f center=(%.2f,%.2f,%.2f) from_biome=%v to_biome=%v",
+					label,
+					edge.id,
+					edge.kind,
+					edge.radius_blocks,
+					route_length,
+					center_x,
+					center_y,
+					center_z,
+					edge.from_biome_id,
+					edge.to_biome_id,
+				)
+				terrain_generation_benchmark_cave_route_slice_capture(
+					label,
+					edge,
+					.Route_Longitudinal,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					label,
+					.Route_Cross_Section,
+					center_x,
+					center_y,
+					center_z,
+					side_x,
+					side_y,
+					side_z,
+					up_x,
+					up_y,
+					up_z,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_route_slice_capture(
+					label,
+					edge,
+					.Route_Oblique,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_route_slice_capture(
+					label,
+					edge,
+					.Route_Plan,
+					seed,
+					transient_arena,
+				)
+			}
+
+			TerrainGenerationBenchmarkCaveChamberletChainSelection :: struct {
+				found:                                    bool,
+				edge:                                     biomes.CaveNetworkEdge,
+				chamberlet_index:                         u32,
+				detail_index:                             u32,
+				center_x, center_y, center_z:             f32,
+				route_x, route_y, route_z:                f32,
+				chamberlet_x, chamberlet_y, chamberlet_z: f32,
+				axis_x, axis_y, axis_z:                   f32,
+				plan_axis_x, plan_axis_z:                 f32,
+				plan_side_x, plan_side_z:                 f32,
+				loop_radius:                              f32,
+				detail_radius:                            f32,
+				chain_length:                             f32,
+				route_radius:                             f32,
+				biome_id:                                 biomes.BiomeID,
+				score:                                    f32,
+			}
+
+			terrain_generation_benchmark_cave_chamberlet_chain_select :: proc(
+				key: biomes.FeatureGridKey,
+				selection: TerrainGenerationBenchmarkCaveSelection,
+			) -> (
+				best: TerrainGenerationBenchmarkCaveChamberletChainSelection,
+			) {
+				if !selection.found_matching_biome {
+					return
+				}
+				edge, edge_found := terrain_generation_benchmark_cave_route_edge_select(
+					key,
+					selection,
+				)
+				if !edge_found {
+					return
+				}
+
+				best_score := -max(f32)
+				route_radius := math.max(f32(1), edge.radius_blocks)
+				for chamberlet_index := u32(0);
+				    chamberlet_index < TERRAIN_CAVE_EDGE_CHAMBERLET_COUNT;
+				    chamberlet_index += 1 {
+					hash := biomes.feature_grid_hash_combine(
+						u64(edge.id),
+						TERRAIN_CAVE_ROOM_DETAIL_SALT,
+					)
+					hash = biomes.feature_grid_hash_combine(hash, u64(chamberlet_index))
+					step_t :=
+						(f32(chamberlet_index) + 0.5) / f32(TERRAIN_CAVE_EDGE_CHAMBERLET_COUNT)
+					jitter :=
+						biomes.feature_grid_signed_unit_f32(hash, TERRAIN_CAVE_CURVE_SALT) *
+						f32(0.055)
+					t := math.clamp(
+						biomes.regional_terrain_field_lerp(
+							TERRAIN_CAVE_EDGE_CHAMBERLET_ROUTE_MARGIN,
+							1.0 - TERRAIN_CAVE_EDGE_CHAMBERLET_ROUTE_MARGIN,
+							step_t,
+						) +
+						jitter,
+						TERRAIN_CAVE_EDGE_CHAMBERLET_ROUTE_MARGIN,
+						1.0 - TERRAIN_CAVE_EDGE_CHAMBERLET_ROUTE_MARGIN,
+					)
+					route_x, route_y, route_z := terrain_density_cave_edge_route_point(edge, t)
+					prev_x, prev_y, prev_z := terrain_density_cave_edge_route_point(
+						edge,
+						math.max(f32(0), t - 0.06),
+					)
+					next_x, next_y, next_z := terrain_density_cave_edge_route_point(
+						edge,
+						math.min(f32(1), t + 0.06),
+					)
+					tangent_x, tangent_y, tangent_z := terrain_density_delta_3(
+						prev_x,
+						prev_y,
+						prev_z,
+						next_x,
+						next_y,
+						next_z,
+					)
+					tangent_len := math.sqrt_f32(
+						tangent_x * tangent_x + tangent_y * tangent_y + tangent_z * tangent_z,
+					)
+					if tangent_len > 0.001 {
+						tangent_x /= tangent_len
+						tangent_y /= tangent_len
+						tangent_z /= tangent_len
+					} else {
+						tangent_x, tangent_y, tangent_z = 1, 0, 0
+					}
+					horizontal_length := math.sqrt_f32(
+						tangent_x * tangent_x + tangent_z * tangent_z,
+					)
+					side_x := f32(1)
+					side_z := f32(0)
+					if horizontal_length > 0.001 {
+						side_x = -tangent_z / horizontal_length
+						side_z = tangent_x / horizontal_length
+					}
+					side_sign := f32(1)
+					if (chamberlet_index & 1) != 0 {
+						side_sign = -1
+					}
+					if biomes.feature_grid_signed_unit_f32(hash, TERRAIN_CAVE_PASSAGE_RIB_SALT) <
+					   0 {
+						side_sign = -side_sign
+					}
+					side_x *= side_sign
+					side_z *= side_sign
+
+					radius_base := math.clamp(
+						route_radius *
+						biomes.regional_terrain_field_lerp(
+							f32(0.34),
+							f32(0.56),
+							biomes.feature_grid_unit_f32(hash, TERRAIN_CAVE_ROUGHNESS_SALT),
+						),
+						TERRAIN_CAVE_EDGE_CHAMBERLET_RADIUS_MIN_BLOCKS,
+						TERRAIN_CAVE_EDGE_CHAMBERLET_RADIUS_MAX_BLOCKS,
+					)
+					side_offset :=
+						route_radius *
+						TERRAIN_CAVE_EDGE_CHAMBERLET_SIDE_OFFSET_SCALE *
+						biomes.regional_terrain_field_lerp(
+							f32(0.72),
+							f32(1.14),
+							biomes.feature_grid_unit_f32(hash, TERRAIN_CAVE_FIELD_DETAIL_SALT),
+						)
+					chamberlet_x := route_x + side_x * side_offset
+					chamberlet_y :=
+						route_y +
+						biomes.feature_grid_signed_unit_f32(hash, TERRAIN_CAVE_BRANCH_SALT) *
+							route_radius *
+							f32(0.16)
+					chamberlet_z := route_z + side_z * side_offset
+					biome_id := edge.from_biome_id
+					if t >= 0.5 {
+						biome_id = edge.to_biome_id
+					}
+
+					previous_detail_found := false
+					previous_detail_x := f32(0)
+					previous_detail_y := f32(0)
+					previous_detail_z := f32(0)
+					previous_detail_radius := f32(0)
+					for detail_index := u32(0);
+					    detail_index < TERRAIN_CAVE_EDGE_CHAMBERLET_DETAIL_COUNT;
+					    detail_index += 1 {
+						detail_hash := biomes.feature_grid_hash_combine(
+							hash,
+							u64(detail_index + 113),
+						)
+						forward_x := side_z
+						forward_z := -side_x
+						forward_sign := f32(1)
+						if (detail_index & 1) != 0 {
+							forward_sign = -1
+						}
+						if biomes.feature_grid_signed_unit_f32(
+							   detail_hash,
+							   TERRAIN_CAVE_CURVE_SALT,
+						   ) <
+						   0 {
+							forward_sign = -forward_sign
+						}
+						dir_x :=
+							side_x *
+								biomes.regional_terrain_field_lerp(
+									f32(0.62),
+									f32(0.92),
+									biomes.feature_grid_unit_f32(
+										detail_hash,
+										TERRAIN_CAVE_FIELD_DETAIL_SALT,
+									),
+								) +
+							forward_x * forward_sign * f32(0.38)
+						dir_z :=
+							side_z *
+								biomes.regional_terrain_field_lerp(
+									f32(0.62),
+									f32(0.92),
+									biomes.feature_grid_unit_f32(
+										detail_hash,
+										TERRAIN_CAVE_FIELD_DETAIL_SALT,
+									),
+								) +
+							forward_z * forward_sign * f32(0.38)
+						dir_len := math.sqrt_f32(dir_x * dir_x + dir_z * dir_z)
+						if dir_len <= 0.001 {
+							dir_x, dir_z = side_x, side_z
+						} else {
+							dir_x /= dir_len
+							dir_z /= dir_len
+						}
+
+						detail_radius := math.clamp(
+							radius_base *
+							biomes.regional_terrain_field_lerp(
+								f32(0.26),
+								f32(0.48),
+								biomes.feature_grid_unit_f32(
+									detail_hash,
+									TERRAIN_CAVE_ROUGHNESS_SALT,
+								),
+							),
+							TERRAIN_CAVE_EDGE_CHAMBERLET_DETAIL_RADIUS_MIN_BLOCKS,
+							TERRAIN_CAVE_EDGE_CHAMBERLET_DETAIL_RADIUS_MAX_BLOCKS,
+						)
+						offset :=
+							route_radius *
+							TERRAIN_CAVE_EDGE_CHAMBERLET_DETAIL_OFFSET_SCALE *
+							biomes.regional_terrain_field_lerp(
+								f32(0.68),
+								f32(1.10),
+								biomes.feature_grid_unit_f32(
+									detail_hash,
+									TERRAIN_CAVE_PASSAGE_RIB_SALT,
+								),
+							)
+						detail_x := chamberlet_x + dir_x * offset
+						detail_y :=
+							chamberlet_y +
+							biomes.feature_grid_signed_unit_f32(
+									detail_hash,
+									TERRAIN_CAVE_BRANCH_SALT,
+								) *
+								radius_base *
+								f32(0.22)
+						detail_z := chamberlet_z + dir_z * offset
+
+						if previous_detail_found {
+							loop_radius := math.max(
+								f32(1.20),
+								math.min(
+									math.min(previous_detail_radius, detail_radius) *
+									TERRAIN_CAVE_EDGE_CHAMBERLET_DETAIL_LOOP_RADIUS_SCALE,
+									route_radius *
+									TERRAIN_CAVE_EDGE_CHAMBERLET_DETAIL_LOOP_ROUTE_CAP_SCALE,
+								),
+							)
+							chain_dx := detail_x - previous_detail_x
+							chain_dy := detail_y - previous_detail_y
+							chain_dz := detail_z - previous_detail_z
+							chain_length := math.sqrt_f32(
+								chain_dx * chain_dx + chain_dy * chain_dy + chain_dz * chain_dz,
+							)
+							if chain_length > 0.001 {
+								score :=
+									loop_radius * f32(100) +
+									chain_length +
+									detail_radius +
+									radius_base
+								if biome_id == .Fungal_Vaults {
+									score += 20
+								}
+								if score > best_score {
+									axis_x := chain_dx / chain_length
+									axis_y := chain_dy / chain_length
+									axis_z := chain_dz / chain_length
+									plan_axis_x := axis_x
+									plan_axis_z := axis_z
+									plan_axis_len := math.sqrt_f32(
+										plan_axis_x * plan_axis_x + plan_axis_z * plan_axis_z,
+									)
+									if plan_axis_len <= 0.001 {
+										plan_axis_x = tangent_x
+										plan_axis_z = tangent_z
+										plan_axis_len = math.sqrt_f32(
+											plan_axis_x * plan_axis_x + plan_axis_z * plan_axis_z,
+										)
+									}
+									if plan_axis_len <= 0.001 {
+										plan_axis_x, plan_axis_z = 1, 0
+									} else {
+										plan_axis_x /= plan_axis_len
+										plan_axis_z /= plan_axis_len
+									}
+									best_score = score
+									best = {
+										found            = true,
+										edge             = edge,
+										chamberlet_index = chamberlet_index,
+										detail_index     = detail_index,
+										center_x         = (previous_detail_x + detail_x) * 0.5,
+										center_y         = (previous_detail_y + detail_y) * 0.5,
+										center_z         = (previous_detail_z + detail_z) * 0.5,
+										route_x          = route_x,
+										route_y          = route_y,
+										route_z          = route_z,
+										chamberlet_x     = chamberlet_x,
+										chamberlet_y     = chamberlet_y,
+										chamberlet_z     = chamberlet_z,
+										axis_x           = axis_x,
+										axis_y           = axis_y,
+										axis_z           = axis_z,
+										plan_axis_x      = plan_axis_x,
+										plan_axis_z      = plan_axis_z,
+										plan_side_x      = -plan_axis_z,
+										plan_side_z      = plan_axis_x,
+										loop_radius      = loop_radius,
+										detail_radius    = math.min(
+											previous_detail_radius,
+											detail_radius,
+										),
+										chain_length     = chain_length,
+										route_radius     = route_radius,
+										biome_id         = biome_id,
+										score            = score,
+									}
+								}
+							}
+						}
+						previous_detail_found = true
+						previous_detail_x = detail_x
+						previous_detail_y = detail_y
+						previous_detail_z = detail_z
+						previous_detail_radius = detail_radius
+					}
+				}
+				return
+			}
+
+			terrain_generation_benchmark_cave_chamberlet_chain_slice_capture_for_selection :: proc(
+				label: string,
+				selection: TerrainGenerationBenchmarkCaveSelection,
+				key: biomes.FeatureGridKey,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				chain := terrain_generation_benchmark_cave_chamberlet_chain_select(key, selection)
+				if !chain.found {
+					log.infof(
+						"TERRAIN_GENERATION_CAVE_CHAMBERLET_CHAIN_SLICE_SKIP label=%s",
+						label,
+					)
+					return
+				}
+
+				log.infof(
+					"TERRAIN_GENERATION_CAVE_CHAMBERLET_CHAIN_SLICE_SELECTION label=%s edge=%d kind=%v chamberlet=%d detail=%d center=(%.2f,%.2f,%.2f) route=(%.2f,%.2f,%.2f) chamberlet_center=(%.2f,%.2f,%.2f) loop_radius=%.2f detail_radius=%.2f chain_length=%.2f route_radius=%.2f biome=%v score=%.2f",
+					label,
+					chain.edge.id,
+					chain.edge.kind,
+					chain.chamberlet_index,
+					chain.detail_index,
+					chain.center_x,
+					chain.center_y,
+					chain.center_z,
+					chain.route_x,
+					chain.route_y,
+					chain.route_z,
+					chain.chamberlet_x,
+					chain.chamberlet_y,
+					chain.chamberlet_z,
+					chain.loop_radius,
+					chain.detail_radius,
+					chain.chain_length,
+					chain.route_radius,
+					chain.biome_id,
+					chain.score,
+				)
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					label,
+					.Route_Plan,
+					chain.center_x,
+					chain.center_y,
+					chain.center_z,
+					chain.plan_axis_x,
+					0,
+					chain.plan_axis_z,
+					chain.plan_side_x,
+					0,
+					chain.plan_side_z,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					label,
+					.Route_Longitudinal,
+					chain.center_x,
+					chain.center_y,
+					chain.center_z,
+					chain.axis_x,
+					chain.axis_y,
+					chain.axis_z,
+					0,
+					1,
+					0,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					label,
+					.Route_Cross_Section,
+					chain.center_x,
+					chain.center_y,
+					chain.center_z,
+					chain.plan_side_x,
+					0,
+					chain.plan_side_z,
+					0,
+					1,
+					0,
+					seed,
+					transient_arena,
+				)
+			}
+
+			TerrainGenerationBenchmarkCaveChamberletGallerySelection :: struct {
+				found:                        bool,
+				edge:                         biomes.CaveNetworkEdge,
+				from_chamberlet_index:        u32,
+				to_chamberlet_index:          u32,
+				center_x, center_y, center_z: f32,
+				from_x, from_y, from_z:       f32,
+				to_x, to_y, to_z:             f32,
+				relay_x, relay_y, relay_z:    f32,
+				axis_x, axis_y, axis_z:       f32,
+				plan_axis_x, plan_axis_z:     f32,
+				plan_side_x, plan_side_z:     f32,
+				gallery_radius:               f32,
+				chain_length:                 f32,
+				route_radius:                 f32,
+				biome_id:                     biomes.BiomeID,
+				score:                        f32,
+			}
+
+			terrain_generation_benchmark_cave_chamberlet_gallery_relay_point :: proc(
+				from_x, from_y, from_z: f32,
+				to_x, to_y, to_z: f32,
+				route_radius: f32,
+				biome_id: biomes.BiomeID,
+				salt: u64,
+			) -> (
+				relay_x, relay_y, relay_z: f32,
+			) {
+				gallery_dx := to_x - from_x
+				gallery_dy := to_y - from_y
+				gallery_dz := to_z - from_z
+				gallery_length := math.sqrt_f32(
+					gallery_dx * gallery_dx + gallery_dy * gallery_dy + gallery_dz * gallery_dz,
+				)
+				if gallery_length <= 0.001 {
+					relay_x = (from_x + to_x) * 0.5
+					relay_y = (from_y + to_y) * 0.5
+					relay_z = (from_z + to_z) * 0.5
+					return
+				}
+				horizontal_length := math.sqrt_f32(
+					gallery_dx * gallery_dx + gallery_dz * gallery_dz,
+				)
+				bend_side_x := f32(1)
+				bend_side_z := f32(0)
+				if horizontal_length > 0.001 {
+					bend_side_x = -gallery_dz / horizontal_length
+					bend_side_z = gallery_dx / horizontal_length
+				}
+				bend_sign := f32(1)
+				if biomes.feature_grid_signed_unit_f32(salt, TERRAIN_CAVE_PASSAGE_RIB_SALT) < 0 {
+					bend_sign = -1
+				}
+				bend_side_x *= bend_sign
+				bend_side_z *= bend_sign
+				vertical_sign := f32(1)
+				if biomes.feature_grid_signed_unit_f32(salt, TERRAIN_CAVE_DETAIL_SALT) < 0 {
+					vertical_sign = -1
+				}
+				bend_offset := math.min(
+					route_radius * TERRAIN_CAVE_EDGE_CHAMBERLET_GALLERY_RELAY_OFFSET_SCALE,
+					gallery_length * f32(0.10),
+				)
+				vertical_offset := math.min(
+					route_radius *
+					TERRAIN_CAVE_EDGE_CHAMBERLET_GALLERY_RELAY_VERTICAL_OFFSET_SCALE,
+					gallery_length * f32(0.06),
+				)
+				#partial switch biome_id {
+				case .Fungal_Vaults:
+					bend_offset *= 1.12
+					vertical_offset *= 0.86
+				case .Crystal_Geode_Network:
+					bend_offset *= 0.72
+					vertical_offset *= 1.28
+				case .Buried_Aquifer_Caves:
+					bend_offset *= 1.08
+					vertical_offset *= 0.62
+				}
+				relay_x = from_x + gallery_dx * f32(0.34) + bend_side_x * bend_offset
+				relay_y = from_y + gallery_dy * f32(0.34) + vertical_sign * vertical_offset
+				relay_z = from_z + gallery_dz * f32(0.34) + bend_side_z * bend_offset
+				return
+			}
+
+			terrain_generation_benchmark_cave_chamberlet_gallery_select :: proc(
+				key: biomes.FeatureGridKey,
+				selection: TerrainGenerationBenchmarkCaveSelection,
+			) -> (
+				best: TerrainGenerationBenchmarkCaveChamberletGallerySelection,
+			) {
+				if !selection.found_matching_biome {
+					return
+				}
+				edge, edge_found := terrain_generation_benchmark_cave_route_edge_select(
+					key,
+					selection,
+				)
+				if !edge_found {
+					return
+				}
+
+				best_score := -max(f32)
+				route_radius := math.max(f32(1), edge.radius_blocks)
+				positive_gallery_found := false
+				positive_gallery_x := f32(0)
+				positive_gallery_y := f32(0)
+				positive_gallery_z := f32(0)
+				positive_gallery_radius := f32(0)
+				positive_gallery_index := u32(0)
+				negative_gallery_found := false
+				negative_gallery_x := f32(0)
+				negative_gallery_y := f32(0)
+				negative_gallery_z := f32(0)
+				negative_gallery_radius := f32(0)
+				negative_gallery_index := u32(0)
+				for chamberlet_index := u32(0);
+				    chamberlet_index < TERRAIN_CAVE_EDGE_CHAMBERLET_COUNT;
+				    chamberlet_index += 1 {
+					hash := biomes.feature_grid_hash_combine(
+						u64(edge.id),
+						TERRAIN_CAVE_ROOM_DETAIL_SALT,
+					)
+					hash = biomes.feature_grid_hash_combine(hash, u64(chamberlet_index))
+					step_t :=
+						(f32(chamberlet_index) + 0.5) / f32(TERRAIN_CAVE_EDGE_CHAMBERLET_COUNT)
+					jitter :=
+						biomes.feature_grid_signed_unit_f32(hash, TERRAIN_CAVE_CURVE_SALT) *
+						f32(0.055)
+					t := math.clamp(
+						biomes.regional_terrain_field_lerp(
+							TERRAIN_CAVE_EDGE_CHAMBERLET_ROUTE_MARGIN,
+							1.0 - TERRAIN_CAVE_EDGE_CHAMBERLET_ROUTE_MARGIN,
+							step_t,
+						) +
+						jitter,
+						TERRAIN_CAVE_EDGE_CHAMBERLET_ROUTE_MARGIN,
+						1.0 - TERRAIN_CAVE_EDGE_CHAMBERLET_ROUTE_MARGIN,
+					)
+					route_x, route_y, route_z := terrain_density_cave_edge_route_point(edge, t)
+					prev_x, prev_y, prev_z := terrain_density_cave_edge_route_point(
+						edge,
+						math.max(f32(0), t - 0.06),
+					)
+					next_x, next_y, next_z := terrain_density_cave_edge_route_point(
+						edge,
+						math.min(f32(1), t + 0.06),
+					)
+					tangent_x, tangent_y, tangent_z := terrain_density_delta_3(
+						prev_x,
+						prev_y,
+						prev_z,
+						next_x,
+						next_y,
+						next_z,
+					)
+					tangent_len := math.sqrt_f32(
+						tangent_x * tangent_x + tangent_y * tangent_y + tangent_z * tangent_z,
+					)
+					if tangent_len > 0.001 {
+						tangent_x /= tangent_len
+						tangent_y /= tangent_len
+						tangent_z /= tangent_len
+					} else {
+						tangent_x, tangent_y, tangent_z = 1, 0, 0
+					}
+					horizontal_length := math.sqrt_f32(
+						tangent_x * tangent_x + tangent_z * tangent_z,
+					)
+					side_x := f32(1)
+					side_z := f32(0)
+					if horizontal_length > 0.001 {
+						side_x = -tangent_z / horizontal_length
+						side_z = tangent_x / horizontal_length
+					}
+					side_sign := f32(1)
+					if (chamberlet_index & 1) != 0 {
+						side_sign = -1
+					}
+					if biomes.feature_grid_signed_unit_f32(hash, TERRAIN_CAVE_PASSAGE_RIB_SALT) <
+					   0 {
+						side_sign = -side_sign
+					}
+					side_x *= side_sign
+					side_z *= side_sign
+
+					radius_base := math.clamp(
+						route_radius *
+						biomes.regional_terrain_field_lerp(
+							f32(0.34),
+							f32(0.56),
+							biomes.feature_grid_unit_f32(hash, TERRAIN_CAVE_ROUGHNESS_SALT),
+						),
+						TERRAIN_CAVE_EDGE_CHAMBERLET_RADIUS_MIN_BLOCKS,
+						TERRAIN_CAVE_EDGE_CHAMBERLET_RADIUS_MAX_BLOCKS,
+					)
+					side_offset :=
+						route_radius *
+						TERRAIN_CAVE_EDGE_CHAMBERLET_SIDE_OFFSET_SCALE *
+						biomes.regional_terrain_field_lerp(
+							f32(0.72),
+							f32(1.14),
+							biomes.feature_grid_unit_f32(hash, TERRAIN_CAVE_FIELD_DETAIL_SALT),
+						)
+					center_x := route_x + side_x * side_offset
+					center_y :=
+						route_y +
+						biomes.feature_grid_signed_unit_f32(hash, TERRAIN_CAVE_BRANCH_SALT) *
+							route_radius *
+							f32(0.16)
+					center_z := route_z + side_z * side_offset
+					biome_id := edge.from_biome_id
+					if t >= 0.5 {
+						biome_id = edge.to_biome_id
+					}
+
+					if side_sign >= 0 {
+						if positive_gallery_found {
+							gallery_radius := math.max(
+								f32(2.0),
+								math.min(
+									math.min(positive_gallery_radius, radius_base) *
+									TERRAIN_CAVE_EDGE_CHAMBERLET_GALLERY_RADIUS_SCALE,
+									route_radius *
+									TERRAIN_CAVE_EDGE_CHAMBERLET_GALLERY_ROUTE_CAP_SCALE,
+								),
+							)
+							chain_dx := center_x - positive_gallery_x
+							chain_dy := center_y - positive_gallery_y
+							chain_dz := center_z - positive_gallery_z
+							chain_length := math.sqrt_f32(
+								chain_dx * chain_dx + chain_dy * chain_dy + chain_dz * chain_dz,
+							)
+							if chain_length > 0.001 {
+								gallery_salt :=
+									TERRAIN_CAVE_ROOM_DETAIL_SALT ~
+									u64(chamberlet_index * 67 + 719)
+								relay_x, relay_y, relay_z :=
+									terrain_generation_benchmark_cave_chamberlet_gallery_relay_point(
+										positive_gallery_x,
+										positive_gallery_y,
+										positive_gallery_z,
+										center_x,
+										center_y,
+										center_z,
+										route_radius,
+										biome_id,
+										gallery_salt,
+									)
+								score :=
+									gallery_radius * f32(120) +
+									chain_length * f32(0.15) +
+									math.min(positive_gallery_radius, radius_base) * f32(8)
+								if biome_id == .Fungal_Vaults {
+									score += 20
+								}
+								if score > best_score {
+									axis_x := chain_dx / chain_length
+									axis_y := chain_dy / chain_length
+									axis_z := chain_dz / chain_length
+									plan_axis_x := axis_x
+									plan_axis_z := axis_z
+									plan_axis_len := math.sqrt_f32(
+										plan_axis_x * plan_axis_x + plan_axis_z * plan_axis_z,
+									)
+									if plan_axis_len <= 0.001 {
+										plan_axis_x, plan_axis_z = tangent_x, tangent_z
+										plan_axis_len = math.sqrt_f32(
+											plan_axis_x * plan_axis_x + plan_axis_z * plan_axis_z,
+										)
+									}
+									if plan_axis_len <= 0.001 {
+										plan_axis_x, plan_axis_z = 1, 0
+									} else {
+										plan_axis_x /= plan_axis_len
+										plan_axis_z /= plan_axis_len
+									}
+									best_score = score
+									best = {
+										found                 = true,
+										edge                  = edge,
+										from_chamberlet_index = positive_gallery_index,
+										to_chamberlet_index   = chamberlet_index,
+										center_x              = (positive_gallery_x +
+											center_x) * 0.5,
+										center_y              = (positive_gallery_y +
+											center_y) * 0.5,
+										center_z              = (positive_gallery_z +
+											center_z) * 0.5,
+										from_x                = positive_gallery_x,
+										from_y                = positive_gallery_y,
+										from_z                = positive_gallery_z,
+										to_x                  = center_x,
+										to_y                  = center_y,
+										to_z                  = center_z,
+										relay_x               = relay_x,
+										relay_y               = relay_y,
+										relay_z               = relay_z,
+										axis_x                = axis_x,
+										axis_y                = axis_y,
+										axis_z                = axis_z,
+										plan_axis_x           = plan_axis_x,
+										plan_axis_z           = plan_axis_z,
+										plan_side_x           = -plan_axis_z,
+										plan_side_z           = plan_axis_x,
+										gallery_radius        = gallery_radius,
+										chain_length          = chain_length,
+										route_radius          = route_radius,
+										biome_id              = biome_id,
+										score                 = score,
+									}
+								}
+							}
+						}
+						positive_gallery_found = true
+						positive_gallery_x = center_x
+						positive_gallery_y = center_y
+						positive_gallery_z = center_z
+						positive_gallery_radius = radius_base
+						positive_gallery_index = chamberlet_index
+					} else {
+						if negative_gallery_found {
+							gallery_radius := math.max(
+								f32(2.0),
+								math.min(
+									math.min(negative_gallery_radius, radius_base) *
+									TERRAIN_CAVE_EDGE_CHAMBERLET_GALLERY_RADIUS_SCALE,
+									route_radius *
+									TERRAIN_CAVE_EDGE_CHAMBERLET_GALLERY_ROUTE_CAP_SCALE,
+								),
+							)
+							chain_dx := center_x - negative_gallery_x
+							chain_dy := center_y - negative_gallery_y
+							chain_dz := center_z - negative_gallery_z
+							chain_length := math.sqrt_f32(
+								chain_dx * chain_dx + chain_dy * chain_dy + chain_dz * chain_dz,
+							)
+							if chain_length > 0.001 {
+								gallery_salt :=
+									TERRAIN_CAVE_ROOM_DETAIL_SALT ~
+									u64(chamberlet_index * 67 + 769)
+								relay_x, relay_y, relay_z :=
+									terrain_generation_benchmark_cave_chamberlet_gallery_relay_point(
+										negative_gallery_x,
+										negative_gallery_y,
+										negative_gallery_z,
+										center_x,
+										center_y,
+										center_z,
+										route_radius,
+										biome_id,
+										gallery_salt,
+									)
+								score :=
+									gallery_radius * f32(120) +
+									chain_length * f32(0.15) +
+									math.min(negative_gallery_radius, radius_base) * f32(8)
+								if biome_id == .Fungal_Vaults {
+									score += 20
+								}
+								if score > best_score {
+									axis_x := chain_dx / chain_length
+									axis_y := chain_dy / chain_length
+									axis_z := chain_dz / chain_length
+									plan_axis_x := axis_x
+									plan_axis_z := axis_z
+									plan_axis_len := math.sqrt_f32(
+										plan_axis_x * plan_axis_x + plan_axis_z * plan_axis_z,
+									)
+									if plan_axis_len <= 0.001 {
+										plan_axis_x, plan_axis_z = tangent_x, tangent_z
+										plan_axis_len = math.sqrt_f32(
+											plan_axis_x * plan_axis_x + plan_axis_z * plan_axis_z,
+										)
+									}
+									if plan_axis_len <= 0.001 {
+										plan_axis_x, plan_axis_z = 1, 0
+									} else {
+										plan_axis_x /= plan_axis_len
+										plan_axis_z /= plan_axis_len
+									}
+									best_score = score
+									best = {
+										found                 = true,
+										edge                  = edge,
+										from_chamberlet_index = negative_gallery_index,
+										to_chamberlet_index   = chamberlet_index,
+										center_x              = (negative_gallery_x +
+											center_x) * 0.5,
+										center_y              = (negative_gallery_y +
+											center_y) * 0.5,
+										center_z              = (negative_gallery_z +
+											center_z) * 0.5,
+										from_x                = negative_gallery_x,
+										from_y                = negative_gallery_y,
+										from_z                = negative_gallery_z,
+										to_x                  = center_x,
+										to_y                  = center_y,
+										to_z                  = center_z,
+										relay_x               = relay_x,
+										relay_y               = relay_y,
+										relay_z               = relay_z,
+										axis_x                = axis_x,
+										axis_y                = axis_y,
+										axis_z                = axis_z,
+										plan_axis_x           = plan_axis_x,
+										plan_axis_z           = plan_axis_z,
+										plan_side_x           = -plan_axis_z,
+										plan_side_z           = plan_axis_x,
+										gallery_radius        = gallery_radius,
+										chain_length          = chain_length,
+										route_radius          = route_radius,
+										biome_id              = biome_id,
+										score                 = score,
+									}
+								}
+							}
+						}
+						negative_gallery_found = true
+						negative_gallery_x = center_x
+						negative_gallery_y = center_y
+						negative_gallery_z = center_z
+						negative_gallery_radius = radius_base
+						negative_gallery_index = chamberlet_index
+					}
+				}
+				return
+			}
+
+			terrain_generation_benchmark_cave_chamberlet_gallery_slice_capture_for_selection :: proc(
+				label: string,
+				selection: TerrainGenerationBenchmarkCaveSelection,
+				key: biomes.FeatureGridKey,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				gallery := terrain_generation_benchmark_cave_chamberlet_gallery_select(
+					key,
+					selection,
+				)
+				if !gallery.found {
+					log.infof(
+						"TERRAIN_GENERATION_CAVE_CHAMBERLET_GALLERY_SLICE_SKIP label=%s",
+						label,
+					)
+					return
+				}
+
+				log.infof(
+					"TERRAIN_GENERATION_CAVE_CHAMBERLET_GALLERY_SLICE_SELECTION label=%s edge=%d kind=%v from_chamberlet=%d to_chamberlet=%d center=(%.2f,%.2f,%.2f) from=(%.2f,%.2f,%.2f) to=(%.2f,%.2f,%.2f) relay=(%.2f,%.2f,%.2f) gallery_radius=%.2f chain_length=%.2f route_radius=%.2f biome=%v score=%.2f",
+					label,
+					gallery.edge.id,
+					gallery.edge.kind,
+					gallery.from_chamberlet_index,
+					gallery.to_chamberlet_index,
+					gallery.center_x,
+					gallery.center_y,
+					gallery.center_z,
+					gallery.from_x,
+					gallery.from_y,
+					gallery.from_z,
+					gallery.to_x,
+					gallery.to_y,
+					gallery.to_z,
+					gallery.relay_x,
+					gallery.relay_y,
+					gallery.relay_z,
+					gallery.gallery_radius,
+					gallery.chain_length,
+					gallery.route_radius,
+					gallery.biome_id,
+					gallery.score,
+				)
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					"chamberlet_gallery_endpoint",
+					.Route_Endpoint_Plan,
+					gallery.from_x,
+					gallery.from_y,
+					gallery.from_z,
+					gallery.plan_axis_x,
+					0,
+					gallery.plan_axis_z,
+					gallery.plan_side_x,
+					0,
+					gallery.plan_side_z,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					"chamberlet_gallery_relay",
+					.Route_Endpoint_Plan,
+					gallery.relay_x,
+					gallery.relay_y,
+					gallery.relay_z,
+					gallery.plan_axis_x,
+					0,
+					gallery.plan_axis_z,
+					gallery.plan_side_x,
+					0,
+					gallery.plan_side_z,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					label,
+					.Route_Plan,
+					gallery.center_x,
+					gallery.center_y,
+					gallery.center_z,
+					gallery.plan_axis_x,
+					0,
+					gallery.plan_axis_z,
+					gallery.plan_side_x,
+					0,
+					gallery.plan_side_z,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					label,
+					.Route_Longitudinal,
+					gallery.center_x,
+					gallery.center_y,
+					gallery.center_z,
+					gallery.axis_x,
+					gallery.axis_y,
+					gallery.axis_z,
+					0,
+					1,
+					0,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					label,
+					.Route_Cross_Section,
+					gallery.center_x,
+					gallery.center_y,
+					gallery.center_z,
+					gallery.plan_side_x,
+					0,
+					gallery.plan_side_z,
+					0,
+					1,
+					0,
+					seed,
+					transient_arena,
+				)
+			}
+
+			TerrainGenerationBenchmarkCavePortalSelection :: struct {
+				found:                        bool,
+				node:                         biomes.CaveNetworkNode,
+				edge:                         biomes.CaveNetworkEdge,
+				center_x, center_y, center_z: f32,
+				axis_x, axis_z:               f32,
+				side_x, side_z:               f32,
+				radius:                       f32,
+				score:                        f32,
+			}
+
+			TerrainGenerationBenchmarkCaveMacroClusterSelection :: struct {
+				found:                        bool,
+				node:                         biomes.CaveNetworkNode,
+				satellite_index:              u32,
+				next_index:                   u32,
+				center_x, center_y, center_z: f32,
+				tangent_x, tangent_z:         f32,
+				outward_x, outward_z:         f32,
+				bridge_radius:                f32,
+				pocket_radius:                f32,
+				score:                        f32,
+			}
+
+			terrain_generation_benchmark_cave_portal_room_radii :: proc(
+				node: biomes.CaveNetworkNode,
+			) -> (
+				room_radius_x, room_radius_y, room_radius_z: f32,
+			) {
+				radius_x := node.radius_blocks
+				radius_y := node.radius_blocks * 0.85
+				radius_z := node.radius_blocks
+				#partial switch node.kind {
+				case .Biome_Hub:
+					radius_x *= 1.35
+					radius_y *= 0.78
+					radius_z *= 1.20
+				case .Underground_Lake:
+					radius_x *= 1.45
+					radius_y *= 0.55
+					radius_z *= 1.35
+				case .River_Junction:
+					radius_x *= 1.15
+					radius_y *= 0.72
+					radius_z *= 1.15
+				case .Geode_Chamber:
+					radius_x *= 1.05
+					radius_y *= 1.05
+					radius_z *= 1.05
+				case .Magma_Pocket:
+					radius_x *= 1.15
+					radius_y *= 0.70
+					radius_z *= 1.15
+				}
+				room_radius_x = math.min(radius_x, TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_XZ)
+				room_radius_y = math.min(radius_y, TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_Y)
+				room_radius_z = math.min(radius_z, TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_XZ)
+				return
+			}
+
+			terrain_generation_benchmark_cave_portal_select :: proc(
+				key: biomes.FeatureGridKey,
+				selection: TerrainGenerationBenchmarkCaveSelection,
+			) -> (
+				best: TerrainGenerationBenchmarkCavePortalSelection,
+			) {
+				if !selection.found_matching_biome ||
+				   !terrain_density_cave_node_edge_portals_enabled(selection.node) {
+					return
+				}
+
+				origin := chunk_origin_from_coord(selection.chunk)
+				region_coord := biomes.generation_region_coord_from_block(
+					origin.x,
+					origin.y,
+					origin.z,
+				)
+				region := terrain_generation_region_for_fill(key, region_coord)
+				room_radius_x, room_radius_y, room_radius_z :=
+					terrain_generation_benchmark_cave_portal_room_radii(selection.node)
+				room_radius_xz := math.min(room_radius_x, room_radius_z)
+
+				portal_count := u32(0)
+				for i := u32(0);
+				    i < region.cave_network_edge_count &&
+				    portal_count < TERRAIN_CAVE_NODE_EDGE_PORTAL_MAX_COUNT;
+				    i += 1 {
+					edge := region.cave_network_edges[i]
+					from_endpoint := edge.from_node_id == selection.node.id
+					to_endpoint := edge.to_node_id == selection.node.id
+					if !from_endpoint && !to_endpoint {
+						continue
+					}
+					if edge.kind == .Vertical_Shaft {
+						continue
+					}
+					edge_radius := math.max(f32(3), edge.radius_blocks)
+					if !edge.guaranteed_connection &&
+					   edge_radius < TERRAIN_CAVE_FIELD_NETWORK_BRIDGE_MIN_RADIUS {
+						continue
+					}
+
+					route_t := TERRAIN_CAVE_NODE_EDGE_PORTAL_ROUTE_T
+					if to_endpoint {
+						route_t = 1.0 - TERRAIN_CAVE_NODE_EDGE_PORTAL_ROUTE_T
+					}
+					route_x, route_y, route_z := terrain_density_cave_edge_route_point(
+						edge,
+						route_t,
+					)
+					dir_x := route_x - selection.node.x
+					dir_y := route_y - selection.node.y
+					dir_z := route_z - selection.node.z
+					dir_len := math.sqrt_f32(dir_x * dir_x + dir_y * dir_y + dir_z * dir_z)
+					if dir_len <= 0.001 {
+						continue
+					}
+					dir_x /= dir_len
+					dir_y /= dir_len
+					dir_z /= dir_len
+					horizontal_len := math.sqrt_f32(dir_x * dir_x + dir_z * dir_z)
+					side_x := f32(1)
+					side_z := f32(0)
+					axis_x := f32(1)
+					axis_z := f32(0)
+					if horizontal_len > 0.001 {
+						axis_x = dir_x / horizontal_len
+						axis_z = dir_z / horizontal_len
+						side_x = -axis_z
+						side_z = axis_x
+					}
+
+					hash := biomes.feature_grid_hash_combine(
+						u64(edge.id),
+						TERRAIN_CAVE_ROOM_DETAIL_SALT,
+					)
+					hash = biomes.feature_grid_hash_combine(hash, u64(selection.node.id))
+					hash = biomes.feature_grid_hash_combine(hash, u64(portal_count + 1217))
+					side_sign := f32(1)
+					if biomes.feature_grid_signed_unit_f32(hash, TERRAIN_CAVE_BRANCH_SALT) < 0 {
+						side_sign = -1
+					}
+					vertical_sign := f32(1)
+					if biomes.feature_grid_signed_unit_f32(hash, TERRAIN_CAVE_PASSAGE_RIB_SALT) <
+					   0 {
+						vertical_sign = -1
+					}
+
+					portal_radius := math.clamp(
+						room_radius_xz *
+						TERRAIN_CAVE_NODE_EDGE_PORTAL_RADIUS_SCALE *
+						biomes.regional_terrain_field_lerp(
+							f32(0.78),
+							f32(1.16),
+							biomes.feature_grid_unit_f32(hash, TERRAIN_CAVE_FIELD_CHAMBER_SALT),
+						),
+						TERRAIN_CAVE_NODE_EDGE_PORTAL_RADIUS_MIN_BLOCKS,
+						TERRAIN_CAVE_NODE_EDGE_PORTAL_RADIUS_MAX_BLOCKS,
+					)
+					side_offset :=
+						portal_radius *
+						TERRAIN_CAVE_NODE_EDGE_PORTAL_SIDE_OFFSET_SCALE *
+						side_sign *
+						biomes.regional_terrain_field_lerp(
+							f32(0.45),
+							f32(1.10),
+							biomes.feature_grid_unit_f32(hash, TERRAIN_CAVE_FIELD_DETAIL_SALT),
+						)
+					vertical_offset :=
+						room_radius_y *
+						TERRAIN_CAVE_NODE_EDGE_PORTAL_VERTICAL_OFFSET_SCALE *
+						vertical_sign *
+						biomes.regional_terrain_field_lerp(
+							f32(0.35),
+							f32(1.05),
+							biomes.feature_grid_unit_f32(hash, TERRAIN_CAVE_ROUGHNESS_SALT),
+						)
+					center_x :=
+						selection.node.x +
+						dir_x * room_radius_xz * TERRAIN_CAVE_NODE_EDGE_PORTAL_OFFSET_SCALE +
+						side_x * side_offset
+					center_y :=
+						selection.node.y + dir_y * room_radius_y * f32(0.65) + vertical_offset
+					center_z :=
+						selection.node.z +
+						dir_z * room_radius_xz * TERRAIN_CAVE_NODE_EDGE_PORTAL_OFFSET_SCALE +
+						side_z * side_offset
+					score := portal_radius * 10.0 + edge_radius
+					if edge.guaranteed_connection {
+						score += edge_radius
+					}
+					#partial switch edge.kind {
+					case .Worm_Path:
+						score += 8
+					case .Canyon:
+						score += 4
+					case .Fracture:
+						score += 3
+					case .Flooded_Passage:
+						score += 2
+					}
+					if !best.found || score > best.score {
+						best = {
+							found    = true,
+							node     = selection.node,
+							edge     = edge,
+							center_x = center_x,
+							center_y = center_y,
+							center_z = center_z,
+							axis_x   = axis_x,
+							axis_z   = axis_z,
+							side_x   = side_x * side_sign,
+							side_z   = side_z * side_sign,
+							radius   = portal_radius,
+							score    = score,
+						}
+					}
+					portal_count += 1
+				}
+				return
+			}
+
+			terrain_generation_benchmark_cave_portal_slice_capture_for_selection :: proc(
+				label: string,
+				selection: TerrainGenerationBenchmarkCaveSelection,
+				key: biomes.FeatureGridKey,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				portal := terrain_generation_benchmark_cave_portal_select(key, selection)
+				if !portal.found {
+					log.infof("TERRAIN_GENERATION_CAVE_PORTAL_SLICE_SKIP label=%s", label)
+					return
+				}
+				log.infof(
+					"TERRAIN_GENERATION_CAVE_PORTAL_SLICE_SELECTION label=%s node=%d edge=%d kind=%v radius=%.2f center=(%.2f,%.2f,%.2f) axis=(%.3f,%.3f) side=(%.3f,%.3f)",
+					label,
+					portal.node.id,
+					portal.edge.id,
+					portal.edge.kind,
+					portal.radius,
+					portal.center_x,
+					portal.center_y,
+					portal.center_z,
+					portal.axis_x,
+					portal.axis_z,
+					portal.side_x,
+					portal.side_z,
+				)
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					label,
+					.Route_Plan,
+					portal.center_x,
+					portal.center_y,
+					portal.center_z,
+					portal.axis_x,
+					0,
+					portal.axis_z,
+					portal.side_x,
+					0,
+					portal.side_z,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					label,
+					.Route_Longitudinal,
+					portal.center_x,
+					portal.center_y,
+					portal.center_z,
+					portal.axis_x,
+					0,
+					portal.axis_z,
+					0,
+					1,
+					0,
+					seed,
+					transient_arena,
+				)
+			}
+
+			terrain_generation_benchmark_cave_macro_cluster_select :: proc(
+				selection: TerrainGenerationBenchmarkCaveSelection,
+			) -> (
+				best: TerrainGenerationBenchmarkCaveMacroClusterSelection,
+			) {
+				if !selection.found_matching_biome ||
+				   !selection.node.major_region ||
+				   !terrain_density_cave_node_uses_profile_room(selection.node) {
+					return
+				}
+
+				room_radius_x, room_radius_y, room_radius_z :=
+					terrain_generation_benchmark_cave_portal_room_radii(selection.node)
+				base_radius := math.max(
+					TERRAIN_CAVE_NODE_MACRO_SATELLITE_MIN_RADIUS_BLOCKS,
+					math.min(room_radius_x, room_radius_z) *
+					TERRAIN_CAVE_NODE_MACRO_SATELLITE_RADIUS_XZ_SCALE,
+				)
+
+				satellite_center_x: [TERRAIN_CAVE_NODE_MACRO_SATELLITE_COUNT]f32
+				satellite_center_y: [TERRAIN_CAVE_NODE_MACRO_SATELLITE_COUNT]f32
+				satellite_center_z: [TERRAIN_CAVE_NODE_MACRO_SATELLITE_COUNT]f32
+				satellite_radius_xz_min: [TERRAIN_CAVE_NODE_MACRO_SATELLITE_COUNT]f32
+				satellite_dir_x: [TERRAIN_CAVE_NODE_MACRO_SATELLITE_COUNT]f32
+				satellite_dir_z: [TERRAIN_CAVE_NODE_MACRO_SATELLITE_COUNT]f32
+
+				for satellite_index := u32(0);
+				    satellite_index < TERRAIN_CAVE_NODE_MACRO_SATELLITE_COUNT;
+				    satellite_index += 1 {
+					hash := biomes.feature_grid_hash_combine(
+						u64(selection.node.id),
+						TERRAIN_CAVE_FIELD_CHAMBER_SALT,
+					)
+					hash = biomes.feature_grid_hash_combine(hash, u64(satellite_index + 811))
+					angle :=
+						(f32(satellite_index) / f32(TERRAIN_CAVE_NODE_MACRO_SATELLITE_COUNT) +
+							biomes.feature_grid_unit_f32(hash, TERRAIN_CAVE_CURVE_SALT) *
+								f32(0.19)) *
+						f32(6.2831855)
+					dir_x := math.cos_f32(angle)
+					dir_z := math.sin_f32(angle)
+					forward_bias := biomes.regional_terrain_field_lerp(
+						f32(0.78),
+						f32(1.18),
+						biomes.feature_grid_unit_f32(hash, TERRAIN_CAVE_BRANCH_SALT),
+					)
+					vertical_sign := f32(1)
+					if (satellite_index & 1) != 0 {
+						vertical_sign = -1
+					}
+					if biomes.feature_grid_signed_unit_f32(hash, TERRAIN_CAVE_PASSAGE_RIB_SALT) <
+					   0 {
+						vertical_sign = -vertical_sign
+					}
+
+					satellite_radius := math.clamp(
+						base_radius *
+						biomes.regional_terrain_field_lerp(
+							f32(0.78),
+							f32(1.24),
+							biomes.feature_grid_unit_f32(hash, TERRAIN_CAVE_ROUGHNESS_SALT),
+						),
+						TERRAIN_CAVE_NODE_MACRO_SATELLITE_MIN_RADIUS_BLOCKS,
+						TERRAIN_CAVE_NODE_MACRO_SATELLITE_MAX_RADIUS_BLOCKS,
+					)
+					satellite_radius_x := satellite_radius
+					satellite_radius_z := satellite_radius * f32(0.92)
+					#partial switch selection.node.biome_id {
+					case .Fungal_Vaults:
+						satellite_radius_x *= 1.18
+						satellite_radius_z *= 1.08
+					case .Crystal_Geode_Network:
+						satellite_radius_x *= 0.72
+						satellite_radius_z *= 0.82
+					case .Buried_Aquifer_Caves:
+						satellite_radius_x *= 1.20
+						satellite_radius_z *= 1.08
+					case .Temperate_Hills,
+					     .Basalt_Spire_Highlands,
+					     .Wet_Lowland_Marsh,
+					     .Corrupted_Ash_Forest:
+					}
+
+					satellite_center_x[satellite_index] =
+						selection.node.x +
+						dir_x *
+							room_radius_x *
+							TERRAIN_CAVE_NODE_MACRO_SATELLITE_OFFSET_SCALE *
+							forward_bias
+					satellite_center_y[satellite_index] =
+						selection.node.y +
+						room_radius_y *
+							TERRAIN_CAVE_NODE_MACRO_SATELLITE_VERTICAL_OFFSET_SCALE *
+							vertical_sign *
+							biomes.regional_terrain_field_lerp(
+								f32(0.44),
+								f32(1.08),
+								biomes.feature_grid_unit_f32(hash, TERRAIN_CAVE_DETAIL_SALT),
+							)
+					satellite_center_z[satellite_index] =
+						selection.node.z +
+						dir_z *
+							room_radius_z *
+							TERRAIN_CAVE_NODE_MACRO_SATELLITE_OFFSET_SCALE *
+							forward_bias
+					satellite_radius_xz_min[satellite_index] = math.min(
+						satellite_radius_x,
+						satellite_radius_z,
+					)
+					satellite_dir_x[satellite_index] = dir_x
+					satellite_dir_z[satellite_index] = dir_z
+				}
+
+				for satellite_index := u32(0);
+				    satellite_index < TERRAIN_CAVE_NODE_MACRO_SATELLITE_COUNT;
+				    satellite_index += 1 {
+					next_index := (satellite_index + 1) % TERRAIN_CAVE_NODE_MACRO_SATELLITE_COUNT
+					bridge_source_radius := math.min(
+						satellite_radius_xz_min[satellite_index],
+						satellite_radius_xz_min[next_index],
+					)
+					bridge_radius := math.max(
+						TERRAIN_CAVE_NODE_MACRO_SATELLITE_CLUSTER_BRIDGE_MIN_BLOCKS,
+						bridge_source_radius *
+						TERRAIN_CAVE_NODE_MACRO_SATELLITE_CLUSTER_BRIDGE_RADIUS_SCALE,
+					)
+					outward_x := satellite_dir_x[satellite_index] + satellite_dir_x[next_index]
+					outward_z := satellite_dir_z[satellite_index] + satellite_dir_z[next_index]
+					outward_length := math.sqrt_f32(outward_x * outward_x + outward_z * outward_z)
+					if outward_length <= 0.001 {
+						outward_x = satellite_dir_x[satellite_index]
+						outward_z = satellite_dir_z[satellite_index]
+					} else {
+						outward_x /= outward_length
+						outward_z /= outward_length
+					}
+					directional_radius_inv_sq :=
+						(outward_x * outward_x) / (room_radius_x * room_radius_x) +
+						(outward_z * outward_z) / (room_radius_z * room_radius_z)
+					directional_room_radius := math.min(room_radius_x, room_radius_z)
+					if directional_radius_inv_sq > 0.0001 {
+						directional_room_radius = f32(1) / math.sqrt_f32(directional_radius_inv_sq)
+					}
+					outer_hash := biomes.feature_grid_hash_combine(
+						u64(selection.node.id),
+						TERRAIN_CAVE_ROOM_DETAIL_SALT,
+					)
+					outer_hash = biomes.feature_grid_hash_combine(
+						outer_hash,
+						u64(satellite_index + 943),
+					)
+					center_x :=
+						selection.node.x +
+						outward_x *
+							directional_room_radius *
+							TERRAIN_CAVE_NODE_MACRO_SATELLITE_CLUSTER_OUTER_OFFSET_SCALE
+					center_y :=
+						(satellite_center_y[satellite_index] + satellite_center_y[next_index]) *
+							f32(0.5) +
+						room_radius_y *
+							f32(0.12) *
+							biomes.feature_grid_signed_unit_f32(
+								outer_hash,
+								TERRAIN_CAVE_PASSAGE_RIB_SALT,
+							)
+					center_z :=
+						selection.node.z +
+						outward_z *
+							directional_room_radius *
+							TERRAIN_CAVE_NODE_MACRO_SATELLITE_CLUSTER_OUTER_OFFSET_SCALE
+
+					tangent_x :=
+						satellite_center_x[next_index] - satellite_center_x[satellite_index]
+					tangent_z :=
+						satellite_center_z[next_index] - satellite_center_z[satellite_index]
+					tangent_length := math.sqrt_f32(tangent_x * tangent_x + tangent_z * tangent_z)
+					if tangent_length <= 0.001 {
+						tangent_x = -outward_z
+						tangent_z = outward_x
+					} else {
+						tangent_x /= tangent_length
+						tangent_z /= tangent_length
+					}
+
+					pocket_radius := math.clamp(
+						bridge_source_radius *
+						TERRAIN_CAVE_NODE_MACRO_SATELLITE_CLUSTER_POCKET_RADIUS_SCALE,
+						TERRAIN_CAVE_NODE_MACRO_SATELLITE_CLUSTER_POCKET_MIN_BLOCKS,
+						TERRAIN_CAVE_NODE_MACRO_SATELLITE_CLUSTER_POCKET_MAX_BLOCKS,
+					)
+					score :=
+						pocket_radius * 10.0 + bridge_radius * 7.0 + bridge_source_radius * 3.0
+					score += math.abs(center_y - selection.node.y) * 0.25
+					if selection.node.biome_id == .Fungal_Vaults {
+						score += math.abs(outward_x) + math.abs(outward_z)
+					}
+					if !best.found || score > best.score {
+						best = {
+							found           = true,
+							node            = selection.node,
+							satellite_index = satellite_index,
+							next_index      = next_index,
+							center_x        = center_x,
+							center_y        = center_y,
+							center_z        = center_z,
+							tangent_x       = tangent_x,
+							tangent_z       = tangent_z,
+							outward_x       = outward_x,
+							outward_z       = outward_z,
+							bridge_radius   = bridge_radius,
+							pocket_radius   = pocket_radius,
+							score           = score,
+						}
+					}
+				}
+				return
+			}
+
+			terrain_generation_benchmark_cave_macro_cluster_slice_capture_for_selection :: proc(
+				label: string,
+				selection: TerrainGenerationBenchmarkCaveSelection,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				cluster := terrain_generation_benchmark_cave_macro_cluster_select(selection)
+				if !cluster.found {
+					log.infof("TERRAIN_GENERATION_CAVE_MACRO_CLUSTER_SLICE_SKIP label=%s", label)
+					return
+				}
+				log.infof(
+					"TERRAIN_GENERATION_CAVE_MACRO_CLUSTER_SLICE_SELECTION label=%s node=%d satellite=%d next=%d bridge_radius=%.2f pocket_radius=%.2f center=(%.2f,%.2f,%.2f) tangent=(%.3f,%.3f) outward=(%.3f,%.3f)",
+					label,
+					cluster.node.id,
+					cluster.satellite_index,
+					cluster.next_index,
+					cluster.bridge_radius,
+					cluster.pocket_radius,
+					cluster.center_x,
+					cluster.center_y,
+					cluster.center_z,
+					cluster.tangent_x,
+					cluster.tangent_z,
+					cluster.outward_x,
+					cluster.outward_z,
+				)
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					label,
+					.Route_Plan,
+					cluster.center_x,
+					cluster.center_y,
+					cluster.center_z,
+					cluster.tangent_x,
+					0,
+					cluster.tangent_z,
+					cluster.outward_x,
+					0,
+					cluster.outward_z,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					label,
+					.Route_Longitudinal,
+					cluster.center_x,
+					cluster.center_y,
+					cluster.center_z,
+					cluster.outward_x,
+					0,
+					cluster.outward_z,
+					0,
+					1,
+					0,
+					seed,
+					transient_arena,
+				)
+			}
+
+			terrain_generation_benchmark_cave_seam_edge_select :: proc(
+				key: biomes.FeatureGridKey,
+				region_coord: biomes.GenerationRegionCoord,
+				axis: int,
+				positive_face: bool,
+			) -> (
+				edge: biomes.CaveNetworkEdge,
+				face_block: f32,
+				found: bool,
+			) {
+				region := terrain_generation_region_for_fill(key, region_coord)
+				switch axis {
+				case 0:
+					face_block = f32(region.bounds.min.x)
+					if positive_face {
+						face_block = f32(region.bounds.max.x)
+					}
+				case 1:
+					face_block = f32(region.bounds.min.y)
+					if positive_face {
+						face_block = f32(region.bounds.max.y)
+					}
+				case 2:
+					face_block = f32(region.bounds.min.z)
+					if positive_face {
+						face_block = f32(region.bounds.max.z)
+					}
+				}
+				eligible: [biomes.GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]bool
+				for i := u32(0); i < region.cave_network_node_count; i += 1 {
+					eligible[i] = region.cave_network_nodes[i].role != .Sealed_Secret
+				}
+				from_index, to_index, edge_found :=
+					biomes.generation_region_cave_network_seam_edge_select(
+						&region,
+						eligible,
+						axis,
+						face_block,
+					)
+				if !edge_found {
+					return
+				}
+				edge = biomes.cave_network_seam_edge_from_nodes(
+					region.cave_network_nodes[from_index],
+					region.cave_network_nodes[to_index],
+				)
+				found = true
+				return
+			}
+
+			terrain_generation_benchmark_cave_edge_face_t :: proc(
+				edge: biomes.CaveNetworkEdge,
+				axis: int,
+				face_block: f32,
+			) -> f32 {
+				best_t := f32(0.5)
+				best_distance := max(f32)
+				for step := i32(0); step <= 64; step += 1 {
+					t := f32(step) / f32(64)
+					route_x, route_y, route_z := terrain_density_cave_edge_route_point(edge, t)
+					route_axis := route_z
+					if axis == 0 {
+						route_axis = route_x
+					} else if axis == 1 {
+						route_axis = route_y
+					}
+					distance := math.abs(route_axis - face_block)
+					if distance < best_distance {
+						best_distance = distance
+						best_t = t
+					}
+				}
+				return best_t
+			}
+
+			terrain_generation_benchmark_cave_seam_slice_capture :: proc(
+				label: string,
+				key: biomes.FeatureGridKey,
+				region_coord: biomes.GenerationRegionCoord,
+				axis: int,
+				positive_face: bool,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				edge, face_block, found := terrain_generation_benchmark_cave_seam_edge_select(
+					key,
+					region_coord,
+					axis,
+					positive_face,
+				)
+				if !found {
+					log.infof(
+						"TERRAIN_GENERATION_CAVE_SEAM_SLICE_SKIP label=%s region=(%d,%d,%d) axis=%d positive_face=%v",
+						label,
+						region_coord.x,
+						region_coord.y,
+						region_coord.z,
+						axis,
+						positive_face,
+					)
+					return
+				}
+
+				route_t := terrain_generation_benchmark_cave_edge_face_t(edge, axis, face_block)
+				route_x, route_y, route_z := terrain_density_cave_edge_route_point(edge, route_t)
+				length_dx := edge.to_x - edge.from_x
+				length_dy := edge.to_y - edge.from_y
+				length_dz := edge.to_z - edge.from_z
+				route_length := math.sqrt_f32(
+					length_dx * length_dx + length_dy * length_dy + length_dz * length_dz,
+				)
+				log.infof(
+					"TERRAIN_GENERATION_CAVE_SEAM_SLICE_SELECTION label=%s region=(%d,%d,%d) axis=%d positive_face=%v face=%.2f edge=%d kind=%v radius=%.2f length=%.2f route_t=%.3f route=(%.2f,%.2f,%.2f) from=(%.2f,%.2f,%.2f) to=(%.2f,%.2f,%.2f)",
+					label,
+					region_coord.x,
+					region_coord.y,
+					region_coord.z,
+					axis,
+					positive_face,
+					face_block,
+					edge.id,
+					edge.kind,
+					edge.radius_blocks,
+					route_length,
+					route_t,
+					route_x,
+					route_y,
+					route_z,
+					edge.from_x,
+					edge.from_y,
+					edge.from_z,
+					edge.to_x,
+					edge.to_y,
+					edge.to_z,
+				)
+				terrain_generation_benchmark_cave_route_slice_capture(
+					label,
+					edge,
+					.Route_Longitudinal,
+					seed,
+					transient_arena,
+				)
+				center_x := route_x
+				center_y := route_y
+				center_z := route_z
+				axis_u_x := f32(1)
+				axis_u_y := f32(0)
+				axis_u_z := f32(0)
+				axis_v_x := f32(0)
+				axis_v_y := f32(1)
+				axis_v_z := f32(0)
+				if axis == 0 {
+					center_x = face_block
+					axis_u_x = 0
+					axis_u_z = 1
+				} else if axis == 1 {
+					center_y = face_block
+					axis_v_y = 0
+					axis_v_z = 1
+				} else {
+					center_z = face_block
+				}
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					label,
+					.Route_Cross_Section,
+					center_x,
+					center_y,
+					center_z,
+					axis_u_x,
+					axis_u_y,
+					axis_u_z,
+					axis_v_x,
+					axis_v_y,
+					axis_v_z,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_route_slice_capture(
+					label,
+					edge,
+					.Route_Oblique,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_route_slice_capture(
+					label,
+					edge,
+					.Route_Plan,
+					seed,
+					transient_arena,
+				)
+			}
+
+			terrain_generation_benchmark_cave_seam_view_capture :: proc(
+				forward_label, diag_positive_label, diag_negative_label: string,
+				key: biomes.FeatureGridKey,
+				region_coord: biomes.GenerationRegionCoord,
+				axis: int,
+				positive_face: bool,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				edge, face_block, found := terrain_generation_benchmark_cave_seam_edge_select(
+					key,
+					region_coord,
+					axis,
+					positive_face,
+				)
+				if !found {
+					log.infof(
+						"TERRAIN_GENERATION_CAVE_VIEW_SKIP label=%s region=(%d,%d,%d) axis=%d positive_face=%v",
+						forward_label,
+						region_coord.x,
+						region_coord.y,
+						region_coord.z,
+						axis,
+						positive_face,
+					)
+					return
+				}
+
+				route_t := terrain_generation_benchmark_cave_edge_face_t(edge, axis, face_block)
+				route_x, route_y, route_z := terrain_density_cave_edge_route_point(edge, route_t)
+				length_dx := edge.to_x - edge.from_x
+				length_dy := edge.to_y - edge.from_y
+				length_dz := edge.to_z - edge.from_z
+				route_length := math.sqrt_f32(
+					length_dx * length_dx + length_dy * length_dy + length_dz * length_dz,
+				)
+				log.infof(
+					"TERRAIN_GENERATION_CAVE_SEAM_VIEW_SELECTION label=%s region=(%d,%d,%d) axis=%d positive_face=%v face=%.2f edge=%d kind=%v radius=%.2f length=%.2f route_t=%.3f route=(%.2f,%.2f,%.2f) from=(%.2f,%.2f,%.2f) to=(%.2f,%.2f,%.2f)",
+					forward_label,
+					region_coord.x,
+					region_coord.y,
+					region_coord.z,
+					axis,
+					positive_face,
+					face_block,
+					edge.id,
+					edge.kind,
+					edge.radius_blocks,
+					route_length,
+					route_t,
+					route_x,
+					route_y,
+					route_z,
+					edge.from_x,
+					edge.from_y,
+					edge.from_z,
+					edge.to_x,
+					edge.to_y,
+					edge.to_z,
+				)
+				terrain_generation_benchmark_cave_view_capture(
+					forward_label,
+					edge,
+					route_t,
+					0,
+					0,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_view_capture(
+					diag_positive_label,
+					edge,
+					route_t,
+					f32(0.68),
+					f32(0.42),
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_view_capture(
+					diag_negative_label,
+					edge,
+					route_t,
+					f32(-0.68),
+					f32(0.42),
+					seed,
+					transient_arena,
+				)
+			}
+
+			terrain_generation_benchmark_cave_slice_capture_for_selection :: proc(
+				label: string,
+				selection: TerrainGenerationBenchmarkCaveSelection,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				if !selection.found_matching_biome {
+					log.infof("TERRAIN_GENERATION_CAVE_SLICE_SKIP label=%s", label)
+					return
+				}
+				terrain_generation_benchmark_cave_slice_capture(
+					label,
+					selection.node,
+					.Horizontal_XZ,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_slice_capture(
+					label,
+					selection.node,
+					.Vertical_XY,
+					seed,
+					transient_arena,
+				)
+			}
+
+			terrain_generation_benchmark_cave_profile_room_radius_y :: proc(
+				node: biomes.CaveNetworkNode,
+			) -> f32 {
+				radius_y := node.radius_blocks * 0.85
+				#partial switch node.kind {
+				case .Biome_Hub:
+					radius_y *= 0.78
+				case .Underground_Lake:
+					radius_y *= 0.55
+				case .River_Junction:
+					radius_y *= 0.72
+				case .Vertical_Shaft:
+					radius_y *= 1.75
+				case .Geode_Chamber:
+					radius_y *= 1.05
+				case .Magma_Pocket:
+					radius_y *= 0.70
+				}
+				max_radius_y := TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_Y
+				radius_scale := f32(1)
+				if !node.major_region {
+					max_radius_y = TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_MAX_Y
+					radius_scale = TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_SCALE
+				}
+				return math.min(radius_y * radius_scale, max_radius_y)
+			}
+
+			terrain_generation_benchmark_cave_profile_room_radii :: proc(
+				node: biomes.CaveNetworkNode,
+			) -> (
+				room_radius_x, room_radius_y, room_radius_z: f32,
+			) {
+				radius_x := node.radius_blocks
+				radius_y := node.radius_blocks * 0.85
+				radius_z := node.radius_blocks
+				#partial switch node.kind {
+				case .Biome_Hub:
+					radius_x *= 1.35
+					radius_y *= 0.78
+					radius_z *= 1.20
+				case .Underground_Lake:
+					radius_x *= 1.45
+					radius_y *= 0.55
+					radius_z *= 1.35
+				case .River_Junction:
+					radius_x *= 1.15
+					radius_y *= 0.72
+					radius_z *= 1.15
+				case .Vertical_Shaft:
+					radius_x *= 0.55
+					radius_y *= 1.75
+					radius_z *= 0.55
+				case .Geode_Chamber:
+					radius_x *= 1.05
+					radius_y *= 1.05
+					radius_z *= 1.05
+				case .Magma_Pocket:
+					radius_x *= 1.15
+					radius_y *= 0.70
+					radius_z *= 1.15
+				}
+				max_radius_xz := TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_XZ
+				max_radius_y := TERRAIN_CAVE_NODE_PROFILE_ROOM_MAJOR_MAX_Y
+				radius_scale := f32(1)
+				if !node.major_region {
+					max_radius_xz = TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_MAX_XZ
+					max_radius_y = TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_MAX_Y
+					radius_scale = TERRAIN_CAVE_NODE_PROFILE_ROOM_MINOR_SCALE
+				}
+				room_radius_x = math.min(radius_x * radius_scale, max_radius_xz)
+				room_radius_y = math.min(radius_y * radius_scale, max_radius_y)
+				room_radius_z = math.min(radius_z * radius_scale, max_radius_xz)
+				return
+			}
+
+			terrain_generation_benchmark_cave_profile_room_axis :: proc(
+				key: biomes.FeatureGridKey,
+				node: biomes.CaveNetworkNode,
+			) -> (
+				axis_x, axis_z, side_x, side_z: f32,
+			) {
+				axis_x = biomes.regional_terrain_field_value_noise_3(
+					key,
+					i32(math.floor_f32(node.x)),
+					i32(math.floor_f32(node.y)),
+					i32(math.floor_f32(node.z)),
+					56,
+					TERRAIN_CAVE_BRANCH_SALT,
+				)
+				axis_z = biomes.regional_terrain_field_value_noise_3(
+					key,
+					i32(math.floor_f32(node.x)) + 11,
+					i32(math.floor_f32(node.y)),
+					i32(math.floor_f32(node.z)) - 7,
+					56,
+					TERRAIN_CAVE_BRANCH_SALT,
+				)
+				axis_len := math.sqrt_f32(axis_x * axis_x + axis_z * axis_z)
+				if axis_len <= 0.001 {
+					axis_x, axis_z = 1, 0
+				} else {
+					axis_x /= axis_len
+					axis_z /= axis_len
+				}
+				side_x = -axis_z
+				side_z = axis_x
+				return
+			}
+
+			terrain_generation_benchmark_cave_profile_room_view_capture_for_selection :: proc(
+				label: string,
+				key: biomes.FeatureGridKey,
+				selection: TerrainGenerationBenchmarkCaveSelection,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				if !selection.found_matching_biome {
+					log.infof(
+						"TERRAIN_GENERATION_CAVE_PROFILE_VIEW_SKIP label=%s reason=no_selection",
+						label,
+					)
+					return
+				}
+				if !terrain_density_cave_node_uses_profile_room(selection.node) {
+					log.infof(
+						"TERRAIN_GENERATION_CAVE_PROFILE_VIEW_SKIP label=%s reason=non_profile_node node=%d biome=%v kind=%v major=%v",
+						label,
+						selection.node.id,
+						selection.node.biome_id,
+						selection.node.kind,
+						selection.node.major_region,
+					)
+					return
+				}
+
+				room_radius_x, room_radius_y, room_radius_z :=
+					terrain_generation_benchmark_cave_profile_room_radii(selection.node)
+				axis_x, axis_z, side_x, side_z :=
+					terrain_generation_benchmark_cave_profile_room_axis(key, selection.node)
+				room_radius_xz := math.min(room_radius_x, room_radius_z)
+
+				camera_axis_scale := f32(-0.52)
+				target_axis_scale := f32(0.62)
+				camera_side_scale := f32(0.18)
+				target_side_scale := f32(-0.12)
+				camera_y_scale := f32(0.04)
+				target_y_scale := f32(0.14)
+				#partial switch selection.node.biome_id {
+				case .Fungal_Vaults:
+					camera_axis_scale = -0.48
+					target_axis_scale = TERRAIN_FUNGAL_ROOM_ALCOVE_OFFSET_SCALE
+					camera_side_scale = 0.22
+					target_side_scale = -0.10
+					camera_y_scale = TERRAIN_FUNGAL_ROOM_LOWER_Y_OFFSET_SCALE * f32(0.30)
+					target_y_scale = TERRAIN_FUNGAL_ROOM_DOME_Y_OFFSET_SCALE * f32(0.62)
+				case .Crystal_Geode_Network:
+					camera_axis_scale = -0.48
+					target_axis_scale = 0.56
+					camera_side_scale = 0.18
+					target_side_scale = -0.12
+					camera_y_scale = TERRAIN_CRYSTAL_ROOM_FISSURE_UPPER_Y_SCALE * f32(0.64)
+					target_y_scale = TERRAIN_CRYSTAL_ROOM_MAIN_Y_SCALE * f32(0.34)
+				case .Buried_Aquifer_Caves:
+					camera_axis_scale = -0.46
+					target_axis_scale = 0.54
+					camera_side_scale = 0.36
+					target_side_scale = -0.28
+					camera_y_scale = TERRAIN_AQUIFER_ROOM_SHELF_Y_OFFSET_SCALE * f32(0.62)
+					target_y_scale = TERRAIN_AQUIFER_ROOM_BASIN_Y_OFFSET_SCALE * f32(0.42)
+				case .Temperate_Hills,
+				     .Basalt_Spire_Highlands,
+				     .Wet_Lowland_Marsh,
+				     .Corrupted_Ash_Forest:
+				}
+
+				camera_x :=
+					selection.node.x +
+					axis_x * room_radius_x * camera_axis_scale +
+					side_x * room_radius_xz * camera_side_scale
+				camera_y := selection.node.y + room_radius_y * camera_y_scale
+				camera_z :=
+					selection.node.z +
+					axis_z * room_radius_z * camera_axis_scale +
+					side_z * room_radius_xz * camera_side_scale
+				target_x :=
+					selection.node.x +
+					axis_x * room_radius_x * target_axis_scale +
+					side_x * room_radius_xz * target_side_scale
+				target_y := selection.node.y + room_radius_y * target_y_scale
+				target_z :=
+					selection.node.z +
+					axis_z * room_radius_z * target_axis_scale +
+					side_z * room_radius_xz * target_side_scale
+
+				forward_x := target_x - camera_x
+				forward_y := target_y - camera_y
+				forward_z := target_z - camera_z
+				log.infof(
+					"TERRAIN_GENERATION_CAVE_PROFILE_VIEW_SELECTION label=%s node=%d biome=%v kind=%v role=%v major=%v chunk=(%d,%d,%d) radius=(%.2f,%.2f,%.2f) axis=(%.3f,%.3f) side=(%.3f,%.3f) camera=(%.2f,%.2f,%.2f) target=(%.2f,%.2f,%.2f)",
+					label,
+					selection.node.id,
+					selection.node.biome_id,
+					selection.node.kind,
+					selection.node.role,
+					selection.node.major_region,
+					selection.chunk.x,
+					selection.chunk.y,
+					selection.chunk.z,
+					room_radius_x,
+					room_radius_y,
+					room_radius_z,
+					axis_x,
+					axis_z,
+					side_x,
+					side_z,
+					camera_x,
+					camera_y,
+					camera_z,
+					target_x,
+					target_y,
+					target_z,
+				)
+				terrain_generation_benchmark_cave_view_capture_basis(
+					label,
+					0,
+					camera_x,
+					camera_y,
+					camera_z,
+					forward_x,
+					forward_y,
+					forward_z,
+					side_x,
+					0,
+					side_z,
+					0,
+					1,
+					0,
+					seed,
+					transient_arena,
+				)
+			}
+
+			terrain_generation_benchmark_aquifer_water_slice_capture_for_selection :: proc(
+				label: string,
+				selection: TerrainGenerationBenchmarkCaveSelection,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				if !selection.found_matching_biome {
+					log.infof("TERRAIN_GENERATION_CAVE_SLICE_SKIP label=%s", label)
+					return
+				}
+				room_radius_y := terrain_generation_benchmark_cave_profile_room_radius_y(
+					selection.node,
+				)
+				water_y :=
+					selection.node.y + room_radius_y * TERRAIN_AQUIFER_ROOM_WATER_Y_OFFSET_SCALE
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					label,
+					.Horizontal_XZ,
+					selection.node.x,
+					water_y,
+					selection.node.z,
+					1,
+					0,
+					0,
+					0,
+					0,
+					-1,
+					seed,
+					transient_arena,
+				)
+			}
+
+			terrain_generation_benchmark_cave_field_pocket_basis :: proc(
+				selection: TerrainGenerationBenchmarkCaveFieldPocketSelection,
+			) -> (
+				tangent_x, tangent_z, outward_x, outward_z: f32,
+			) {
+				outward_x = selection.center_x - selection.nearest_x
+				outward_z = selection.center_z - selection.nearest_z
+				outward_len := math.sqrt_f32(outward_x * outward_x + outward_z * outward_z)
+				if outward_len <= 0.001 {
+					route_len := math.sqrt_f32(
+						selection.route_dir_x * selection.route_dir_x +
+						selection.route_dir_z * selection.route_dir_z,
+					)
+					if route_len > 0.001 {
+						outward_x = -selection.route_dir_z / route_len
+						outward_z = selection.route_dir_x / route_len
+					} else {
+						outward_x = 1
+						outward_z = 0
+					}
+				} else {
+					outward_x /= outward_len
+					outward_z /= outward_len
+				}
+
+				tangent_x = selection.route_dir_x
+				tangent_z = selection.route_dir_z
+				tangent_len := math.sqrt_f32(tangent_x * tangent_x + tangent_z * tangent_z)
+				if tangent_len > 0.001 {
+					tangent_x /= tangent_len
+					tangent_z /= tangent_len
+					dot := tangent_x * outward_x + tangent_z * outward_z
+					tangent_x -= outward_x * dot
+					tangent_z -= outward_z * dot
+					tangent_len = math.sqrt_f32(tangent_x * tangent_x + tangent_z * tangent_z)
+				}
+				if tangent_len <= 0.001 {
+					tangent_x = -outward_z
+					tangent_z = outward_x
+				} else {
+					tangent_x /= tangent_len
+					tangent_z /= tangent_len
+				}
+				return
+			}
+
+			terrain_generation_benchmark_cave_field_pocket_slice_capture :: proc(
+				label: string,
+				key: biomes.FeatureGridKey,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+				biome_filter: biomes.BiomeID = {},
+				filter_active: bool = false,
+			) {
+				selection := terrain_generation_benchmark_cave_field_pocket_selection(
+					key,
+					biome_filter,
+					filter_active,
+				)
+				terrain_generation_benchmark_cave_field_pocket_selection_log(selection)
+				if !selection.found {
+					log.infof("TERRAIN_GENERATION_CAVE_SLICE_SKIP label=%s", label)
+					return
+				}
+
+				tangent_x, tangent_z, outward_x, outward_z :=
+					terrain_generation_benchmark_cave_field_pocket_basis(selection)
+				log.infof(
+					"TERRAIN_GENERATION_CAVE_FIELD_POCKET_SLICE_SELECTION label=%s center=(%.2f,%.2f,%.2f) tangent=(%.3f,%.3f) outward=(%.3f,%.3f) radius=%.2f route_radius=%.2f biome=%v",
+					label,
+					selection.center_x,
+					selection.center_y,
+					selection.center_z,
+					tangent_x,
+					tangent_z,
+					outward_x,
+					outward_z,
+					selection.radius,
+					selection.route_radius,
+					selection.biome_id,
+				)
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					label,
+					.Route_Plan,
+					selection.center_x,
+					selection.center_y,
+					selection.center_z,
+					tangent_x,
+					0,
+					tangent_z,
+					outward_x,
+					0,
+					outward_z,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					label,
+					.Route_Cross_Section,
+					selection.center_x,
+					selection.center_y,
+					selection.center_z,
+					outward_x,
+					0,
+					outward_z,
+					0,
+					1,
+					0,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_cave_slice_capture_basis(
+					label,
+					.Route_Longitudinal,
+					selection.center_x,
+					selection.center_y,
+					selection.center_z,
+					tangent_x,
+					0,
+					tangent_z,
+					0,
+					1,
+					0,
+					seed,
+					transient_arena,
+				)
+			}
+
+			terrain_generation_benchmark_cave_slice_target_enabled :: proc(target: int) -> bool {
+				return(
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET ==
+						TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_ALL ||
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET == target \
+				)
+			}
+
+			terrain_generation_benchmark_cave_slice_capture_runs_run :: proc(
+				key: biomes.FeatureGridKey,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				log.infof(
+					"TERRAIN_GENERATION_CAVE_SLICE_CAPTURE_START target=%d",
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET,
+				)
+				if terrain_generation_benchmark_cave_slice_target_enabled(
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CAVE_FIELD_POCKET,
+				) {
+					terrain_generation_benchmark_cave_field_pocket_slice_capture(
+						"cave_field_pocket",
+						key,
+						seed,
+						transient_arena,
+					)
+				}
+				if terrain_generation_benchmark_cave_slice_target_enabled(
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CAVE_FIELD_CRYSTAL_POCKET,
+				) {
+					terrain_generation_benchmark_cave_field_pocket_slice_capture(
+						"cave_field_crystal_pocket",
+						key,
+						seed,
+						transient_arena,
+						.Crystal_Geode_Network,
+						true,
+					)
+				}
+				if terrain_generation_benchmark_cave_slice_target_enabled(
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CAVE_FIELD_AQUIFER_POCKET,
+				) {
+					terrain_generation_benchmark_cave_field_pocket_slice_capture(
+						"cave_field_aquifer_pocket",
+						key,
+						seed,
+						transient_arena,
+						.Buried_Aquifer_Caves,
+						true,
+					)
+				}
+				if terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_FUNGAL,
+				   ) ||
+				   terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_FUNGAL_ROUTE,
+				   ) ||
+				   terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_FUNGAL_PORTAL,
+				   ) ||
+				   terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_FUNGAL_CLUSTER,
+				   ) ||
+				   terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_MACRO_CLUSTERS,
+				   ) ||
+				   terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CHAMBERLET_CHAIN,
+				   ) ||
+				   terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CHAMBERLET_GALLERY,
+				   ) ||
+				   terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_PROFILE_VIEW,
+				   ) {
+					fungal_selection := terrain_generation_benchmark_cave_selection_for_biome(
+						key,
+						.Fungal_Vaults,
+						{x = 0, y = -1, z = 0},
+					)
+					if terrain_generation_benchmark_cave_slice_target_enabled(
+						TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_FUNGAL,
+					) {
+						terrain_generation_benchmark_cave_slice_capture_for_selection(
+							"fungal",
+							fungal_selection,
+							seed,
+							transient_arena,
+						)
+					}
+					if terrain_generation_benchmark_cave_slice_target_enabled(
+						TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_FUNGAL_ROUTE,
+					) {
+						terrain_generation_benchmark_cave_route_slice_capture_for_selection(
+							"fungal_route",
+							fungal_selection,
+							key,
+							seed,
+							transient_arena,
+						)
+					}
+					if terrain_generation_benchmark_cave_slice_target_enabled(
+						TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_FUNGAL_PORTAL,
+					) {
+						terrain_generation_benchmark_cave_portal_slice_capture_for_selection(
+							"fungal_portal",
+							fungal_selection,
+							key,
+							seed,
+							transient_arena,
+						)
+					}
+					if terrain_generation_benchmark_cave_slice_target_enabled(
+						   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_FUNGAL_CLUSTER,
+					   ) ||
+					   terrain_generation_benchmark_cave_slice_target_enabled(
+						   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_MACRO_CLUSTERS,
+					   ) {
+						terrain_generation_benchmark_cave_macro_cluster_slice_capture_for_selection(
+							"fungal_cluster",
+							fungal_selection,
+							seed,
+							transient_arena,
+						)
+					}
+					if terrain_generation_benchmark_cave_slice_target_enabled(
+						TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_PROFILE_VIEW,
+					) {
+						terrain_generation_benchmark_cave_profile_room_view_capture_for_selection(
+							"profile_view_fungal",
+							key,
+							fungal_selection,
+							seed,
+							transient_arena,
+						)
+					}
+					if terrain_generation_benchmark_cave_slice_target_enabled(
+						TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CHAMBERLET_CHAIN,
+					) {
+						terrain_generation_benchmark_cave_chamberlet_chain_slice_capture_for_selection(
+							"chamberlet_chain",
+							fungal_selection,
+							key,
+							seed,
+							transient_arena,
+						)
+					}
+					if terrain_generation_benchmark_cave_slice_target_enabled(
+						TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CHAMBERLET_GALLERY,
+					) {
+						terrain_generation_benchmark_cave_chamberlet_gallery_slice_capture_for_selection(
+							"chamberlet_gallery",
+							fungal_selection,
+							key,
+							seed,
+							transient_arena,
+						)
+					}
+				}
+				if terrain_generation_benchmark_cave_slice_target_enabled(
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_SEAMS,
+				) {
+					terrain_generation_benchmark_cave_seam_slice_capture(
+						"seam_x",
+						key,
+						{x = 0, y = -1, z = 0},
+						0,
+						true,
+						seed,
+						transient_arena,
+					)
+					terrain_generation_benchmark_cave_seam_slice_capture(
+						"seam_z",
+						key,
+						{x = 0, y = -1, z = 0},
+						2,
+						true,
+						seed,
+						transient_arena,
+					)
+				}
+				if terrain_generation_benchmark_cave_slice_target_enabled(
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_SEAM_VIEW,
+				) {
+					terrain_generation_benchmark_cave_seam_view_capture(
+						"seam_x_forward",
+						"seam_x_diag_pos",
+						"seam_x_diag_neg",
+						key,
+						{x = 0, y = -1, z = 0},
+						0,
+						true,
+						seed,
+						transient_arena,
+					)
+					terrain_generation_benchmark_cave_seam_view_capture(
+						"seam_z_forward",
+						"seam_z_diag_pos",
+						"seam_z_diag_neg",
+						key,
+						{x = 0, y = -1, z = 0},
+						2,
+						true,
+						seed,
+						transient_arena,
+					)
+				}
+				if terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CRYSTAL,
+				   ) ||
+				   terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CRYSTAL_PORTAL,
+				   ) ||
+				   terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CRYSTAL_CLUSTER,
+				   ) ||
+				   terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_MACRO_CLUSTERS,
+				   ) ||
+				   terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_PROFILE_VIEW,
+				   ) {
+					crystal_selection := terrain_generation_benchmark_cave_selection_for_biome(
+						key,
+						.Crystal_Geode_Network,
+						{x = 1, y = -1, z = 0},
+					)
+					if terrain_generation_benchmark_cave_slice_target_enabled(
+						TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CRYSTAL,
+					) {
+						terrain_generation_benchmark_cave_slice_capture_for_selection(
+							"crystal",
+							crystal_selection,
+							seed,
+							transient_arena,
+						)
+					}
+					if terrain_generation_benchmark_cave_slice_target_enabled(
+						TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CRYSTAL_PORTAL,
+					) {
+						terrain_generation_benchmark_cave_portal_slice_capture_for_selection(
+							"crystal_portal",
+							crystal_selection,
+							key,
+							seed,
+							transient_arena,
+						)
+					}
+					if terrain_generation_benchmark_cave_slice_target_enabled(
+						   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_CRYSTAL_CLUSTER,
+					   ) ||
+					   terrain_generation_benchmark_cave_slice_target_enabled(
+						   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_MACRO_CLUSTERS,
+					   ) {
+						terrain_generation_benchmark_cave_macro_cluster_slice_capture_for_selection(
+							"crystal_cluster",
+							crystal_selection,
+							seed,
+							transient_arena,
+						)
+					}
+					if terrain_generation_benchmark_cave_slice_target_enabled(
+						TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_PROFILE_VIEW,
+					) {
+						terrain_generation_benchmark_cave_profile_room_view_capture_for_selection(
+							"profile_view_crystal",
+							key,
+							crystal_selection,
+							seed,
+							transient_arena,
+						)
+					}
+				}
+				if terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_AQUIFER,
+				   ) ||
+				   terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_AQUIFER_PORTAL,
+				   ) ||
+				   terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_AQUIFER_CLUSTER,
+				   ) ||
+				   terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_AQUIFER_WATER,
+				   ) ||
+				   terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_MACRO_CLUSTERS,
+				   ) ||
+				   terrain_generation_benchmark_cave_slice_target_enabled(
+					   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_PROFILE_VIEW,
+				   ) {
+					aquifer_selection := terrain_generation_benchmark_cave_selection_for_biome(
+						key,
+						.Buried_Aquifer_Caves,
+						{x = 0, y = -1, z = 1},
+					)
+					if terrain_generation_benchmark_cave_slice_target_enabled(
+						TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_AQUIFER,
+					) {
+						terrain_generation_benchmark_cave_slice_capture_for_selection(
+							"aquifer",
+							aquifer_selection,
+							seed,
+							transient_arena,
+						)
+					}
+					if terrain_generation_benchmark_cave_slice_target_enabled(
+						TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_AQUIFER_PORTAL,
+					) {
+						terrain_generation_benchmark_cave_portal_slice_capture_for_selection(
+							"aquifer_portal",
+							aquifer_selection,
+							key,
+							seed,
+							transient_arena,
+						)
+					}
+					if terrain_generation_benchmark_cave_slice_target_enabled(
+						   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_AQUIFER_CLUSTER,
+					   ) ||
+					   terrain_generation_benchmark_cave_slice_target_enabled(
+						   TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_MACRO_CLUSTERS,
+					   ) {
+						terrain_generation_benchmark_cave_macro_cluster_slice_capture_for_selection(
+							"aquifer_cluster",
+							aquifer_selection,
+							seed,
+							transient_arena,
+						)
+					}
+					if terrain_generation_benchmark_cave_slice_target_enabled(
+						TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_AQUIFER_WATER,
+					) {
+						terrain_generation_benchmark_aquifer_water_slice_capture_for_selection(
+							"aquifer_water",
+							aquifer_selection,
+							seed,
+							transient_arena,
+						)
+					}
+					if terrain_generation_benchmark_cave_slice_target_enabled(
+						TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_PROFILE_VIEW,
+					) {
+						terrain_generation_benchmark_cave_profile_room_view_capture_for_selection(
+							"profile_view_aquifer",
+							key,
+							aquifer_selection,
+							seed,
+							transient_arena,
+						)
+					}
+				}
+				if terrain_generation_benchmark_cave_slice_target_enabled(
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_SURFACE,
+				) {
+					surface_cave_anchors := terrain_generation_benchmark_surface_cave_anchors_pick(
+						key,
+					)
+					if surface_cave_anchors.mouth_found {
+						terrain_generation_benchmark_mouth_transition_slice_capture(
+							"mouth_transition",
+							surface_cave_anchors.mouth,
+							surface_cave_anchors.mouth_node,
+							.Mouth_Longitudinal,
+							false,
+							seed,
+							transient_arena,
+						)
+						terrain_generation_benchmark_mouth_transition_slice_capture(
+							"mouth_transition",
+							surface_cave_anchors.mouth,
+							surface_cave_anchors.mouth_node,
+							.Mouth_Plan,
+							false,
+							seed,
+							transient_arena,
+						)
+						terrain_generation_benchmark_mouth_transition_slice_capture(
+							"mouth_aperture",
+							surface_cave_anchors.mouth,
+							surface_cave_anchors.mouth_node,
+							.Mouth_Longitudinal,
+							true,
+							seed,
+							transient_arena,
+						)
+						terrain_generation_benchmark_mouth_transition_slice_capture(
+							"mouth_aperture",
+							surface_cave_anchors.mouth,
+							surface_cave_anchors.mouth_node,
+							.Mouth_Plan,
+							true,
+							seed,
+							transient_arena,
+						)
+					} else {
+						log.info("TERRAIN_GENERATION_CAVE_SLICE_SKIP label=mouth_transition")
+					}
+				}
+				if terrain_generation_benchmark_cave_slice_target_enabled(
+					TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_PROFILE,
+				) {
+					profile_room := terrain_generation_benchmark_cave_profile_room_selection(
+						key,
+						{x = 0, y = -1, z = 0},
+					)
+					profile_selection := TerrainGenerationBenchmarkCaveSelection {
+						node                 = profile_room.node,
+						chunk                = profile_room.chunk,
+						vertical_support     = profile_room.vertical_support,
+						found_matching_biome = profile_room.found_matching_biome,
+						streamed_underground = profile_room.streamed_underground,
+					}
+					terrain_generation_benchmark_cave_slice_capture_for_selection(
+						"profile_room",
+						profile_selection,
+						seed,
+						transient_arena,
+					)
+				}
+				log.info("TERRAIN_GENERATION_CAVE_SLICE_CAPTURE_END")
+			}
+		}
+
 		terrain_generation_benchmark_runs_run :: proc(
 			transient_arena: ^mem.Arena,
 			iterations: u32,
 		) {
-			log.assert(transient_arena != nil, "terrain generation benchmark transient arena must not be nil")
-			log.assertf(iterations > 0, "terrain generation benchmark iterations must be greater than zero")
+			log.assert(
+				transient_arena != nil,
+				"terrain generation benchmark transient arena must not be nil",
+			)
+			log.assertf(
+				iterations > 0,
+				"terrain generation benchmark iterations must be greater than zero",
+			)
 
 			temp := mem.begin_arena_temp_memory(transient_arena)
 			defer mem.end_arena_temp_memory(temp)
@@ -3414,7 +7870,11 @@ when ODIN_DEBUG {
 			chunk_voxel_view_alloc(&view, allocator)
 			seed := u32(0)
 			key := terrain_generation_key_make(seed)
-			cave_field_path_selection := terrain_generation_benchmark_cave_field_path_selection(key)
+			cave_field_path_selection := terrain_generation_benchmark_cave_field_path_selection(
+				key,
+			)
+			cave_field_pocket_selection :=
+				terrain_generation_benchmark_cave_field_pocket_selection(key)
 			cave_coords := terrain_generation_benchmark_cave_coords_make(
 				key,
 				cave_field_path_selection,
@@ -3435,6 +7895,9 @@ when ODIN_DEBUG {
 			)
 			terrain_generation_benchmark_cave_selections_log(key)
 			terrain_generation_benchmark_cave_field_path_selection_log(cave_field_path_selection)
+			terrain_generation_benchmark_cave_field_pocket_selection_log(
+				cave_field_pocket_selection,
+			)
 			terrain_generation_benchmark_region_stats_log(cave_coords, seed)
 			terrain_generation_benchmark_cave_physical_stats_log(
 				"cave_physical_pre",
@@ -3442,20 +7905,20 @@ when ODIN_DEBUG {
 				cave_coords,
 				seed,
 			)
-			terrain_generation_benchmark_cave_field_stats_log(
-				"cave_field_pre",
-				cave_coords,
-				seed,
-			)
+			terrain_generation_benchmark_cave_field_stats_log("cave_field_pre", cave_coords, seed)
+			when TERRAIN_GENERATION_BENCHMARK_CAPTURE_CAVE_SLICES {
+				terrain_generation_benchmark_cave_slice_capture_runs_run(
+					key,
+					seed,
+					transient_arena,
+				)
+			}
 			terrain_generation_benchmark_surface_water_stats_log(
 				"surface_water_pre",
 				surface_water_coords,
 				seed,
 			)
-			terrain_generation_benchmark_surface_cave_scan_stats_log(
-				"surface_cave_scan",
-				key,
-			)
+			terrain_generation_benchmark_surface_cave_scan_stats_log("surface_cave_scan", key)
 			terrain_generation_benchmark_surface_cave_scan_stats_log_multi(
 				"surface_cave_scan_multi",
 			)
