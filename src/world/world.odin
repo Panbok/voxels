@@ -50,9 +50,6 @@ StreamingState :: struct {
 	streaming_prewarm_inflight_count:    u32,
 	streaming_radius_y_down:          u32,
 	streaming_radius_y_up:            u32,
-	streaming_prioritize_underground: bool,
-	streaming_has_focus:              bool,
-	streaming_focus_coord:            world_async.ChunkCoord,
 	next_streaming_target_index:      u32,
 	next_streaming_prewarm_target_index: u32,
 	next_mesh_scan_index:             u32,
@@ -70,6 +67,28 @@ TerrainGenerationRegionCache :: struct {
 	mutex: sync.Mutex,
 	slots: [TERRAIN_GENERATION_REGION_CACHE_CAPACITY]TerrainGenerationRegionCacheSlot,
 	clock: u64,
+}
+
+TerrainCaveChunkOverlay :: struct {
+	empty_masks:          [TERRAIN_CAVE_CHUNK_OVERLAY_WORD_COUNT]u64,
+	solid_material_masks: [TERRAIN_CAVE_CHUNK_OVERLAY_WORD_COUNT]u64,
+	solid_material_ids:   [CHUNK_BLOCK_COUNT]world_async.BlockMaterialID,
+	change_count:         u32,
+}
+
+TerrainGenerationCaveOverlayCacheSlot :: struct {
+	valid:     bool,
+	key:       biomes.FeatureGridKey,
+	coord:     world_async.ChunkCoord,
+	overlay:   TerrainCaveChunkOverlay,
+	last_used: u64,
+}
+
+TerrainGenerationCaveOverlayCache :: struct {
+	mutex:       sync.Mutex,
+	initialized: bool,
+	slots:       []TerrainGenerationCaveOverlayCacheSlot,
+	clock:       u64,
 }
 
 TerrainGenerationChunkCacheSlot :: struct {
@@ -201,6 +220,7 @@ state := struct {
 	generation_result_buffer:        []world_async.ChunkGenerationJobResult,
 	mesh_result_buffer:              []world_async.ChunkMeshJobResult,
 	terrain_generation_region_cache: TerrainGenerationRegionCache,
+	terrain_generation_cave_overlay_cache: TerrainGenerationCaveOverlayCache,
 	terrain_generation_chunk_cache:  TerrainGenerationChunkCache,
 	terrain_generation_column_cache: TerrainGenerationColumnCache,
 
@@ -278,6 +298,8 @@ init :: proc(config: InitConfig) {
 	state.terrain_generation_region_cache = {}
 	terrain_generation_chunk_cache_init(state.persistent_allocator)
 	terrain_generation_chunk_cache_clear()
+	terrain_generation_cave_overlay_cache_init(state.persistent_allocator)
+	terrain_generation_cave_overlay_cache_clear()
 	terrain_generation_column_cache_clear()
 
 	when ODIN_DEBUG {
@@ -337,6 +359,7 @@ shutdown :: proc() {
 
 	chunk_store_queued_mesh_snapshot_refs_release_all_for_shutdown()
 	chunk_store_clear()
+	terrain_generation_cave_overlay_cache_destroy()
 	mem_tlsf.destroy(&state.chunk_mesh_row_cache_tlsf)
 	mem_tlsf.destroy(&state.chunk_block_storage_tlsf)
 	state = {}
@@ -470,30 +493,6 @@ CHUNK_STREAMING_PREWARM_TARGET_CAPACITY ::
 CHUNK_STREAMING_PREWARM_INFLIGHT_CAPACITY :: CHUNK_STREAMING_PREWARM_TARGET_CAPACITY
 #assert(CHUNK_STREAMING_PREWARM_TARGET_CAPACITY > 0)
 #assert(CHUNK_STREAMING_PREWARM_INFLIGHT_CAPACITY > 0)
-TERRAIN_STREAMING_ADAPTIVE_VERTICAL_LAYERS :: #config(
-	TERRAIN_STREAMING_ADAPTIVE_VERTICAL_LAYERS,
-	true,
-)
-TERRAIN_STREAMING_UNDERGROUND_ACTIVATE_BLOCK_Y :: #config(
-	TERRAIN_STREAMING_UNDERGROUND_ACTIVATE_BLOCK_Y,
-	0,
-)
-TERRAIN_STREAMING_UNDERGROUND_LOOK_DOWN_FORWARD_Y :: #config(
-	TERRAIN_STREAMING_UNDERGROUND_LOOK_DOWN_FORWARD_Y,
-	f32(-0.20),
-)
-TERRAIN_STREAMING_UNDERGROUND_LOOK_DOWN_RAY_BLOCKS :: #config(
-	TERRAIN_STREAMING_UNDERGROUND_LOOK_DOWN_RAY_BLOCKS,
-	i32(192),
-)
-TERRAIN_STREAMING_UNDERGROUND_LOOK_DOWN_STEP_BLOCKS :: #config(
-	TERRAIN_STREAMING_UNDERGROUND_LOOK_DOWN_STEP_BLOCKS,
-	i32(2),
-)
-TERRAIN_STREAMING_UNDERGROUND_LOOK_DOWN_MIN_EMPTY_SAMPLES :: #config(
-	TERRAIN_STREAMING_UNDERGROUND_LOOK_DOWN_MIN_EMPTY_SAMPLES,
-	u32(4),
-)
 CHUNK_UNLOAD_RADIUS_XZ :: CHUNK_STREAMING_RADIUS_XZ + 1
 CHUNK_UNLOAD_RADIUS_Y_DOWN :: CHUNK_STREAMING_RADIUS_Y_DOWN
 CHUNK_UNLOAD_RADIUS_Y_UP :: CHUNK_STREAMING_RADIUS_Y_UP
@@ -516,6 +515,15 @@ CHUNK_STORE_CAPACITY :: 384
 #assert(CHUNK_STORE_CAPACITY >= CHUNK_UNLOAD_CAPACITY)
 
 TERRAIN_GENERATION_REGION_CACHE_CAPACITY :: 16
+TERRAIN_GENERATION_CAVE_OVERLAY_CACHE_ENABLED :: #config(
+	TERRAIN_GENERATION_CAVE_OVERLAY_CACHE_ENABLED,
+	true,
+)
+TERRAIN_GENERATION_CAVE_OVERLAY_CACHE_CAPACITY :: #config(
+	TERRAIN_GENERATION_CAVE_OVERLAY_CACHE_CAPACITY,
+	8,
+)
+#assert(TERRAIN_GENERATION_CAVE_OVERLAY_CACHE_CAPACITY > 0)
 TERRAIN_GENERATION_CHUNK_CACHE_ENABLED :: #config(TERRAIN_GENERATION_CHUNK_CACHE_ENABLED, true)
 TERRAIN_GENERATION_CHUNK_CACHE_CAPACITY :: #config(
 	TERRAIN_GENERATION_CHUNK_CACHE_CAPACITY,
@@ -553,6 +561,8 @@ TERRAIN_CAVE_ROUTE_POCKET_CORE_BYPASS_SHAPE_MAX :: #config(
 	f32(0.77),
 )
 TERRAIN_CAVE_WALL_MATERIAL_BUFFER_WORD_COUNT :: CHUNK_BLOCK_COUNT / 64
+#assert(CHUNK_BLOCK_COUNT % 64 == 0)
+TERRAIN_CAVE_CHUNK_OVERLAY_WORD_COUNT :: CHUNK_BLOCK_COUNT / 64
 #assert(CHUNK_BLOCK_COUNT % 64 == 0)
 TERRAIN_CAVE_EDGE_CHUNK_INTERSECT_FEATURE_RADIUS_SCALE :: #config(
 	TERRAIN_CAVE_EDGE_CHUNK_INTERSECT_FEATURE_RADIUS_SCALE,
@@ -1316,6 +1326,121 @@ chunk_voxel_view_copy :: proc(
 	)
 }
 
+terrain_cave_chunk_overlay_mask_set :: proc(
+	mask: ^[TERRAIN_CAVE_CHUNK_OVERLAY_WORD_COUNT]u64,
+	index: u32,
+) {
+	mask[index >> 6] |= u64(1) << (index & 63)
+}
+
+terrain_cave_chunk_overlay_base_block :: proc(
+	column: TerrainBiomeColumn,
+	world_y: i32,
+) -> (
+	occupancy: world_async.BlockOccupancy,
+	material_id: world_async.BlockMaterialID,
+) {
+	if !terrain_density_surface_is_solid(column, world_y) {
+		return .Empty, world_async.BlockMaterialID(0)
+	}
+
+	blocks_below_surface := column.surface_height - world_y
+	return .Solid, terrain_biome_block_material_id(column, blocks_below_surface)
+}
+
+terrain_cave_chunk_overlay_build_from_columns :: proc(
+	overlay: ^TerrainCaveChunkOverlay,
+	final: ^world_async.ChunkVoxelView,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+) {
+	log.assertf(
+		len(columns) == CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH,
+		"cave overlay column count mismatch: %d",
+		len(columns),
+	)
+	log.assertf(
+		len(final.blocks) == CHUNK_BLOCK_COUNT,
+		"cave overlay final view expects %d blocks, got %d",
+		CHUNK_BLOCK_COUNT,
+		len(final.blocks),
+	)
+
+	overlay^ = {}
+	for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+		for y := i32(0); y < CHUNK_BLOCK_LENGTH; y += 1 {
+			world_y := chunk_origin.y + y
+			for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+				index := chunk_block_index(u32(x), u32(y), u32(z))
+				final_occupancy := final.blocks.occupancy[index]
+				final_material_id := final.blocks.material_id[index]
+				base_occupancy, base_material_id := terrain_cave_chunk_overlay_base_block(
+					columns[x + z * CHUNK_BLOCK_LENGTH],
+					world_y,
+				)
+
+				if final_occupancy == .Empty {
+					if base_occupancy != .Empty || base_material_id != final_material_id {
+						terrain_cave_chunk_overlay_mask_set(&overlay.empty_masks, index)
+						overlay.change_count += 1
+					}
+					continue
+				}
+
+				if base_occupancy != .Solid || base_material_id != final_material_id {
+					terrain_cave_chunk_overlay_mask_set(&overlay.solid_material_masks, index)
+					overlay.solid_material_ids[index] = final_material_id
+					overlay.change_count += 1
+				}
+			}
+		}
+	}
+}
+
+terrain_cave_chunk_overlay_apply :: proc(
+	overlay: ^TerrainCaveChunkOverlay,
+	view: ^world_async.ChunkVoxelView,
+) {
+	log.assertf(
+		len(view.blocks) == CHUNK_BLOCK_COUNT,
+		"cave overlay replay expects %d blocks, got %d",
+		CHUNK_BLOCK_COUNT,
+		len(view.blocks),
+	)
+
+	for word_index := u32(0); word_index < TERRAIN_CAVE_CHUNK_OVERLAY_WORD_COUNT; word_index += 1 {
+		word := overlay.empty_masks[word_index]
+		if word == 0 {
+			continue
+		}
+		base_index := word_index << 6
+		for bit := u32(0); bit < 64; bit += 1 {
+			if (word & (u64(1) << bit)) == 0 {
+				continue
+			}
+			index := base_index + bit
+			view.blocks.occupancy[index] = .Empty
+			view.blocks.material_id[index] = world_async.BlockMaterialID(0)
+		}
+	}
+
+	for word_index := u32(0); word_index < TERRAIN_CAVE_CHUNK_OVERLAY_WORD_COUNT; word_index += 1 {
+		word := overlay.solid_material_masks[word_index]
+		if word == 0 {
+			continue
+		}
+		base_index := word_index << 6
+		for bit := u32(0); bit < 64; bit += 1 {
+			if (word & (u64(1) << bit)) == 0 {
+				continue
+			}
+			index := base_index + bit
+			view.blocks.occupancy[index] = .Solid
+			view.blocks.material_id[index] = overlay.solid_material_ids[index]
+		}
+	}
+}
+
 terrain_generation_chunk_cache_init :: proc(allocator: mem.Allocator) {
 	when TERRAIN_GENERATION_CHUNK_CACHE_ENABLED {
 		cache := &state.terrain_generation_chunk_cache
@@ -1437,6 +1562,146 @@ terrain_generation_chunk_cache_store :: proc(
 		chunk_voxel_view_copy(&slot.view, view)
 		slot.key = key
 		slot.coord = coord
+		slot.last_used = cache.clock
+		slot.valid = true
+	}
+}
+
+terrain_generation_cave_overlay_cache_init :: proc(allocator: mem.Allocator) {
+	when TERRAIN_GENERATION_CAVE_OVERLAY_CACHE_ENABLED {
+		cache := &state.terrain_generation_cave_overlay_cache
+		sync.lock(&cache.mutex)
+		defer sync.unlock(&cache.mutex)
+
+		if cache.initialized {
+			return
+		}
+
+		cache.slots = make(
+			[]TerrainGenerationCaveOverlayCacheSlot,
+			int(TERRAIN_GENERATION_CAVE_OVERLAY_CACHE_CAPACITY),
+			allocator,
+		)
+		cache.initialized = true
+	}
+}
+
+terrain_generation_cave_overlay_cache_destroy :: proc() {
+	when TERRAIN_GENERATION_CAVE_OVERLAY_CACHE_ENABLED {
+		cache := &state.terrain_generation_cave_overlay_cache
+		if !cache.initialized {
+			return
+		}
+
+		sync.lock(&cache.mutex)
+		defer sync.unlock(&cache.mutex)
+
+		_ = delete(cache.slots, state.persistent_allocator)
+		cache.slots = nil
+		cache.initialized = false
+		cache.clock = 0
+	}
+}
+
+terrain_generation_cave_overlay_cache_clear :: proc() {
+	when TERRAIN_GENERATION_CAVE_OVERLAY_CACHE_ENABLED {
+		cache := &state.terrain_generation_cave_overlay_cache
+		if !cache.initialized {
+			return
+		}
+
+		sync.lock(&cache.mutex)
+		defer sync.unlock(&cache.mutex)
+
+		for i := 0; i < len(cache.slots); i += 1 {
+			cache.slots[i].valid = false
+		}
+		cache.clock = 0
+	}
+}
+
+terrain_generation_cave_overlay_cache_capture_enabled :: proc() -> bool {
+	when TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
+		return false
+	}
+	when TERRAIN_GENERATION_CAVE_OVERLAY_CACHE_ENABLED {
+		return state.terrain_generation_cave_overlay_cache.initialized
+	}
+	return false
+}
+
+terrain_generation_cave_overlay_cache_try_apply :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	coord: world_async.ChunkCoord,
+) -> bool {
+	when TERRAIN_GENERATION_CAVE_OVERLAY_CACHE_ENABLED {
+		cache := &state.terrain_generation_cave_overlay_cache
+		if !cache.initialized {
+			return false
+		}
+
+		sync.lock(&cache.mutex)
+		defer sync.unlock(&cache.mutex)
+
+		for i := 0; i < len(cache.slots); i += 1 {
+			slot := &cache.slots[i]
+			if slot.valid && slot.key == key && slot.coord == coord {
+				cache.clock += 1
+				slot.last_used = cache.clock
+				terrain_cave_chunk_overlay_apply(&slot.overlay, view)
+				return true
+			}
+		}
+	}
+	return false
+}
+
+terrain_generation_cave_overlay_cache_store_from_columns :: proc(
+	final: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	coord: world_async.ChunkCoord,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+) {
+	when TERRAIN_GENERATION_CAVE_OVERLAY_CACHE_ENABLED {
+		cache := &state.terrain_generation_cave_overlay_cache
+		if !cache.initialized {
+			return
+		}
+
+		overlay := new(TerrainCaveChunkOverlay, context.allocator)
+		defer {
+			_ = mem.free(rawptr(overlay), context.allocator)
+		}
+		terrain_cave_chunk_overlay_build_from_columns(overlay, final, chunk_origin, columns)
+
+		sync.lock(&cache.mutex)
+		defer sync.unlock(&cache.mutex)
+
+		slot_index := 0
+		oldest_tick := max(u64)
+		for i := 0; i < len(cache.slots); i += 1 {
+			slot := &cache.slots[i]
+			if slot.valid && slot.key == key && slot.coord == coord {
+				slot_index = i
+				break
+			}
+			if !slot.valid {
+				slot_index = i
+				break
+			}
+			if slot.last_used < oldest_tick {
+				oldest_tick = slot.last_used
+				slot_index = i
+			}
+		}
+
+		cache.clock += 1
+		slot := &cache.slots[slot_index]
+		slot.key = key
+		slot.coord = coord
+		slot.overlay = overlay^
 		slot.last_used = cache.clock
 		slot.valid = true
 	}
@@ -4469,10 +4734,7 @@ mesh_results_poll_budgeted :: proc() -> ChunkMeshBatchStats {
 	return chunk_store_commit_mesh_results(state.mesh_result_buffer[:int(result_count)])
 }
 
-streaming_update_budgeted :: proc(
-	observer_world_position: Vec3,
-	observer_forward: Vec3,
-) -> StreamingUpdateStats {
+streaming_update_budgeted :: proc(observer_world_position: Vec3) -> StreamingUpdateStats {
 	stats := StreamingUpdateStats{}
 
 	mesh_stats := mesh_results_poll_budgeted()
@@ -4486,7 +4748,7 @@ streaming_update_budgeted :: proc(
 	stats.generation_proxy_us = generation_stats.generation_proxy_us
 	stats.generation_refined_full_us = generation_stats.generation_refined_full_us
 	stats.generation_prewarm_us = generation_stats.generation_prewarm_us
-	stats.chunks_evicted = streaming_update_for_observer(observer_world_position, observer_forward)
+	stats.chunks_evicted = streaming_update_for_observer(observer_world_position)
 	generation_request_budgeted()
 	generation_prewarm_request_budgeted()
 
@@ -4501,115 +4763,28 @@ streaming_update_budgeted :: proc(
 // Streaming Methods
 /////////////////////////////////////
 
-streaming_update_for_observer :: proc(observer_world_position: Vec3, observer_forward: Vec3) -> u32 {
+streaming_update_for_observer :: proc(observer_world_position: Vec3) -> u32 {
 	center := streaming_center_from_observer(observer_world_position)
-	radius_y_down, radius_y_up, prioritize_underground, has_focus, focus_coord :=
-		streaming_vertical_radii_from_observer(observer_world_position, observer_forward)
+	radius_y_down, radius_y_up := streaming_vertical_radii_from_observer()
 	if state.streaming_target_count == 0 ||
 	   center != state.streaming_center_coord ||
 	   radius_y_down != state.streaming_radius_y_down ||
-	   radius_y_up != state.streaming_radius_y_up ||
-	   prioritize_underground != state.streaming_prioritize_underground ||
-	   has_focus != state.streaming_has_focus ||
-	   (has_focus && focus_coord != state.streaming_focus_coord) {
-		streaming_window_rebuild_targets(
-			center,
-			radius_y_down,
-			radius_y_up,
-			prioritize_underground,
-			has_focus,
-			focus_coord,
-		)
+	   radius_y_up != state.streaming_radius_y_up {
+		streaming_window_rebuild_targets(center, radius_y_down, radius_y_up)
 	}
 	return streaming_evict_outside_unload_radius()
 }
 
 streaming_center_from_observer :: proc(observer_world_position: Vec3) -> world_async.ChunkCoord {
-	center := chunk_coord_from_block_coord(
+	return chunk_coord_from_block_coord(
 		block_coord_from_world_position(observer_world_position),
 	)
-	center.y = 0
-	return center
 }
 
-streaming_vertical_radii_from_observer :: proc(
-	observer_world_position: Vec3,
-	observer_forward: Vec3,
-) -> (
-	radius_y_down, radius_y_up: u32,
-	prioritize_underground: bool,
-	has_focus: bool,
-	focus_coord: world_async.ChunkCoord,
-) {
-	radius_y_up = CHUNK_STREAMING_RADIUS_Y_UP
-
-	when TERRAIN_STREAMING_ADAPTIVE_VERTICAL_LAYERS {
-		observer_block := block_coord_from_world_position(observer_world_position)
-		if observer_block.y >= TERRAIN_STREAMING_UNDERGROUND_ACTIVATE_BLOCK_Y {
-			focus, ok := streaming_observer_descending_void_focus(
-				observer_world_position,
-				observer_forward,
-			)
-			if ok {
-				radius_y_down = CHUNK_STREAMING_RADIUS_Y_DOWN
-				prioritize_underground = true
-				has_focus = true
-				focus_coord = focus
-				return
-			}
-			radius_y_down = 0
-			return
-		}
-	}
-
+streaming_vertical_radii_from_observer :: proc() -> (radius_y_down, radius_y_up: u32) {
 	radius_y_down = CHUNK_STREAMING_RADIUS_Y_DOWN
-	prioritize_underground = true
+	radius_y_up = CHUNK_STREAMING_RADIUS_Y_UP
 	return
-}
-
-streaming_observer_descending_void_focus :: proc(
-	observer_world_position: Vec3,
-	observer_forward: Vec3,
-) -> (focus_coord: world_async.ChunkCoord, ok: bool) {
-	when !TERRAIN_STREAMING_ADAPTIVE_VERTICAL_LAYERS {
-		_ = observer_world_position
-		_ = observer_forward
-		return {}, false
-	}
-
-	if observer_forward[1] > TERRAIN_STREAMING_UNDERGROUND_LOOK_DOWN_FORWARD_Y {
-		return {}, false
-	}
-
-	step_blocks := math.max(TERRAIN_STREAMING_UNDERGROUND_LOOK_DOWN_STEP_BLOCKS, i32(1))
-	max_blocks := math.max(TERRAIN_STREAMING_UNDERGROUND_LOOK_DOWN_RAY_BLOCKS, step_blocks)
-	step_distance := f32(step_blocks) * TERRAIN_BLOCK_WORLD_SIZE
-	max_distance := f32(max_blocks) * TERRAIN_BLOCK_WORLD_SIZE
-	empty_samples: u32
-
-	for distance := step_distance; distance <= max_distance; distance += step_distance {
-		sample_position := observer_world_position + observer_forward * distance
-		block := block_coord_from_world_position(sample_position)
-		sample, sample_found := chunk_store_block_get(block).?
-		if sample_found {
-			if sample.occupancy == .Solid {
-				return {}, false
-			}
-			empty_samples += 1
-			if block.y < TERRAIN_STREAMING_UNDERGROUND_ACTIVATE_BLOCK_Y &&
-			   empty_samples >= TERRAIN_STREAMING_UNDERGROUND_LOOK_DOWN_MIN_EMPTY_SAMPLES {
-				return chunk_coord_from_block_coord(block), true
-			}
-			continue
-		}
-
-		if block.y < TERRAIN_STREAMING_UNDERGROUND_ACTIVATE_BLOCK_Y &&
-		   empty_samples >= TERRAIN_STREAMING_UNDERGROUND_LOOK_DOWN_MIN_EMPTY_SAMPLES {
-			return chunk_coord_from_block_coord(block), true
-		}
-	}
-
-	return {}, false
 }
 
 streaming_layer_radius_xz_from_dy :: proc(dy: i32) -> i32 {
@@ -4633,12 +4808,7 @@ streaming_coord_inside_window :: proc(
 	return abs(dx) <= radius && abs(dz) <= radius
 }
 
-streaming_target_less :: proc(
-	center, a, b: world_async.ChunkCoord,
-	prioritize_underground: bool,
-	has_focus: bool = false,
-	focus_coord: world_async.ChunkCoord = {},
-) -> bool {
+streaming_target_less :: proc(center, a, b: world_async.ChunkCoord) -> bool {
 	adx := a.x - center.x
 	ady := a.y - center.y
 	adz := a.z - center.z
@@ -4646,24 +4816,13 @@ streaming_target_less :: proc(
 	bdy := b.y - center.y
 	bdz := b.z - center.z
 
-	if prioritize_underground && (ady < 0 || bdy < 0) && (ady < 0) != (bdy < 0) {
-		return ady < 0
-	}
-	if prioritize_underground && has_focus && ady < 0 && bdy < 0 {
-		afdx := a.x - focus_coord.x
-		afdy := a.y - focus_coord.y
-		afdz := a.z - focus_coord.z
-		bfdx := b.x - focus_coord.x
-		bfdy := b.y - focus_coord.y
-		bfdz := b.z - focus_coord.z
-		afd := afdx * afdx + afdy * afdy + afdz * afdz
-		bfd := bfdx * bfdx + bfdy * bfdy + bfdz * bfdz
-		if afd != bfd {return afd < bfd}
-	}
-	if abs(ady) != abs(bdy) {return abs(ady) < abs(bdy)}
-	ad := adx * adx + adz * adz
-	bd := bdx * bdx + bdz * bdz
+	ad := adx * adx + ady * ady + adz * adz
+	bd := bdx * bdx + bdy * bdy + bdz * bdz
 	if ad != bd {return ad < bd}
+	if abs(ady) != abs(bdy) {return abs(ady) < abs(bdy)}
+	ah := adx * adx + adz * adz
+	bh := bdx * bdx + bdz * bdz
+	if ah != bh {return ah < bh}
 	if a.y != b.y {return a.y < b.y}
 	if a.z != b.z {return a.z < b.z}
 	return a.x < b.x
@@ -4722,16 +4881,10 @@ streaming_mesh_dependencies_ready :: proc(coord: world_async.ChunkCoord) -> bool
 streaming_window_rebuild_targets :: proc(
 	center: world_async.ChunkCoord,
 	radius_y_down, radius_y_up: u32,
-	prioritize_underground: bool,
-	has_focus: bool = false,
-	focus_coord: world_async.ChunkCoord = {},
 ) {
 	state.streaming_center_coord = center
 	state.streaming_radius_y_down = radius_y_down
 	state.streaming_radius_y_up = radius_y_up
-	state.streaming_prioritize_underground = prioritize_underground
-	state.streaming_has_focus = has_focus
-	state.streaming_focus_coord = focus_coord
 	state.streaming_target_count = 0
 
 	for dy := -i32(radius_y_down);
@@ -4761,9 +4914,6 @@ streaming_window_rebuild_targets :: proc(
 				center,
 				state.streaming_targets[j],
 				state.streaming_targets[best],
-				prioritize_underground,
-				has_focus,
-				focus_coord,
 			) {
 				best = j
 			}
@@ -4824,7 +4974,6 @@ streaming_prewarm_window_rebuild_targets :: proc(
 				   center,
 				   state.streaming_prewarm_targets[j],
 				   state.streaming_prewarm_targets[best],
-				   true,
 			   ) {
 				best = j
 			}
@@ -6338,24 +6487,49 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 		}
 		return
 	}
-	terrain_density_subterranean_biome_caves_apply(
-		view,
-		&generation_region,
-		origin,
-		column_targets[:],
-		wall_buffer_ptr,
-	)
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.cave_field += time.tick_since(profile_stage_start)
-		profile_stage_start = time.tick_now()
-	}
-	terrain_density_cave_network_apply(view, &generation_region, origin, column_targets[:], wall_buffer_ptr)
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.cave_network += time.tick_since(profile_stage_start)
-		profile_stage_start = time.tick_now()
-	}
-	when TERRAIN_CAVE_DEFER_WALL_MATERIAL_BUFFER {
-		terrain_cave_wall_material_buffer_flush(view, wall_buffer_ptr)
+
+	if terrain_generation_cave_overlay_cache_try_apply(view, key, chunk) {
+		when TERRAIN_GENERATION_PROFILE_PHASES {
+			terrain_generation_profile_stats.cave_network += time.tick_since(profile_stage_start)
+			profile_stage_start = time.tick_now()
+		}
+	} else {
+		overlay_capture := terrain_generation_cave_overlay_cache_capture_enabled()
+
+		terrain_density_subterranean_biome_caves_apply(
+			view,
+			&generation_region,
+			origin,
+			column_targets[:],
+			wall_buffer_ptr,
+		)
+		when TERRAIN_GENERATION_PROFILE_PHASES {
+			terrain_generation_profile_stats.cave_field += time.tick_since(profile_stage_start)
+			profile_stage_start = time.tick_now()
+		}
+		terrain_density_cave_network_apply(
+			view,
+			&generation_region,
+			origin,
+			column_targets[:],
+			wall_buffer_ptr,
+		)
+		when TERRAIN_CAVE_DEFER_WALL_MATERIAL_BUFFER {
+			terrain_cave_wall_material_buffer_flush(view, wall_buffer_ptr)
+		}
+		if overlay_capture {
+			terrain_generation_cave_overlay_cache_store_from_columns(
+				view,
+				key,
+				chunk,
+				origin,
+				column_targets[:],
+			)
+		}
+		when TERRAIN_GENERATION_PROFILE_PHASES {
+			terrain_generation_profile_stats.cave_network += time.tick_since(profile_stage_start)
+			profile_stage_start = time.tick_now()
+		}
 	}
 	terrain_water_volume_fill(view, origin, column_targets[:])
 	terrain_generation_chunk_cache_store(view, key, chunk)

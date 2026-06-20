@@ -722,6 +722,7 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 
 		terrain_generation_benchmark_cache_clear :: proc() {
 			state.terrain_generation_region_cache = {}
+			terrain_generation_cave_overlay_cache_clear()
 			terrain_generation_chunk_cache_clear()
 			terrain_generation_column_cache_clear()
 		}
@@ -7896,6 +7897,8 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 			chunk_voxel_view_alloc(&view, allocator)
 			terrain_generation_chunk_cache_init(context.allocator)
 			terrain_generation_chunk_cache_clear()
+			terrain_generation_cave_overlay_cache_init(context.allocator)
+			terrain_generation_cave_overlay_cache_clear()
 			seed := u32(0)
 			key := terrain_generation_key_make(seed)
 			cave_field_path_selection := terrain_generation_benchmark_cave_field_path_selection(
