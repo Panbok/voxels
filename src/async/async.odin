@@ -6,12 +6,14 @@ import "core:log"
 import "core:mem"
 import "core:sync"
 import "core:thread"
+import "core:time"
 
 //////////////////////////////////////
 // Generation Constants
 /////////////////////////////////////
 
-GENERATION_WORKER_COUNT :: 4
+GENERATION_WORKER_COUNT_DEFAULT :: 4
+GENERATION_WORKER_COUNT_MIN :: 1
 
 GENERATION_QUEUE_CAPACITY :: 128
 GENERATION_RESULT_QUEUE_CAPACITY :: 128
@@ -20,12 +22,12 @@ GENERATION_RESULT_QUEUE_CAPACITY :: 128
 // Meshing Constants
 /////////////////////////////////////
 
-MESH_WORKER_COUNT :: 4
+MESH_WORKER_COUNT_DEFAULT :: 4
+MESH_WORKER_COUNT_MIN :: 1
 MESH_WORKER_ARENA_BYTES :: 8 * mem.Megabyte
 MESH_WORKER_SCRATCH_ARENA_BYTES :: 3 * mem.Megabyte
 
 MESH_QUEUE_CAPACITY :: 128
-MESH_RESULT_QUEUE_CAPACITY :: MESH_WORKER_COUNT
 
 //////////////////////////////////////
 // Types
@@ -47,8 +49,9 @@ state := struct {
 
 	// Generation
 	generation_work_available: sync.Sema,
-	generation_threads:        [GENERATION_WORKER_COUNT]^thread.Thread,
-	generation_contexts:       [GENERATION_WORKER_COUNT]GenerationWorkerContext,
+	generation_worker_count:   u32,
+	generation_threads:        []^thread.Thread,
+	generation_contexts:       []GenerationWorkerContext,
 	generation_jobs:           [GENERATION_QUEUE_CAPACITY]world_async.ChunkGenerationJob,
 	generation_job_head:       u32,
 	generation_job_tail:       u32,
@@ -60,17 +63,18 @@ state := struct {
 
 	// Meshing
 	mesh_work_available:       sync.Sema,
-	mesh_result_released:      [MESH_WORKER_COUNT]sync.Sema,
-	mesh_threads:              [MESH_WORKER_COUNT]^thread.Thread,
-	mesh_contexts:             [MESH_WORKER_COUNT]MeshWorkerContext,
+	mesh_worker_count:         u32,
+	mesh_result_released:      []sync.Sema,
+	mesh_threads:              []^thread.Thread,
+	mesh_contexts:             []MeshWorkerContext,
 	mesh_worker_arena_pool:    MeshWorkerArenaPool,
 	mesh_worker_scratch_pool:  MeshWorkerArenaPool,
-	mesh_result_pending:       [MESH_WORKER_COUNT]bool,
+	mesh_result_pending:       []bool,
 	mesh_jobs:                 [MESH_QUEUE_CAPACITY]world_async.ChunkMeshJob,
 	mesh_job_head:             u32,
 	mesh_job_tail:             u32,
 	mesh_job_count:            u32,
-	mesh_results:              [MESH_RESULT_QUEUE_CAPACITY]world_async.ChunkMeshJobResult,
+	mesh_results:              []world_async.ChunkMeshJobResult,
 	mesh_result_head:          u32,
 	mesh_result_tail:          u32,
 	mesh_result_count:         u32,
@@ -86,9 +90,11 @@ MeshExecuteProc :: #type proc(
 ) -> world_async.ChunkMeshOutput
 
 InitConfig :: struct {
-	allocator:          mem.Allocator,
-	generation_execute: GenerationExecuteProc,
-	mesh_execute:       MeshExecuteProc,
+	allocator:               mem.Allocator,
+	generation_worker_count: u32,
+	mesh_worker_count:       u32,
+	generation_execute:      GenerationExecuteProc,
+	mesh_execute:            MeshExecuteProc,
 }
 
 //////////////////////////////////////
@@ -102,7 +108,7 @@ MeshWorkerArenaPoolElement :: struct {
 }
 
 MeshWorkerArenaPool :: struct {
-	elements: [MESH_WORKER_COUNT]MeshWorkerArenaPoolElement,
+	elements: []MeshWorkerArenaPoolElement,
 }
 
 GenerationWorkerContext :: struct {
@@ -139,6 +145,10 @@ lifecycle_shutdown_requested_set :: proc(value: bool) {
 
 queue_advance :: proc(index, capacity: u32) -> u32 {
 	return (index + 1) % capacity
+}
+
+mesh_result_queue_capacity :: proc() -> u32 {
+	return u32(len(state.mesh_results))
 }
 
 //////////////////////////////////////
@@ -222,13 +232,11 @@ mesh_job_pop_locked :: proc(job: ^world_async.ChunkMeshJob) -> bool {
 }
 
 mesh_result_push_locked :: proc(result: world_async.ChunkMeshJobResult) {
-	log.assertf(
-		state.mesh_result_count < MESH_RESULT_QUEUE_CAPACITY,
-		"mesh result queue capacity exceeded",
-	)
+	capacity := mesh_result_queue_capacity()
+	log.assertf(state.mesh_result_count < capacity, "mesh result queue capacity exceeded")
 
 	state.mesh_results[state.mesh_result_tail] = result
-	state.mesh_result_tail = queue_advance(state.mesh_result_tail, MESH_RESULT_QUEUE_CAPACITY)
+	state.mesh_result_tail = queue_advance(state.mesh_result_tail, capacity)
 	state.mesh_result_count += 1
 }
 
@@ -238,7 +246,7 @@ mesh_result_pop_locked :: proc(result: ^world_async.ChunkMeshJobResult) -> bool 
 	}
 
 	result^ = state.mesh_results[state.mesh_result_head]
-	state.mesh_result_head = queue_advance(state.mesh_result_head, MESH_RESULT_QUEUE_CAPACITY)
+	state.mesh_result_head = queue_advance(state.mesh_result_head, mesh_result_queue_capacity())
 	state.mesh_result_count -= 1
 	return true
 }
@@ -254,10 +262,18 @@ mesh_worker_arena_pool_init :: proc(
 	allocator: mem.Allocator,
 ) {
 	log.assertf(pool != nil, "mesh arena pool must not be nil")
-	log.assertf(arena_count == MESH_WORKER_COUNT, "mesh arena count must match mesh worker count")
+	log.assertf(arena_count > 0, "mesh arena count must be positive")
 
 	pool^ = {}
-	for idx in 0 ..< MESH_WORKER_COUNT {
+	pool.elements = make([]MeshWorkerArenaPoolElement, int(arena_count), allocator)
+	log.assertf(
+		len(pool.elements) == int(arena_count),
+		"mesh arena pool element allocation failed: expected=%d got=%d",
+		arena_count,
+		len(pool.elements),
+	)
+
+	for idx in 0 ..< arena_count {
 		pool.elements[idx] = {
 			arena     = mem.Arena{},
 			allocator = mem.Allocator{},
@@ -276,8 +292,16 @@ mesh_worker_arena_pool_init :: proc(
 	}
 }
 
+mesh_worker_arena_pool_destroy :: proc(pool: ^MeshWorkerArenaPool) {
+	if pool == nil {
+		return
+	}
+
+	pool^ = {}
+}
+
 mesh_worker_arena_pool_reset_element :: proc(pool: ^MeshWorkerArenaPool, index: u32) {
-	log.assertf(index < MESH_WORKER_COUNT, "mesh arena index out of bounds: %d", index)
+	log.assertf(index < u32(len(pool.elements)), "mesh arena index out of bounds: %d", index)
 	mem.arena_free_all(&pool.elements[index].arena)
 }
 
@@ -306,7 +330,11 @@ generation_worker_proc :: proc(data: rawptr) {
 			continue
 		}
 
+		generation_start := time.tick_now()
 		result := execute(job)
+		result.generation_duration_us = u64(
+			time.duration_microseconds(time.tick_since(generation_start)),
+		)
 
 		sync.lock(&state.generation_mutex)
 		generation_result_push_locked(result)
@@ -380,24 +408,59 @@ init :: proc(config: InitConfig) {
 	log.assert(config.generation_execute != nil, "generation execute callback is required")
 	log.assert(config.mesh_execute != nil, "mesh execute callback is required")
 
+	generation_worker_count := config.generation_worker_count
+	if generation_worker_count == 0 {
+		generation_worker_count = GENERATION_WORKER_COUNT_DEFAULT
+	}
+	mesh_worker_count := config.mesh_worker_count
+	if mesh_worker_count == 0 {
+		mesh_worker_count = MESH_WORKER_COUNT_DEFAULT
+	}
+	log.assertf(
+		generation_worker_count >= GENERATION_WORKER_COUNT_MIN,
+		"generation worker count must be positive",
+	)
+	log.assertf(mesh_worker_count >= MESH_WORKER_COUNT_MIN, "mesh worker count must be positive")
+
 	state.allocator = config.allocator
 	state.generation_execute = config.generation_execute
 	state.mesh_execute = config.mesh_execute
+	state.generation_worker_count = generation_worker_count
+	state.mesh_worker_count = mesh_worker_count
+	state.generation_threads = make(
+		[]^thread.Thread,
+		int(generation_worker_count),
+		config.allocator,
+	)
+	state.generation_contexts = make(
+		[]GenerationWorkerContext,
+		int(generation_worker_count),
+		config.allocator,
+	)
+	state.mesh_result_released = make([]sync.Sema, int(mesh_worker_count), config.allocator)
+	state.mesh_threads = make([]^thread.Thread, int(mesh_worker_count), config.allocator)
+	state.mesh_contexts = make([]MeshWorkerContext, int(mesh_worker_count), config.allocator)
+	state.mesh_result_pending = make([]bool, int(mesh_worker_count), config.allocator)
+	state.mesh_results = make(
+		[]world_async.ChunkMeshJobResult,
+		int(mesh_worker_count),
+		config.allocator,
+	)
 	lifecycle_shutdown_requested_set(false)
 	mesh_worker_arena_pool_init(
 		&state.mesh_worker_arena_pool,
-		MESH_WORKER_COUNT,
+		mesh_worker_count,
 		MESH_WORKER_ARENA_BYTES,
 		config.allocator,
 	)
 	mesh_worker_arena_pool_init(
 		&state.mesh_worker_scratch_pool,
-		MESH_WORKER_COUNT,
+		mesh_worker_count,
 		MESH_WORKER_SCRATCH_ARENA_BYTES,
 		config.allocator,
 	)
 
-	for worker_index in 0 ..< GENERATION_WORKER_COUNT {
+	for worker_index in 0 ..< generation_worker_count {
 		state.generation_contexts[worker_index] = {
 			worker_index = u32(worker_index),
 		}
@@ -411,7 +474,7 @@ init :: proc(config: InitConfig) {
 		)
 	}
 
-	for worker_index in 0 ..< MESH_WORKER_COUNT {
+	for worker_index in 0 ..< mesh_worker_count {
 		state.mesh_contexts[worker_index] = {
 			worker_index = u32(worker_index),
 		}
@@ -432,26 +495,30 @@ shutdown :: proc() {
 
 	lifecycle_shutdown_requested_set(true)
 
-	sync.post(&state.generation_work_available, GENERATION_WORKER_COUNT)
-	sync.post(&state.mesh_work_available, MESH_WORKER_COUNT)
-	for worker_index in 0 ..< MESH_WORKER_COUNT {
+	sync.post(&state.generation_work_available, int(state.generation_worker_count))
+	sync.post(&state.mesh_work_available, int(state.mesh_worker_count))
+	for worker_index in 0 ..< state.mesh_worker_count {
 		sync.post(&state.mesh_result_released[worker_index])
 	}
 
-	for worker_index in 0 ..< GENERATION_WORKER_COUNT {
+	for worker_index in 0 ..< state.generation_worker_count {
 		thread.join(state.generation_threads[worker_index])
 		thread.destroy(state.generation_threads[worker_index])
 		state.generation_threads[worker_index] = nil
 	}
 
-	for worker_index in 0 ..< MESH_WORKER_COUNT {
+	for worker_index in 0 ..< state.mesh_worker_count {
 		thread.join(state.mesh_threads[worker_index])
 		thread.destroy(state.mesh_threads[worker_index])
 		state.mesh_threads[worker_index] = nil
 	}
 
+	mesh_worker_arena_pool_destroy(&state.mesh_worker_arena_pool)
+	mesh_worker_arena_pool_destroy(&state.mesh_worker_scratch_pool)
+
 	lifecycle_started_set(false)
 	lifecycle_shutdown_requested_set(false)
+	state = {}
 }
 
 //////////////////////////////////////
@@ -523,7 +590,10 @@ mesh_results_poll :: proc(results: []world_async.ChunkMeshJobResult) -> u32 {
 }
 
 mesh_result_release :: proc(result: world_async.ChunkMeshJobResult) {
-	log.assertf(result.worker_index < MESH_WORKER_COUNT, "mesh result worker index out of bounds")
+	log.assertf(
+		result.worker_index < state.mesh_worker_count,
+		"mesh result worker index out of bounds",
+	)
 
 	sync.lock(&state.mesh_mutex)
 	log.assertf(
