@@ -41,18 +41,18 @@ ChunkStore :: struct {
 /////////////////////////////////////
 
 StreamingState :: struct {
-	streaming_center_coord:      world_async.ChunkCoord,
-	streaming_targets:           [CHUNK_STREAMING_TARGET_CAPACITY]world_async.ChunkCoord,
-	streaming_target_count:      u32,
-	streaming_prewarm_targets:   [CHUNK_STREAMING_PREWARM_TARGET_CAPACITY]world_async.ChunkCoord,
+	streaming_center_coord:              world_async.ChunkCoord,
+	streaming_targets:                   [CHUNK_STREAMING_TARGET_CAPACITY]world_async.ChunkCoord,
+	streaming_target_count:              u32,
+	streaming_prewarm_targets:           [CHUNK_STREAMING_PREWARM_TARGET_CAPACITY]world_async.ChunkCoord,
 	streaming_prewarm_target_count:      u32,
 	streaming_prewarm_inflight_coords:   [CHUNK_STREAMING_PREWARM_INFLIGHT_CAPACITY]world_async.ChunkCoord,
 	streaming_prewarm_inflight_count:    u32,
-	streaming_radius_y_down:          u32,
-	streaming_radius_y_up:            u32,
-	next_streaming_target_index:      u32,
+	streaming_radius_y_down:             u32,
+	streaming_radius_y_up:               u32,
+	next_streaming_target_index:         u32,
 	next_streaming_prewarm_target_index: u32,
-	next_mesh_scan_index:             u32,
+	next_mesh_scan_index:                u32,
 }
 
 TerrainGenerationRegionCacheSlot :: struct {
@@ -143,15 +143,15 @@ StreamingUpdateStats :: struct {
 }
 
 GenerationResultsPollStats :: struct {
-	chunks_generated:       u32,
-	chunks_generated_full:  u32,
-	chunks_generated_proxy: u32,
-	chunks_refined_full:    u32,
-	chunks_prewarmed:       u32,
-	generation_full_us:     u64,
-	generation_proxy_us:    u64,
+	chunks_generated:           u32,
+	chunks_generated_full:      u32,
+	chunks_generated_proxy:     u32,
+	chunks_refined_full:        u32,
+	chunks_prewarmed:           u32,
+	generation_full_us:         u64,
+	generation_proxy_us:        u64,
 	generation_refined_full_us: u64,
-	generation_prewarm_us:  u64,
+	generation_prewarm_us:      u64,
 }
 
 ChunkWorkBudget :: struct {
@@ -194,38 +194,38 @@ InitConfig :: struct {
 
 state := struct {
 	// Memory
-	persistent_allocator:            mem.Allocator,
-	chunk_block_storage_buffer:      []u8,
-	chunk_block_storage_tlsf:        mem_tlsf.Allocator,
-	chunk_block_storage_allocator:   mem.Allocator,
-	chunk_mesh_row_cache_buffer:     []u8,
-	chunk_mesh_row_cache_tlsf:       mem_tlsf.Allocator,
-	chunk_mesh_row_cache_allocator:  mem.Allocator,
+	persistent_allocator:                  mem.Allocator,
+	chunk_block_storage_buffer:            []u8,
+	chunk_block_storage_tlsf:              mem_tlsf.Allocator,
+	chunk_block_storage_allocator:         mem.Allocator,
+	chunk_mesh_row_cache_buffer:           []u8,
+	chunk_mesh_row_cache_tlsf:             mem_tlsf.Allocator,
+	chunk_mesh_row_cache_allocator:        mem.Allocator,
 
 	// Callbacks
-	generation_request:              GenerationRequestProc,
-	generation_poll_results:         GenerationPollResultsProc,
-	mesh_request:                    MeshRequestProc,
-	mesh_poll_results:               MeshPollResultsProc,
-	mesh_release_result:             MeshReleaseResultProc,
-	chunk_mesh_upload:               ChunkMeshUploadProc,
-	chunk_geometry_release:          ChunkGeometryReleaseProc,
+	generation_request:                    GenerationRequestProc,
+	generation_poll_results:               GenerationPollResultsProc,
+	mesh_request:                          MeshRequestProc,
+	mesh_poll_results:                     MeshPollResultsProc,
+	mesh_release_result:                   MeshReleaseResultProc,
+	chunk_mesh_upload:                     ChunkMeshUploadProc,
+	chunk_geometry_release:                ChunkGeometryReleaseProc,
 
 	// Storage
-	chunk_store:                     ChunkStore,
+	chunk_store:                           ChunkStore,
 
 	// Streaming
-	using streaming:                 StreamingState,
-	chunk_work_budget:               ChunkWorkBudget,
-	generation_result_buffer:        []world_async.ChunkGenerationJobResult,
-	mesh_result_buffer:              []world_async.ChunkMeshJobResult,
-	terrain_generation_region_cache: TerrainGenerationRegionCache,
+	using streaming:                       StreamingState,
+	chunk_work_budget:                     ChunkWorkBudget,
+	generation_result_buffer:              []world_async.ChunkGenerationJobResult,
+	mesh_result_buffer:                    []world_async.ChunkMeshJobResult,
+	terrain_generation_region_cache:       TerrainGenerationRegionCache,
 	terrain_generation_cave_overlay_cache: TerrainGenerationCaveOverlayCache,
-	terrain_generation_chunk_cache:  TerrainGenerationChunkCache,
-	terrain_generation_column_cache: TerrainGenerationColumnCache,
+	terrain_generation_chunk_cache:        TerrainGenerationChunkCache,
+	terrain_generation_column_cache:       TerrainGenerationColumnCache,
 
 	// State
-	initialized:                     bool,
+	initialized:                           bool,
 }{}
 
 
@@ -548,14 +548,8 @@ TERRAIN_CAVE_FIELD_NETWORK_ROUTE_BOUNDS_ENABLED :: #config(
 	true,
 )
 TERRAIN_CAVE_FAST_SKELETON :: #config(TERRAIN_CAVE_FAST_SKELETON, false)
-TERRAIN_CAVE_DEFER_WALL_MATERIAL_BUFFER :: #config(
-	TERRAIN_CAVE_DEFER_WALL_MATERIAL_BUFFER,
-	false,
-)
-TERRAIN_CAVE_ROUTE_POCKET_CORE_BYPASS :: #config(
-	TERRAIN_CAVE_ROUTE_POCKET_CORE_BYPASS,
-	true,
-)
+TERRAIN_CAVE_DEFER_WALL_MATERIAL_BUFFER :: #config(TERRAIN_CAVE_DEFER_WALL_MATERIAL_BUFFER, false)
+TERRAIN_CAVE_ROUTE_POCKET_CORE_BYPASS :: #config(TERRAIN_CAVE_ROUTE_POCKET_CORE_BYPASS, true)
 TERRAIN_CAVE_ROUTE_POCKET_CORE_BYPASS_SHAPE_MAX :: #config(
 	TERRAIN_CAVE_ROUTE_POCKET_CORE_BYPASS_SHAPE_MAX,
 	f32(0.77),
@@ -583,60 +577,60 @@ TERRAIN_CAVE_EDGE_CHUNK_INTERSECT_SEAM_PADDING_BLOCKS :: #config(
 
 when TERRAIN_GENERATION_PROFILE_PHASES {
 	TerrainGenerationProfileStats :: struct {
-		chunk_count:          u64,
-		total:                time.Duration,
-		clear:                time.Duration,
-		region:               time.Duration,
-		columns:              time.Duration,
-		cave_field:           time.Duration,
-		cave_field_scan:      time.Duration,
-		cave_field_network:   time.Duration,
-		cave_field_path:      time.Duration,
-		cave_field_pocket_throat:  time.Duration,
-		cave_field_pocket_cluster: time.Duration,
-		cave_field_chamber:   time.Duration,
-		cave_field_bridge:    time.Duration,
-		route_pocket_cluster_rows_scanned:      u64,
-		route_pocket_cluster_rows_box:          u64,
-		route_pocket_cluster_voxel_candidates:  u64,
+		chunk_count:                               u64,
+		total:                                     time.Duration,
+		clear:                                     time.Duration,
+		region:                                    time.Duration,
+		columns:                                   time.Duration,
+		cave_field:                                time.Duration,
+		cave_field_scan:                           time.Duration,
+		cave_field_network:                        time.Duration,
+		cave_field_path:                           time.Duration,
+		cave_field_pocket_throat:                  time.Duration,
+		cave_field_pocket_cluster:                 time.Duration,
+		cave_field_chamber:                        time.Duration,
+		cave_field_bridge:                         time.Duration,
+		route_pocket_cluster_rows_scanned:         u64,
+		route_pocket_cluster_rows_box:             u64,
+		route_pocket_cluster_voxel_candidates:     u64,
 		route_pocket_cluster_carveable_candidates: u64,
-		route_pocket_cluster_shape_candidates:  u64,
-		route_pocket_cluster_worley_candidates: u64,
-		cave_network:         time.Duration,
-		water:                time.Duration,
-		network_connectivity: time.Duration,
-		network_nodes:        time.Duration,
-		network_edges:        time.Duration,
-		network_bridges:      time.Duration,
-		network_anchors:      time.Duration,
-		node_rooms:           time.Duration,
-		node_perimeter:       time.Duration,
-		node_satellites:      time.Duration,
-		node_portals:         time.Duration,
-		node_satellite_direct:  time.Duration,
-		node_satellite_apron:   time.Duration,
-		node_satellite_cluster: time.Duration,
-		edge_core:            time.Duration,
-		edge_approach:        time.Duration,
-		edge_braids:          time.Duration,
-		edge_bypasses:        time.Duration,
-		edge_alcoves:         time.Duration,
-		edge_chamberlets:     time.Duration,
-		edge_seams:           time.Duration,
-		edge_core_segment_calls:        u64,
-		edge_core_segment_bounds_hits:  u64,
-		edge_core_rows_scanned:         u64,
-		edge_core_rows_projected:       u64,
-		edge_core_rows_capsule:         u64,
-		edge_core_voxel_candidates:     u64,
-		edge_core_carveable_candidates: u64,
-		edge_core_shape_candidates:     u64,
-		edge_core_noise_candidates:     u64,
-		edge_core_threshold_candidates: u64,
-		carve_attempts:       u64,
-		carve_successes:      u64,
-		wall_neighbor_checks: u64,
-		wall_neighbor_writes: u64,
+		route_pocket_cluster_shape_candidates:     u64,
+		route_pocket_cluster_worley_candidates:    u64,
+		cave_network:                              time.Duration,
+		water:                                     time.Duration,
+		network_connectivity:                      time.Duration,
+		network_nodes:                             time.Duration,
+		network_edges:                             time.Duration,
+		network_bridges:                           time.Duration,
+		network_anchors:                           time.Duration,
+		node_rooms:                                time.Duration,
+		node_perimeter:                            time.Duration,
+		node_satellites:                           time.Duration,
+		node_portals:                              time.Duration,
+		node_satellite_direct:                     time.Duration,
+		node_satellite_apron:                      time.Duration,
+		node_satellite_cluster:                    time.Duration,
+		edge_core:                                 time.Duration,
+		edge_approach:                             time.Duration,
+		edge_braids:                               time.Duration,
+		edge_bypasses:                             time.Duration,
+		edge_alcoves:                              time.Duration,
+		edge_chamberlets:                          time.Duration,
+		edge_seams:                                time.Duration,
+		edge_core_segment_calls:                   u64,
+		edge_core_segment_bounds_hits:             u64,
+		edge_core_rows_scanned:                    u64,
+		edge_core_rows_projected:                  u64,
+		edge_core_rows_capsule:                    u64,
+		edge_core_voxel_candidates:                u64,
+		edge_core_carveable_candidates:            u64,
+		edge_core_shape_candidates:                u64,
+		edge_core_noise_candidates:                u64,
+		edge_core_threshold_candidates:            u64,
+		carve_attempts:                            u64,
+		carve_successes:                           u64,
+		wall_neighbor_checks:                      u64,
+		wall_neighbor_writes:                      u64,
 	}
 
 	terrain_generation_profile_stats: TerrainGenerationProfileStats
@@ -1298,10 +1292,7 @@ chunk_voxel_view_fill_empty :: proc(view: ^world_async.ChunkVoxelView) {
 	mem.set(rawptr(view.blocks.material_id), u8(world_async.BlockMaterialID(0)), CHUNK_BLOCK_COUNT)
 }
 
-chunk_voxel_view_copy :: proc(
-	dst: ^world_async.ChunkVoxelView,
-	src: ^world_async.ChunkVoxelView,
-) {
+chunk_voxel_view_copy :: proc(dst: ^world_async.ChunkVoxelView, src: ^world_async.ChunkVoxelView) {
 	log.assertf(
 		len(dst.blocks) == CHUNK_BLOCK_COUNT,
 		"destination chunk voxel view must have %d blocks, got %d",
@@ -1739,7 +1730,10 @@ terrain_generation_column_cache_try_read :: proc(
 
 		for i := 0; i < TERRAIN_GENERATION_COLUMN_CACHE_CAPACITY; i += 1 {
 			slot := &cache.slots[i]
-			if slot.valid && slot.key == key && slot.chunk_x == coord.x && slot.chunk_z == coord.z {
+			if slot.valid &&
+			   slot.key == key &&
+			   slot.chunk_x == coord.x &&
+			   slot.chunk_z == coord.z {
 				cache.clock += 1
 				slot.last_used = cache.clock
 				mem.copy(
@@ -1775,7 +1769,10 @@ terrain_generation_column_cache_store :: proc(
 		oldest_tick := max(u64)
 		for i := 0; i < TERRAIN_GENERATION_COLUMN_CACHE_CAPACITY; i += 1 {
 			slot := &cache.slots[i]
-			if slot.valid && slot.key == key && slot.chunk_x == coord.x && slot.chunk_z == coord.z {
+			if slot.valid &&
+			   slot.key == key &&
+			   slot.chunk_x == coord.x &&
+			   slot.chunk_z == coord.z {
 				slot_index = i
 				break
 			}
@@ -4405,8 +4402,7 @@ generation_request_budgeted :: proc() -> u32 {
 			chunk = chunk_store_get_by_id(chunk_id)
 		}
 
-		if chunk.generation_state == .Generated &&
-		   chunk.generation_quality == .Proxy {
+		if chunk.generation_state == .Generated && chunk.generation_quality == .Proxy {
 			if missing_proxy_target_exists ||
 			   chunk.full_generation_queued ||
 			   chunk.mesh_state != .Ready ||
@@ -4444,10 +4440,10 @@ generation_request_budgeted :: proc() -> u32 {
 
 		block_storage := chunk_block_storage_alloc_for_store()
 		if terrain_generation_chunk_cache_try_read(
-			   &block_storage.voxel_view,
-			   terrain_generation_key_make(0),
-			   coord,
-		   ) {
+			&block_storage.voxel_view,
+			terrain_generation_key_make(0),
+			coord,
+		) {
 			if block_storage.binary_greedy_row_cache != nil {
 				terrain_binary_row_cache_fill(
 					block_storage.binary_greedy_row_cache,
@@ -4496,8 +4492,7 @@ generation_prewarm_request_budgeted :: proc() -> u32 {
 	    scanned_count < state.streaming_prewarm_target_count {
 		target_index := state.next_streaming_prewarm_target_index
 		state.next_streaming_prewarm_target_index =
-			(state.next_streaming_prewarm_target_index + 1) %
-			state.streaming_prewarm_target_count
+			(state.next_streaming_prewarm_target_index + 1) % state.streaming_prewarm_target_count
 		scanned_count += 1
 
 		coord := state.streaming_prewarm_targets[target_index]
@@ -4621,11 +4616,7 @@ generation_results_poll_budgeted :: proc() -> GenerationResultsPollStats {
 			"generated storage must match queued chunk storage: coord=%v",
 			generation_result.coord,
 		)
-		chunk_mark_generated(
-			chunk,
-			generation_result.block_storage,
-			generation_result.quality,
-		)
+		chunk_mark_generated(chunk, generation_result.block_storage, generation_result.quality)
 		if generation_result.quality == .Proxy {
 			stats.chunks_generated_proxy += 1
 			stats.generation_proxy_us += generation_result.generation_duration_us
@@ -4776,9 +4767,7 @@ streaming_update_for_observer :: proc(observer_world_position: Vec3) -> u32 {
 }
 
 streaming_center_from_observer :: proc(observer_world_position: Vec3) -> world_async.ChunkCoord {
-	return chunk_coord_from_block_coord(
-		block_coord_from_world_position(observer_world_position),
-	)
+	return chunk_coord_from_block_coord(block_coord_from_world_position(observer_world_position))
 }
 
 streaming_vertical_radii_from_observer :: proc() -> (radius_y_down, radius_y_up: u32) {
@@ -4887,9 +4876,7 @@ streaming_window_rebuild_targets :: proc(
 	state.streaming_radius_y_up = radius_y_up
 	state.streaming_target_count = 0
 
-	for dy := -i32(radius_y_down);
-	    dy <= i32(radius_y_up);
-	    dy += 1 {
+	for dy := -i32(radius_y_down); dy <= i32(radius_y_up); dy += 1 {
 		radius := streaming_layer_radius_xz_from_dy(dy)
 		for dz := -radius; dz <= radius; dz += 1 {
 			for dx := -radius; dx <= radius; dx += 1 {
@@ -4928,10 +4915,7 @@ streaming_window_rebuild_targets :: proc(
 	streaming_prewarm_window_rebuild_targets(center, radius_y_down == 0)
 }
 
-streaming_prewarm_window_rebuild_targets :: proc(
-	center: world_async.ChunkCoord,
-	active: bool,
-) {
+streaming_prewarm_window_rebuild_targets :: proc(center: world_async.ChunkCoord, active: bool) {
 	state.streaming_prewarm_target_count = 0
 	state.next_streaming_prewarm_target_index = 0
 
@@ -4945,16 +4929,13 @@ streaming_prewarm_window_rebuild_targets :: proc(
 		return
 	}
 
-	for layer := u32(1);
-	    layer <= TERRAIN_STREAMING_UNDERGROUND_PREWARM_LAYERS_DOWN;
-	    layer += 1 {
+	for layer := u32(1); layer <= TERRAIN_STREAMING_UNDERGROUND_PREWARM_LAYERS_DOWN; layer += 1 {
 		dy := -i32(layer)
 		radius := i32(TERRAIN_STREAMING_UNDERGROUND_PREWARM_RADIUS_XZ)
 		for dz := -radius; dz <= radius; dz += 1 {
 			for dx := -radius; dx <= radius; dx += 1 {
 				log.assert(
-					state.streaming_prewarm_target_count <
-					CHUNK_STREAMING_PREWARM_TARGET_CAPACITY,
+					state.streaming_prewarm_target_count < CHUNK_STREAMING_PREWARM_TARGET_CAPACITY,
 					"streaming prewarm target capacity exceeded",
 				)
 				state.streaming_prewarm_targets[state.streaming_prewarm_target_count] = {
@@ -4971,10 +4952,10 @@ streaming_prewarm_window_rebuild_targets :: proc(
 		best := i
 		for j := i + 1; j < state.streaming_prewarm_target_count; j += 1 {
 			if streaming_target_less(
-				   center,
-				   state.streaming_prewarm_targets[j],
-				   state.streaming_prewarm_targets[best],
-			   ) {
+				center,
+				state.streaming_prewarm_targets[j],
+				state.streaming_prewarm_targets[best],
+			) {
 				best = j
 			}
 		}
@@ -6170,15 +6151,15 @@ TerrainCaveNodeConnectivity :: struct {
 }
 
 TerrainCaveChunkFeatureBucket :: struct {
-	node_indices:        [biomes.GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]u32,
-	node_count:          u32,
-	bridge_node_indices: [biomes.GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]u32,
-	bridge_node_count:   u32,
-	edge_indices:        [biomes.GENERATION_REGION_CAVE_NETWORK_EDGE_CAPACITY]u32,
+	node_indices:            [biomes.GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]u32,
+	node_count:              u32,
+	bridge_node_indices:     [biomes.GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]u32,
+	bridge_node_count:       u32,
+	edge_indices:            [biomes.GENERATION_REGION_CAVE_NETWORK_EDGE_CAPACITY]u32,
 	edge_core_segment_masks: [biomes.GENERATION_REGION_CAVE_NETWORK_EDGE_CAPACITY]u64,
-	edge_count:          u32,
-	anchor_indices:      [biomes.GENERATION_REGION_CAVE_ANCHOR_CAPACITY]u32,
-	anchor_count:        u32,
+	edge_count:              u32,
+	anchor_indices:          [biomes.GENERATION_REGION_CAVE_ANCHOR_CAPACITY]u32,
+	anchor_count:            u32,
 }
 
 TerrainGridPoint :: struct {
@@ -6363,12 +6344,8 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 					world_z,
 					&profile_row_cache,
 				)
-				column_targets[x + z * CHUNK_BLOCK_LENGTH] = terrain_biome_column_from_profile_evaluation(
-					key,
-					evaluation,
-					world_x,
-					world_z,
-				)
+				column_targets[x + z * CHUNK_BLOCK_LENGTH] =
+					terrain_biome_column_from_profile_evaluation(key, evaluation, world_x, world_z)
 			}
 		}
 		terrain_generation_column_cache_store(column_targets[:], key, chunk)
@@ -6381,14 +6358,22 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 			column := column_targets[i]
 			if !terrain_density_surface_is_solid(column, chunk_top_world_y) ||
 			   column.surface_height - chunk_top_world_y <
-			   column.surface_layer_depth + TERRAIN_DIRT_LAYER_BLOCK_DEPTH {
+				   column.surface_layer_depth + TERRAIN_DIRT_LAYER_BLOCK_DEPTH {
 				all_deep_stone = false
 				break
 			}
 		}
 		if all_deep_stone {
-			mem.set(rawptr(view.blocks.occupancy), u8(world_async.BlockOccupancy.Solid), CHUNK_BLOCK_COUNT)
-			mem.set(rawptr(view.blocks.material_id), u8(world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)), CHUNK_BLOCK_COUNT)
+			mem.set(
+				rawptr(view.blocks.occupancy),
+				u8(world_async.BlockOccupancy.Solid),
+				CHUNK_BLOCK_COUNT,
+			)
+			mem.set(
+				rawptr(view.blocks.material_id),
+				u8(world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)),
+				CHUNK_BLOCK_COUNT,
+			)
 			block_fill_done = true
 		}
 	}
@@ -6787,9 +6772,8 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 						wall_buffer,
 					)
 					when TERRAIN_GENERATION_PROFILE_PHASES {
-						terrain_generation_profile_stats.cave_field_pocket_throat += time.tick_since(
-							cave_field_profile_start,
-						)
+						terrain_generation_profile_stats.cave_field_pocket_throat +=
+							time.tick_since(cave_field_profile_start)
 						cave_field_profile_start = time.tick_now()
 					}
 					terrain_density_carve_cave_field_route_pocket_cluster(
@@ -6813,9 +6797,8 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 						wall_buffer,
 					)
 					when TERRAIN_GENERATION_PROFILE_PHASES {
-						terrain_generation_profile_stats.cave_field_pocket_cluster += time.tick_since(
-							cave_field_profile_start,
-						)
+						terrain_generation_profile_stats.cave_field_pocket_cluster +=
+							time.tick_since(cave_field_profile_start)
 					}
 					stamp_count += 1
 					continue
@@ -6875,11 +6858,11 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 						network_sample.nearest_z,
 						bridge_radius,
 						bridge_shape,
-							TERRAIN_CAVE_BRANCH_SALT,
-							biome_id,
-							false,
-							wall_buffer,
-						)
+						TERRAIN_CAVE_BRANCH_SALT,
+						biome_id,
+						false,
+						wall_buffer,
+					)
 					when TERRAIN_GENERATION_PROFILE_PHASES {
 						terrain_generation_profile_stats.cave_field_bridge += time.tick_since(
 							cave_field_profile_start,
@@ -7189,10 +7172,7 @@ terrain_density_carve_cave_field_route_pocket_cluster :: proc(
 			),
 		),
 	)
-	route_pocket_min_along_center := math.min(
-		-route_pocket_side_offset,
-		f32(0),
-	)
+	route_pocket_min_along_center := math.min(-route_pocket_side_offset, f32(0))
 	route_pocket_max_along_center := math.max(
 		route_pocket_side_offset,
 		route_pocket_side_offset + route_pocket_branch_offset * f32(0.38),
@@ -7205,26 +7185,35 @@ terrain_density_carve_cave_field_route_pocket_cluster :: proc(
 		f32(0),
 		math.max(route_pocket_inward_height, route_pocket_inward_height * f32(0.35)),
 	)
-	route_pocket_min_away_center := math.min(
-		-route_pocket_inward_offset,
-		f32(0),
-	)
+	route_pocket_min_away_center := math.min(-route_pocket_inward_offset, f32(0))
 	route_pocket_max_away_center := math.max(
 		route_pocket_outward_offset,
 		route_pocket_outward_offset + route_pocket_branch_away * f32(0.34),
 	)
-	route_pocket_min_along := route_pocket_min_along_center -
-		route_pocket_max_along_radius * route_pocket_shape_span - 0.25
-	route_pocket_max_along := route_pocket_max_along_center +
-		route_pocket_max_along_radius * route_pocket_shape_span + 0.25
-	route_pocket_min_height := route_pocket_min_height_center -
-		route_pocket_max_height_radius * route_pocket_shape_span - 0.25
-	route_pocket_max_height := route_pocket_max_height_center +
-		route_pocket_max_height_radius * route_pocket_shape_span + 0.25
-	route_pocket_min_away := route_pocket_min_away_center -
-		route_pocket_max_away_radius * route_pocket_shape_span - 0.25
-	route_pocket_max_away := route_pocket_max_away_center +
-		route_pocket_max_away_radius * route_pocket_shape_span + 0.25
+	route_pocket_min_along :=
+		route_pocket_min_along_center -
+		route_pocket_max_along_radius * route_pocket_shape_span -
+		0.25
+	route_pocket_max_along :=
+		route_pocket_max_along_center +
+		route_pocket_max_along_radius * route_pocket_shape_span +
+		0.25
+	route_pocket_min_height :=
+		route_pocket_min_height_center -
+		route_pocket_max_height_radius * route_pocket_shape_span -
+		0.25
+	route_pocket_max_height :=
+		route_pocket_max_height_center +
+		route_pocket_max_height_radius * route_pocket_shape_span +
+		0.25
+	route_pocket_min_away :=
+		route_pocket_min_away_center -
+		route_pocket_max_away_radius * route_pocket_shape_span -
+		0.25
+	route_pocket_max_away :=
+		route_pocket_max_away_center +
+		route_pocket_max_away_radius * route_pocket_shape_span +
+		0.25
 
 	for z := local_min_z; z <= local_max_z; z += 1 {
 		world_z := f32(chunk_origin.z + z) + 0.5
@@ -7746,13 +7735,13 @@ terrain_density_cave_field_network_sample :: proc(
 		edge := region.cave_network_edges[i]
 		when TERRAIN_CAVE_FIELD_NETWORK_ROUTE_BOUNDS_ENABLED {
 			if !terrain_density_cave_edge_route_bounds_may_reach_sample(
-				   edge_route_bounds[i],
-				   edge,
-				   world_x,
-				   world_y,
-				   world_z,
-				   radius,
-			   ) {
+				edge_route_bounds[i],
+				edge,
+				world_x,
+				world_y,
+				world_z,
+				radius,
+			) {
 				continue
 			}
 		}
@@ -8237,7 +8226,10 @@ terrain_density_cave_edge_feature_radius :: proc(edge: biomes.CaveNetworkEdge) -
 	return terrain_density_cave_passage_radius_soft_cap(radius, radius_cap)
 }
 
-terrain_density_cave_edge_core_radius :: proc(edge: biomes.CaveNetworkEdge, feature_radius: f32) -> f32 {
+terrain_density_cave_edge_core_radius :: proc(
+	edge: biomes.CaveNetworkEdge,
+	feature_radius: f32,
+) -> f32 {
 	core_radius := math.max(
 		f32(2.25),
 		feature_radius * terrain_density_cave_edge_core_radius_scale(edge.kind),
@@ -8387,7 +8379,9 @@ terrain_density_cave_network_apply :: proc(
 		&node_connectivity,
 	)
 	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.network_connectivity += time.tick_since(profile_stage_start)
+		terrain_generation_profile_stats.network_connectivity += time.tick_since(
+			profile_stage_start,
+		)
 		profile_stage_start = time.tick_now()
 	}
 
@@ -8644,21 +8638,20 @@ terrain_density_proxy_carve_segment :: proc(
 		world_z := f32(chunk_origin.z + z) + 0.5
 		for y := local_min_y; y <= local_max_y; y += 1 {
 			world_y := f32(chunk_origin.y + y) + 0.5
-			row_min_x, row_max_x, row_intersects :=
-				terrain_density_segment_capsule_row_x_bounds(
-					chunk_origin,
-					local_min_x,
-					local_max_x,
-					world_y,
-					world_z,
-					from_x,
-					from_y,
-					from_z,
-					tangent_x,
-					tangent_y,
-					tangent_z,
-					radius,
-				)
+			row_min_x, row_max_x, row_intersects := terrain_density_segment_capsule_row_x_bounds(
+				chunk_origin,
+				local_min_x,
+				local_max_x,
+				world_y,
+				world_z,
+				from_x,
+				from_y,
+				from_z,
+				tangent_x,
+				tangent_y,
+				tangent_z,
+				radius,
+			)
 			if !row_intersects {
 				continue
 			}
@@ -8667,11 +8660,7 @@ terrain_density_proxy_carve_segment :: proc(
 				rel_x := world_x - from_x
 				rel_y := world_y - from_y
 				rel_z := world_z - from_z
-				t := math.clamp(
-					(rel_x * dx + rel_y * dy + rel_z * dz) / length_sq,
-					f32(0),
-					f32(1),
-				)
+				t := math.clamp((rel_x * dx + rel_y * dy + rel_z * dz) / length_sq, f32(0), f32(1))
 				near_x := from_x + dx * t
 				near_y := from_y + dy * t
 				near_z := from_z + dz * t
@@ -8789,23 +8778,20 @@ terrain_density_cave_proxy_anchors_apply :: proc(
 		if !node_connectivity[node_index].should_carve {
 			continue
 		}
-		link_radius := math.max(f32(3), math.min(anchor_radius * 0.75, node.connection_radius_blocks))
+		link_radius := math.max(
+			f32(3),
+			math.min(anchor_radius * 0.75, node.connection_radius_blocks),
+		)
 		if !terrain_density_cave_proxy_anchor_chunk_may_intersect(
-			   anchor,
-			   node,
-			   chunk_origin,
-			   link_radius,
-		   ) {
+			anchor,
+			node,
+			chunk_origin,
+			link_radius,
+		) {
 			continue
 		}
 
-		terrain_density_cave_proxy_entrance_carve(
-			view,
-			chunk_origin,
-			anchor,
-			node,
-			link_radius,
-		)
+		terrain_density_cave_proxy_entrance_carve(view, chunk_origin, anchor, node, link_radius)
 	}
 	_ = wall_buffer
 }
@@ -8825,7 +8811,8 @@ terrain_density_cave_chunk_feature_bucket_build :: proc(
 			continue
 		}
 		connectivity := node_connectivity[i]
-		if connectivity.should_carve && terrain_density_cave_node_chunk_may_intersect(node, chunk_origin) {
+		if connectivity.should_carve &&
+		   terrain_density_cave_node_chunk_may_intersect(node, chunk_origin) {
 			bucket.node_indices[bucket.node_count] = i
 			bucket.node_count += 1
 		}
@@ -8864,7 +8851,10 @@ terrain_density_cave_network_chunk_query_make :: proc(
 ) -> biomes.GenerationRegionQuery {
 	margins := biomes.GENERATION_REGION_DEFAULT_INFLUENCE_MARGINS
 	margins.cave_network_blocks = TERRAIN_CAVE_NETWORK_CHUNK_QUERY_MARGIN_BLOCKS
-	return biomes.generation_region_query_make(chunk_block_bounds_from_origin(chunk_origin), margins)
+	return biomes.generation_region_query_make(
+		chunk_block_bounds_from_origin(chunk_origin),
+		margins,
+	)
 }
 
 terrain_density_cave_network_query_contains_owner :: proc(
@@ -10112,10 +10102,7 @@ terrain_density_carve_cave_node_macro_satellite_apron_field :: proc(
 		radius_along * f32(1.16),
 		math.max(
 			radius_along * branch_radius_scale,
-			math.max(
-				radius_along * f32(0.46),
-				radius_along * branch_radius_scale * f32(0.78),
-			),
+			math.max(radius_along * f32(0.46), radius_along * branch_radius_scale * f32(0.78)),
 		),
 	)
 	apron_max_y_radius := radius_y_apron
@@ -10123,10 +10110,7 @@ terrain_density_carve_cave_node_macro_satellite_apron_field :: proc(
 		radius_across * f32(1.12),
 		math.max(
 			radius_across * branch_radius_scale,
-			math.max(
-				radius_across * f32(0.42),
-				radius_across * branch_radius_scale * f32(0.70),
-			),
+			math.max(radius_across * f32(0.42), radius_across * branch_radius_scale * f32(0.70)),
 		),
 	)
 	apron_min_along_center := math.min(
@@ -10436,8 +10420,7 @@ terrain_density_carve_cave_node_macro_cluster_field :: proc(
 	branch_neck_radius_y := vertical_radius * f32(0.56)
 	branch_neck_radius_outward := outward_radius * f32(0.38)
 	cluster_shape_span := math.sqrt_f32(
-		f32(1.260001) +
-		TERRAIN_CAVE_NODE_MACRO_SATELLITE_CLUSTER_FIELD_BLEND_RADIUS * f32(1.75),
+		f32(1.260001) + TERRAIN_CAVE_NODE_MACRO_SATELLITE_CLUSTER_FIELD_BLEND_RADIUS * f32(1.75),
 	)
 	cluster_max_along_radius := math.max(
 		along_radius,
@@ -10445,63 +10428,43 @@ terrain_density_carve_cave_node_macro_cluster_field :: proc(
 			side_radius_along,
 			math.max(
 				branch_radius_along,
-				math.max(
-					branch_radius_along * f32(0.88),
-					branch_neck_radius_along,
-				),
+				math.max(branch_radius_along * f32(0.88), branch_neck_radius_along),
 			),
 		),
 	)
 	cluster_max_y_radius := math.max(
 		vertical_radius,
-		math.max(
-			side_radius_y,
-			math.max(branch_radius_y, branch_neck_radius_y),
-		),
+		math.max(side_radius_y, math.max(branch_radius_y, branch_neck_radius_y)),
 	)
 	cluster_max_outward_radius := math.max(
 		outward_radius,
-		math.max(
-			side_radius_outward,
-			math.max(branch_radius_outward, branch_neck_radius_outward),
-		),
+		math.max(side_radius_outward, math.max(branch_radius_outward, branch_neck_radius_outward)),
 	)
 	cluster_min_along_center := math.min(
 		-side_center,
-		math.min(
-			-branch_center,
-			math.min(-branch_center * f32(0.26), -branch_center * f32(0.92)),
-		),
+		math.min(-branch_center, math.min(-branch_center * f32(0.26), -branch_center * f32(0.92))),
 	)
 	cluster_max_along_center := math.max(
 		side_center,
 		math.max(branch_center, branch_center * f32(0.94)),
 	)
-	cluster_min_y_center := math.min(
-		-vertical_radius * f32(0.06),
-		-vertical_radius * f32(0.05),
-	)
-	cluster_max_y_center := math.max(
-		vertical_radius * f32(0.04),
-		vertical_radius * f32(0.03),
-	)
-	cluster_min_outward_center := math.min(
-		f32(0),
-		inward_center,
-	)
+	cluster_min_y_center := math.min(-vertical_radius * f32(0.06), -vertical_radius * f32(0.05))
+	cluster_max_y_center := math.max(vertical_radius * f32(0.04), vertical_radius * f32(0.03))
+	cluster_min_outward_center := math.min(f32(0), inward_center)
 	cluster_max_outward_center := math.max(
 		outward_center,
-		math.max(
-			branch_outward,
-			math.max(branch_outward * f32(0.94), branch_outward * f32(0.82)),
-		),
+		math.max(branch_outward, math.max(branch_outward * f32(0.94), branch_outward * f32(0.82))),
 	)
-	cluster_min_along := cluster_min_along_center - cluster_max_along_radius * cluster_shape_span - 1
-	cluster_max_along := cluster_max_along_center + cluster_max_along_radius * cluster_shape_span + 1
+	cluster_min_along :=
+		cluster_min_along_center - cluster_max_along_radius * cluster_shape_span - 1
+	cluster_max_along :=
+		cluster_max_along_center + cluster_max_along_radius * cluster_shape_span + 1
 	cluster_min_y := cluster_min_y_center - cluster_max_y_radius * cluster_shape_span - 1
 	cluster_max_y := cluster_max_y_center + cluster_max_y_radius * cluster_shape_span + 1
-	cluster_min_outward := cluster_min_outward_center - cluster_max_outward_radius * cluster_shape_span - 1
-	cluster_max_outward := cluster_max_outward_center + cluster_max_outward_radius * cluster_shape_span + 1
+	cluster_min_outward :=
+		cluster_min_outward_center - cluster_max_outward_radius * cluster_shape_span - 1
+	cluster_max_outward :=
+		cluster_max_outward_center + cluster_max_outward_radius * cluster_shape_span + 1
 
 	for z := local_min_z; z <= local_max_z; z += 1 {
 		world_z := f32(chunk_origin.z + z) + 0.5
@@ -12607,14 +12570,14 @@ terrain_density_carve_cave_edge_braids :: proc(
 		)
 		braid_margin := math.max(route_radius * f32(1.35), braid_radius * f32(3.25)) + 4
 		if !terrain_density_chunk_aabb_intersects(
-			   chunk_origin,
-			   math.min(from_x, math.min(mid_x, to_x)) - braid_margin,
-			   math.max(from_x, math.max(mid_x, to_x)) + braid_margin,
-			   math.min(from_y, math.min(mid_y, to_y)) - braid_margin,
-			   math.max(from_y, math.max(mid_y, to_y)) + braid_margin,
-			   math.min(from_z, math.min(mid_z, to_z)) - braid_margin,
-			   math.max(from_z, math.max(mid_z, to_z)) + braid_margin,
-		   ) {
+			chunk_origin,
+			math.min(from_x, math.min(mid_x, to_x)) - braid_margin,
+			math.max(from_x, math.max(mid_x, to_x)) + braid_margin,
+			math.min(from_y, math.min(mid_y, to_y)) - braid_margin,
+			math.max(from_y, math.max(mid_y, to_y)) + braid_margin,
+			math.min(from_z, math.min(mid_z, to_z)) - braid_margin,
+			math.max(from_z, math.max(mid_z, to_z)) + braid_margin,
+		) {
 			continue
 		}
 
@@ -12836,37 +12799,45 @@ terrain_density_carve_cave_edge_route_bypasses :: proc(
 			TERRAIN_CAVE_EDGE_ROUTE_BYPASS_RADIUS_MIN_BLOCKS,
 			TERRAIN_CAVE_EDGE_ROUTE_BYPASS_RADIUS_MAX_BLOCKS,
 		)
-		bypass_feature_margin := math.max(
-			route_radius * f32(1.65),
-			bypass_radius * TERRAIN_CAVE_EDGE_ROUTE_BYPASS_POCKET_RADIUS_SCALE * f32(2.40),
-		) + 8
+		bypass_feature_margin :=
+			math.max(
+				route_radius * f32(1.65),
+				bypass_radius * TERRAIN_CAVE_EDGE_ROUTE_BYPASS_POCKET_RADIUS_SCALE * f32(2.40),
+			) +
+			8
 		if !terrain_density_chunk_aabb_intersects(
-			   chunk_origin,
-			   math.min(
-				   math.min(math.min(from_x, route_x), math.min(to_x, from_bypass_x)),
-				   math.min(math.min(relay_a_x, relay_b_x), to_bypass_x),
-			   ) - bypass_feature_margin,
-			   math.max(
-				   math.max(math.max(from_x, route_x), math.max(to_x, from_bypass_x)),
-				   math.max(math.max(relay_a_x, relay_b_x), to_bypass_x),
-			   ) + bypass_feature_margin,
-			   math.min(
-				   math.min(math.min(from_y, route_y), math.min(to_y, from_bypass_y)),
-				   math.min(math.min(relay_a_y, relay_b_y), to_bypass_y),
-			   ) - bypass_feature_margin,
-			   math.max(
-				   math.max(math.max(from_y, route_y), math.max(to_y, from_bypass_y)),
-				   math.max(math.max(relay_a_y, relay_b_y), to_bypass_y),
-			   ) + bypass_feature_margin,
-			   math.min(
-				   math.min(math.min(from_z, route_z), math.min(to_z, from_bypass_z)),
-				   math.min(math.min(relay_a_z, relay_b_z), to_bypass_z),
-			   ) - bypass_feature_margin,
-			   math.max(
-				   math.max(math.max(from_z, route_z), math.max(to_z, from_bypass_z)),
-				   math.max(math.max(relay_a_z, relay_b_z), to_bypass_z),
-			   ) + bypass_feature_margin,
-		   ) {
+			chunk_origin,
+			math.min(
+				math.min(math.min(from_x, route_x), math.min(to_x, from_bypass_x)),
+				math.min(math.min(relay_a_x, relay_b_x), to_bypass_x),
+			) -
+			bypass_feature_margin,
+			math.max(
+				math.max(math.max(from_x, route_x), math.max(to_x, from_bypass_x)),
+				math.max(math.max(relay_a_x, relay_b_x), to_bypass_x),
+			) +
+			bypass_feature_margin,
+			math.min(
+				math.min(math.min(from_y, route_y), math.min(to_y, from_bypass_y)),
+				math.min(math.min(relay_a_y, relay_b_y), to_bypass_y),
+			) -
+			bypass_feature_margin,
+			math.max(
+				math.max(math.max(from_y, route_y), math.max(to_y, from_bypass_y)),
+				math.max(math.max(relay_a_y, relay_b_y), to_bypass_y),
+			) +
+			bypass_feature_margin,
+			math.min(
+				math.min(math.min(from_z, route_z), math.min(to_z, from_bypass_z)),
+				math.min(math.min(relay_a_z, relay_b_z), to_bypass_z),
+			) -
+			bypass_feature_margin,
+			math.max(
+				math.max(math.max(from_z, route_z), math.max(to_z, from_bypass_z)),
+				math.max(math.max(relay_a_z, relay_b_z), to_bypass_z),
+			) +
+			bypass_feature_margin,
+		) {
 			continue
 		}
 
@@ -13144,18 +13115,16 @@ terrain_density_carve_cave_edge_alcoves :: proc(
 		}
 		throat_radius := math.max(f32(2.25), math.min(radius_base * 0.42, route_radius * 0.48))
 		if !terrain_density_feature_segment_aabb_intersects_chunk(
-			   chunk_origin,
-			   route_x,
-			   route_y,
-			   route_z,
-			   center_x,
-			   center_y,
-			   center_z,
-			   math.max(
-				   math.max(radius_x, math.max(radius_y, radius_z)),
-				   throat_radius * f32(2.25),
-			   ) + 4,
-		   ) {
+			chunk_origin,
+			route_x,
+			route_y,
+			route_z,
+			center_x,
+			center_y,
+			center_z,
+			math.max(math.max(radius_x, math.max(radius_y, radius_z)), throat_radius * f32(2.25)) +
+			4,
+		) {
 			continue
 		}
 		terrain_density_cave_passage_shape_apply_biome(&throat_shape, biome_id)
@@ -17038,13 +17007,13 @@ terrain_density_carve_rough_segment_shaped :: proc(
 		radius * horizontal_radius_scale * 1.46 +
 		radius *
 			(math.abs(curve_side) * shape.curve_scale +
-				math.abs(branch_side) * shape.meander_scale * 0.42) +
+					math.abs(branch_side) * shape.meander_scale * 0.42) +
 		2
 	max_up_extent :=
 		radius * shape.radius_y_scale * 1.46 +
 		radius *
 			(math.abs(curve_lift) * shape.curve_scale * 0.45 +
-				math.abs(branch_lift) * shape.lift_scale * 0.28) +
+					math.abs(branch_lift) * shape.lift_scale * 0.28) +
 		2
 	for z := local_min_z; z <= local_max_z; z += 1 {
 		world_z := f32(chunk_origin.z + z) + 0.5
@@ -17084,101 +17053,96 @@ terrain_density_carve_rough_segment_shaped :: proc(
 					terrain_generation_profile_stats.edge_core_rows_projected += 1
 				}
 			}
-			row_min_x, row_max_x, row_intersects =
-				terrain_density_segment_capsule_row_x_bounds(
-					chunk_origin,
-					row_min_x,
-					row_max_x,
-					world_y,
-					world_z,
-					from_x,
-					from_y,
-					from_z,
-					tangent_x,
-					tangent_y,
-					tangent_z,
-					max_carve_radius,
-				)
+			row_min_x, row_max_x, row_intersects = terrain_density_segment_capsule_row_x_bounds(
+				chunk_origin,
+				row_min_x,
+				row_max_x,
+				world_y,
+				world_z,
+				from_x,
+				from_y,
+				from_z,
+				tangent_x,
+				tangent_y,
+				tangent_z,
+				max_carve_radius,
+			)
 			if !row_intersects {
 				continue
 			}
-			row_min_x, row_max_x, row_intersects =
-				terrain_density_axis_row_x_bounds(
-					chunk_origin,
-					row_min_x,
-					row_max_x,
-					world_y,
-					world_z,
-					from_x,
-					from_y,
-					from_z,
-					tangent_x,
-					tangent_y,
-					tangent_z,
-					-max_along_extent,
-					length + max_along_extent,
-				)
+			row_min_x, row_max_x, row_intersects = terrain_density_axis_row_x_bounds(
+				chunk_origin,
+				row_min_x,
+				row_max_x,
+				world_y,
+				world_z,
+				from_x,
+				from_y,
+				from_z,
+				tangent_x,
+				tangent_y,
+				tangent_z,
+				-max_along_extent,
+				length + max_along_extent,
+			)
 			if !row_intersects {
 				continue
 			}
-			row_min_x, row_max_x, row_intersects =
-				terrain_density_axis_row_x_bounds(
-					chunk_origin,
-					row_min_x,
-					row_max_x,
-					world_y,
-					world_z,
-					from_x,
-					from_y,
-					from_z,
-					side_x,
-					side_y,
-					side_z,
-					-max_side_extent,
-					max_side_extent,
-				)
+			row_min_x, row_max_x, row_intersects = terrain_density_axis_row_x_bounds(
+				chunk_origin,
+				row_min_x,
+				row_max_x,
+				world_y,
+				world_z,
+				from_x,
+				from_y,
+				from_z,
+				side_x,
+				side_y,
+				side_z,
+				-max_side_extent,
+				max_side_extent,
+			)
 			if !row_intersects {
 				continue
 			}
-			row_min_x, row_max_x, row_intersects =
-				terrain_density_axis_row_x_bounds(
-					chunk_origin,
-					row_min_x,
-					row_max_x,
-					world_y,
-					world_z,
-					from_x,
-					from_y,
-					from_z,
-					up_x,
-					up_y,
-					up_z,
-					-max_up_extent,
-					max_up_extent,
-				)
+			row_min_x, row_max_x, row_intersects = terrain_density_axis_row_x_bounds(
+				chunk_origin,
+				row_min_x,
+				row_max_x,
+				world_y,
+				world_z,
+				from_x,
+				from_y,
+				from_z,
+				up_x,
+				up_y,
+				up_z,
+				-max_up_extent,
+				max_up_extent,
+			)
 			if !row_intersects {
 				continue
 			}
-			row_min_x, row_max_x, row_intersects =
-				terrain_density_dual_axis_ellipse_row_x_bounds(
-					chunk_origin,
-					row_min_x,
-					row_max_x,
-					world_y,
-					world_z,
-					from_x,
-					from_y,
-					from_z,
-					side_x,
-					side_y,
-					side_z,
-					up_x,
-					up_y,
-					up_z,
-					max_side_extent,
-					max_up_extent,
-					1,
-				)
+			row_min_x, row_max_x, row_intersects = terrain_density_dual_axis_ellipse_row_x_bounds(
+				chunk_origin,
+				row_min_x,
+				row_max_x,
+				world_y,
+				world_z,
+				from_x,
+				from_y,
+				from_z,
+				side_x,
+				side_y,
+				side_z,
+				up_x,
+				up_y,
+				up_z,
+				max_side_extent,
+				max_up_extent,
+				1,
+			)
 			if !row_intersects {
 				continue
 			}
@@ -17204,8 +17168,7 @@ terrain_density_carve_rough_segment_shaped :: proc(
 				}
 			}
 			for x := row_min_x; x <= row_max_x; x += 1 {
-				if use_carveable_row_mask &&
-				   (row_carveable_bits & (u64(1) << u32(x))) == 0 {
+				if use_carveable_row_mask && (row_carveable_bits & (u64(1) << u32(x))) == 0 {
 					continue
 				}
 				when TERRAIN_GENERATION_PROFILE_PHASES {
@@ -17282,9 +17245,7 @@ terrain_density_carve_rough_segment_shaped :: proc(
 					shape.radius_noise_scale *
 					biomes.regional_terrain_field_lerp(f32(0.58), f32(0.22), core_support)
 				negative_rough_profile_scale := math.clamp(
-					1.0 +
-					center_bulge * shape.radius_swell_scale * 0.18 -
-					shape.radius_neck_scale,
+					1.0 + center_bulge * shape.radius_swell_scale * 0.18 - shape.radius_neck_scale,
 					f32(0.72),
 					f32(1.34),
 				)
@@ -17301,17 +17262,18 @@ terrain_density_carve_rough_segment_shaped :: proc(
 					}
 					carved := false
 					if row_full_vertical_support {
-						carved = terrain_density_carve_checked_local_block_with_material_full_vertical_support(
-							view,
-							chunk_origin,
-							columns,
-							x,
-							y,
-							z,
-							biome_id,
-							directional_material_profile,
-							wall_buffer,
-						)
+						carved =
+							terrain_density_carve_checked_local_block_with_material_full_vertical_support(
+								view,
+								chunk_origin,
+								columns,
+								x,
+								y,
+								z,
+								biome_id,
+								directional_material_profile,
+								wall_buffer,
+							)
 					} else {
 						carved = terrain_density_carve_checked_local_block_with_material_result(
 							view,
@@ -17397,7 +17359,8 @@ terrain_density_carve_rough_segment_shaped :: proc(
 					shape.wall_scallop_scale * (scallop_mix - 0.48) * wall_support -
 					shape.wall_rib_scale * rib_support +
 					lip_relief
-				if shape_value <= threshold_without_noise - rough_scale * negative_rough_profile_scale {
+				if shape_value <=
+				   threshold_without_noise - rough_scale * negative_rough_profile_scale {
 					when TERRAIN_GENERATION_PROFILE_PHASES {
 						if terrain_generation_profile_edge_core_active {
 							terrain_generation_profile_stats.edge_core_threshold_candidates += 1
@@ -17405,17 +17368,18 @@ terrain_density_carve_rough_segment_shaped :: proc(
 					}
 					carved := false
 					if row_full_vertical_support {
-						carved = terrain_density_carve_checked_local_block_with_material_full_vertical_support(
-							view,
-							chunk_origin,
-							columns,
-							x,
-							y,
-							z,
-							biome_id,
-							directional_material_profile,
-							wall_buffer,
-						)
+						carved =
+							terrain_density_carve_checked_local_block_with_material_full_vertical_support(
+								view,
+								chunk_origin,
+								columns,
+								x,
+								y,
+								z,
+								biome_id,
+								directional_material_profile,
+								wall_buffer,
+							)
 					} else {
 						carved = terrain_density_carve_checked_local_block_with_material_result(
 							view,
@@ -17475,17 +17439,18 @@ terrain_density_carve_rough_segment_shaped :: proc(
 					}
 					carved := false
 					if row_full_vertical_support {
-						carved = terrain_density_carve_checked_local_block_with_material_full_vertical_support(
-							view,
-							chunk_origin,
-							columns,
-							x,
-							y,
-							z,
-							biome_id,
-							directional_material_profile,
-							wall_buffer,
-						)
+						carved =
+							terrain_density_carve_checked_local_block_with_material_full_vertical_support(
+								view,
+								chunk_origin,
+								columns,
+								x,
+								y,
+								z,
+								biome_id,
+								directional_material_profile,
+								wall_buffer,
+							)
 					} else {
 						carved = terrain_density_carve_checked_local_block_with_material_result(
 							view,
@@ -17597,10 +17562,7 @@ terrain_density_carveable_row_mask_build :: proc(
 	}
 }
 
-terrain_density_carveable_row_mask_clear :: proc(
-	mask: ^TerrainCarveableRowMask,
-	x, y, z: i32,
-) {
+terrain_density_carveable_row_mask_clear :: proc(mask: ^TerrainCarveableRowMask, x, y, z: i32) {
 	mask[z * CHUNK_BLOCK_LENGTH + y] &~= u64(1) << u32(x)
 }
 
@@ -17886,24 +17848,20 @@ terrain_density_mark_cave_wall_neighbors :: proc(
 			base_index - y_stride,
 			floor_material_id,
 		)
-		terrain_density_mark_cave_wall_neighbor_index(view, base_index + z_stride, wall_material_id)
-		terrain_density_mark_cave_wall_neighbor_index(view, base_index - z_stride, wall_material_id)
+		terrain_density_mark_cave_wall_neighbor_index(
+			view,
+			base_index + z_stride,
+			wall_material_id,
+		)
+		terrain_density_mark_cave_wall_neighbor_index(
+			view,
+			base_index - z_stride,
+			wall_material_id,
+		)
 		return
 	}
-	terrain_density_mark_cave_wall_neighbor(
-		view,
-		local_x + 1,
-		local_y,
-		local_z,
-		wall_material_id,
-	)
-	terrain_density_mark_cave_wall_neighbor(
-		view,
-		local_x - 1,
-		local_y,
-		local_z,
-		wall_material_id,
-	)
+	terrain_density_mark_cave_wall_neighbor(view, local_x + 1, local_y, local_z, wall_material_id)
+	terrain_density_mark_cave_wall_neighbor(view, local_x - 1, local_y, local_z, wall_material_id)
 	terrain_density_mark_cave_wall_neighbor(
 		view,
 		local_x,
@@ -17911,27 +17869,9 @@ terrain_density_mark_cave_wall_neighbors :: proc(
 		local_z,
 		ceiling_material_id,
 	)
-	terrain_density_mark_cave_wall_neighbor(
-		view,
-		local_x,
-		local_y - 1,
-		local_z,
-		floor_material_id,
-	)
-	terrain_density_mark_cave_wall_neighbor(
-		view,
-		local_x,
-		local_y,
-		local_z + 1,
-		wall_material_id,
-	)
-	terrain_density_mark_cave_wall_neighbor(
-		view,
-		local_x,
-		local_y,
-		local_z - 1,
-		wall_material_id,
-	)
+	terrain_density_mark_cave_wall_neighbor(view, local_x, local_y - 1, local_z, floor_material_id)
+	terrain_density_mark_cave_wall_neighbor(view, local_x, local_y, local_z + 1, wall_material_id)
+	terrain_density_mark_cave_wall_neighbor(view, local_x, local_y, local_z - 1, wall_material_id)
 }
 
 terrain_density_mark_cave_wall_neighbor_index :: proc(
@@ -18201,16 +18141,16 @@ terrain_value_noise3_row_cache_make :: proc(
 	unit_z := f32(block_z - origin_z) / f32(cell_size)
 	return TerrainValueNoise3RowCache {
 		corner_hash = biomes.regional_terrain_field_corner_hash_base(key, salt),
-		salt        = salt,
-		cell_size   = cell_size,
-		cell_y      = cell_y,
-		cell_z      = cell_z,
-		origin_y    = origin_y,
-		origin_z    = origin_z,
-		t_y         = math.smoothstep(f32(0), f32(1), unit_y),
-		t_z         = math.smoothstep(f32(0), f32(1), unit_z),
-		cell_x      = 0,
-		valid       = false,
+		salt = salt,
+		cell_size = cell_size,
+		cell_y = cell_y,
+		cell_z = cell_z,
+		origin_y = origin_y,
+		origin_z = origin_z,
+		t_y = math.smoothstep(f32(0), f32(1), unit_y),
+		t_z = math.smoothstep(f32(0), f32(1), unit_z),
+		cell_x = 0,
+		valid = false,
 	}
 }
 
@@ -18386,10 +18326,10 @@ terrain_density_segment_capsule_row_x_bounds :: proc(
 	world_x_at_local_zero := f32(chunk_origin.x) + 0.5
 	x0 := world_x_at_local_zero - from_x
 	b := 2.0 * (x0 * a - tangent_x * row_dot_without_x)
-	c := x0 * x0 +
+	c :=
+		x0 * x0 +
 		row_len_sq_without_x -
-		(x0 * tangent_x + row_dot_without_x) *
-		(x0 * tangent_x + row_dot_without_x) -
+		(x0 * tangent_x + row_dot_without_x) * (x0 * tangent_x + row_dot_without_x) -
 		radius_sq
 	discriminant := b * b - 4.0 * a * c
 	if discriminant < 0 {
@@ -18560,7 +18500,10 @@ terrain_density_row_range_add_merged :: proc(
 	for i := range_count^; i > insert_index; i -= 1 {
 		ranges[i] = ranges[i - 1]
 	}
-	ranges[insert_index] = TerrainDensityRowRange{min_x = new_min, max_x = new_max}
+	ranges[insert_index] = TerrainDensityRowRange {
+		min_x = new_min,
+		max_x = new_max,
+	}
 	range_count^ += 1
 }
 
@@ -18653,15 +18596,14 @@ terrain_density_local_box_row_x_bounds :: proc(
 		return
 	}
 
-	across_min_x, across_max_x, across_intersects :=
-		terrain_density_linear_coord_row_x_bounds(
-			local_min_x,
-			local_max_x,
-			across_at_local_zero,
-			across_x_coeff,
-			min_across,
-			max_across,
-		)
+	across_min_x, across_max_x, across_intersects := terrain_density_linear_coord_row_x_bounds(
+		local_min_x,
+		local_max_x,
+		across_at_local_zero,
+		across_x_coeff,
+		min_across,
+		max_across,
+	)
 	if !across_intersects {
 		return 0, 0, false
 	}
