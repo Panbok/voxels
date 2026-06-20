@@ -20,6 +20,44 @@ RegionalTerrainFields :: struct {
 	subterranean_pressure: f32,
 }
 
+RegionalTerrainValueNoise2RowCache :: struct {
+	corner_hash: u64,
+	salt:        u64,
+	cell_size:   i32,
+	cell_z:      i32,
+	origin_z:    i32,
+	t_z:         f32,
+	cell_x:      i32,
+	v00:         f32,
+	v10:         f32,
+	v01:         f32,
+	v11:         f32,
+	valid:       bool,
+}
+
+RegionalTerrainFieldsRowCache :: struct {
+	continental_low:     RegionalTerrainValueNoise2RowCache,
+	continental_mid:     RegionalTerrainValueNoise2RowCache,
+	elevation_low:       RegionalTerrainValueNoise2RowCache,
+	elevation_mid:       RegionalTerrainValueNoise2RowCache,
+	erosion_low:         RegionalTerrainValueNoise2RowCache,
+	ruggedness_low:      RegionalTerrainValueNoise2RowCache,
+	local_relief:        RegionalTerrainValueNoise2RowCache,
+	pressure_noise:      RegionalTerrainValueNoise2RowCache,
+	magic_affinity:      RegionalTerrainValueNoise2RowCache,
+	corruption_affinity: RegionalTerrainValueNoise2RowCache,
+	heat_affinity:       RegionalTerrainValueNoise2RowCache,
+	cold_affinity:       RegionalTerrainValueNoise2RowCache,
+}
+
+SurfaceBiomeProfileRowCache :: struct {
+	fields:       RegionalTerrainFieldsRowCache,
+	relief_low:   RegionalTerrainValueNoise2RowCache,
+	relief_mid:   RegionalTerrainValueNoise2RowCache,
+	relief_high:  RegionalTerrainValueNoise2RowCache,
+	relief_ridge: RegionalTerrainValueNoise2RowCache,
+}
+
 //////////////////////////////////////
 // Biome Profile Types
 /////////////////////////////////////
@@ -186,6 +224,192 @@ SEA_COMPRESSION_MIN_SHORELINE_WIDTH_BLOCKS :: f32(1.0)
 // Regional Terrain Field Methods
 /////////////////////////////////////
 
+regional_terrain_value_noise_2_row_cache_make :: proc(
+	key: FeatureGridKey,
+	salt: u64,
+	cell_size_blocks: i32,
+	block_z: i32,
+) -> RegionalTerrainValueNoise2RowCache {
+	log.assert(cell_size_blocks > 0, "regional field row cache cell size must be positive")
+
+	cell_z := math.floor_div(block_z, cell_size_blocks)
+	origin_z := cell_z * cell_size_blocks
+	unit_z := f32(block_z - origin_z) / f32(cell_size_blocks)
+	return {
+		corner_hash = regional_terrain_field_corner_hash_base(key, salt),
+		salt = salt,
+		cell_size = cell_size_blocks,
+		cell_z = cell_z,
+		origin_z = origin_z,
+		t_z = math.smoothstep(f32(0), f32(1), unit_z),
+	}
+}
+
+regional_terrain_value_noise_2_row_cache_update_x_cell :: proc(
+	cache: ^RegionalTerrainValueNoise2RowCache,
+	cell_x: i32,
+) {
+	if cache.valid && cache.cell_x == cell_x {
+		return
+	}
+	cache.cell_x = cell_x
+	cache.v00 = regional_terrain_field_corner_value_from_hash(
+		cache.corner_hash,
+		cache.salt,
+		cell_x,
+		cache.cell_z,
+	)
+	cache.v10 = regional_terrain_field_corner_value_from_hash(
+		cache.corner_hash,
+		cache.salt,
+		cell_x + 1,
+		cache.cell_z,
+	)
+	cache.v01 = regional_terrain_field_corner_value_from_hash(
+		cache.corner_hash,
+		cache.salt,
+		cell_x,
+		cache.cell_z + 1,
+	)
+	cache.v11 = regional_terrain_field_corner_value_from_hash(
+		cache.corner_hash,
+		cache.salt,
+		cell_x + 1,
+		cache.cell_z + 1,
+	)
+	cache.valid = true
+}
+
+regional_terrain_value_noise_2_row_cache_sample :: proc(
+	cache: ^RegionalTerrainValueNoise2RowCache,
+	block_x: i32,
+) -> f32 {
+	cell_x := math.floor_div(block_x, cache.cell_size)
+	origin_x := cell_x * cache.cell_size
+	unit_x := f32(block_x - origin_x) / f32(cache.cell_size)
+	t_x := math.smoothstep(f32(0), f32(1), unit_x)
+	regional_terrain_value_noise_2_row_cache_update_x_cell(cache, cell_x)
+
+	return regional_terrain_field_lerp(
+		regional_terrain_field_lerp(cache.v00, cache.v10, t_x),
+		regional_terrain_field_lerp(cache.v01, cache.v11, t_x),
+		cache.t_z,
+	)
+}
+
+regional_terrain_fields_row_cache_make :: proc(
+	key: FeatureGridKey,
+	block_z: i32,
+) -> RegionalTerrainFieldsRowCache {
+	return {
+		continental_low = regional_terrain_value_noise_2_row_cache_make(
+			key,
+			REGIONAL_TERRAIN_CONTINENTAL_SALT,
+			REGIONAL_TERRAIN_CONTINENTAL_CELL_BLOCKS,
+			block_z,
+		),
+		continental_mid = regional_terrain_value_noise_2_row_cache_make(
+			key,
+			REGIONAL_TERRAIN_CONTINENTAL_SALT,
+			REGIONAL_TERRAIN_ELEVATION_CELL_BLOCKS,
+			block_z,
+		),
+		elevation_low = regional_terrain_value_noise_2_row_cache_make(
+			key,
+			REGIONAL_TERRAIN_ELEVATION_SALT,
+			REGIONAL_TERRAIN_ELEVATION_CELL_BLOCKS,
+			block_z,
+		),
+		elevation_mid = regional_terrain_value_noise_2_row_cache_make(
+			key,
+			REGIONAL_TERRAIN_ELEVATION_SALT,
+			REGIONAL_TERRAIN_EROSION_CELL_BLOCKS,
+			block_z,
+		),
+		erosion_low = regional_terrain_value_noise_2_row_cache_make(
+			key,
+			REGIONAL_TERRAIN_EROSION_SALT,
+			REGIONAL_TERRAIN_EROSION_CELL_BLOCKS,
+			block_z,
+		),
+		ruggedness_low = regional_terrain_value_noise_2_row_cache_make(
+			key,
+			REGIONAL_TERRAIN_RUGGEDNESS_SALT,
+			REGIONAL_TERRAIN_RUGGEDNESS_CELL_BLOCKS,
+			block_z,
+		),
+		local_relief = regional_terrain_value_noise_2_row_cache_make(
+			key,
+			REGIONAL_TERRAIN_LOCAL_RELIEF_SALT,
+			REGIONAL_TERRAIN_LOCAL_RELIEF_CELL_BLOCKS,
+			block_z,
+		),
+		pressure_noise = regional_terrain_value_noise_2_row_cache_make(
+			key,
+			REGIONAL_TERRAIN_PRESSURE_SALT,
+			REGIONAL_TERRAIN_AFFINITY_CELL_BLOCKS,
+			block_z,
+		),
+		magic_affinity = regional_terrain_value_noise_2_row_cache_make(
+			key,
+			REGIONAL_TERRAIN_MAGIC_SALT,
+			REGIONAL_TERRAIN_AFFINITY_CELL_BLOCKS,
+			block_z,
+		),
+		corruption_affinity = regional_terrain_value_noise_2_row_cache_make(
+			key,
+			REGIONAL_TERRAIN_CORRUPTION_SALT,
+			REGIONAL_TERRAIN_AFFINITY_CELL_BLOCKS,
+			block_z,
+		),
+		heat_affinity = regional_terrain_value_noise_2_row_cache_make(
+			key,
+			REGIONAL_TERRAIN_HEAT_SALT,
+			REGIONAL_TERRAIN_AFFINITY_CELL_BLOCKS,
+			block_z,
+		),
+		cold_affinity = regional_terrain_value_noise_2_row_cache_make(
+			key,
+			REGIONAL_TERRAIN_COLD_SALT,
+			REGIONAL_TERRAIN_AFFINITY_CELL_BLOCKS,
+			block_z,
+		),
+	}
+}
+
+surface_biome_profile_row_cache_make :: proc(
+	key: FeatureGridKey,
+	block_z: i32,
+) -> SurfaceBiomeProfileRowCache {
+	return {
+		fields = regional_terrain_fields_row_cache_make(key, block_z),
+		relief_low = regional_terrain_value_noise_2_row_cache_make(
+			key,
+			SURFACE_TERRAIN_RELIEF_LOW_SALT,
+			SURFACE_TERRAIN_RELIEF_LOW_CELL_BLOCKS,
+			block_z,
+		),
+		relief_mid = regional_terrain_value_noise_2_row_cache_make(
+			key,
+			SURFACE_TERRAIN_RELIEF_MID_SALT,
+			SURFACE_TERRAIN_RELIEF_MID_CELL_BLOCKS,
+			block_z,
+		),
+		relief_high = regional_terrain_value_noise_2_row_cache_make(
+			key,
+			SURFACE_TERRAIN_RELIEF_HIGH_SALT,
+			SURFACE_TERRAIN_RELIEF_HIGH_CELL_BLOCKS,
+			block_z,
+		),
+		relief_ridge = regional_terrain_value_noise_2_row_cache_make(
+			key,
+			SURFACE_TERRAIN_RELIEF_RIDGE_SALT,
+			SURFACE_TERRAIN_RELIEF_RIDGE_CELL_BLOCKS,
+			block_z,
+		),
+	}
+}
+
 regional_terrain_fields_sample :: proc(
 	key: FeatureGridKey,
 	block_x, block_y, block_z: i32,
@@ -312,6 +536,69 @@ regional_terrain_fields_sample :: proc(
 	return fields
 }
 
+regional_terrain_fields_sample_row :: proc(
+	cache: ^RegionalTerrainFieldsRowCache,
+	block_x, block_y: i32,
+) -> RegionalTerrainFields {
+	continental_low := regional_terrain_value_noise_2_row_cache_sample(
+		&cache.continental_low,
+		block_x,
+	)
+	continental_mid := regional_terrain_value_noise_2_row_cache_sample(
+		&cache.continental_mid,
+		block_x,
+	)
+	elevation_low := regional_terrain_value_noise_2_row_cache_sample(&cache.elevation_low, block_x)
+	elevation_mid := regional_terrain_value_noise_2_row_cache_sample(&cache.elevation_mid, block_x)
+	erosion_low := regional_terrain_value_noise_2_row_cache_sample(&cache.erosion_low, block_x)
+	ruggedness_low := regional_terrain_value_noise_2_row_cache_sample(
+		&cache.ruggedness_low,
+		block_x,
+	)
+	local_relief := regional_terrain_value_noise_2_row_cache_sample(&cache.local_relief, block_x)
+	pressure_noise := regional_terrain_value_noise_2_row_cache_sample(
+		&cache.pressure_noise,
+		block_x,
+	)
+	depth_pressure := regional_terrain_field_saturate(
+		f32(-block_y) / REGIONAL_TERRAIN_PRESSURE_DEPTH_BLOCKS,
+	)
+
+	fields := RegionalTerrainFields {
+		continentalness       = regional_terrain_field_saturate(
+			0.5 + continental_low * 0.35 + continental_mid * 0.15,
+		),
+		regional_elevation    = regional_terrain_field_signed_clamp(
+			elevation_low * 0.75 + elevation_mid * 0.25,
+		),
+		erosion               = regional_terrain_field_saturate(0.5 + erosion_low * 0.5),
+		ruggedness            = regional_terrain_field_saturate(0.5 + ruggedness_low * 0.5),
+		local_relief          = regional_terrain_field_signed_clamp(local_relief),
+		magic_affinity        = regional_terrain_field_saturate(
+			0.5 +
+			regional_terrain_value_noise_2_row_cache_sample(&cache.magic_affinity, block_x) * 0.5,
+		),
+		corruption_affinity   = regional_terrain_field_saturate(
+			0.5 +
+			regional_terrain_value_noise_2_row_cache_sample(&cache.corruption_affinity, block_x) *
+				0.5,
+		),
+		heat_affinity         = regional_terrain_field_saturate(
+			0.5 +
+			regional_terrain_value_noise_2_row_cache_sample(&cache.heat_affinity, block_x) * 0.5,
+		),
+		cold_affinity         = regional_terrain_field_saturate(
+			0.5 +
+			regional_terrain_value_noise_2_row_cache_sample(&cache.cold_affinity, block_x) * 0.5,
+		),
+		subterranean_pressure = regional_terrain_field_saturate(
+			depth_pressure * 0.65 + (0.5 + pressure_noise * 0.5) * 0.35,
+		),
+	}
+	regional_terrain_fields_validate(fields)
+	return fields
+}
+
 regional_terrain_fields_validate :: proc(fields: RegionalTerrainFields) {
 	log.assert(
 		fields.continentalness >= 0 && fields.continentalness <= 1,
@@ -366,10 +653,11 @@ regional_terrain_field_value_noise_2 :: proc(
 	t_x := math.smoothstep(f32(0), f32(1), unit_x)
 	t_z := math.smoothstep(f32(0), f32(1), unit_z)
 
-	v00 := regional_terrain_field_corner_value(key, salt, cell_x, cell_z)
-	v10 := regional_terrain_field_corner_value(key, salt, cell_x + 1, cell_z)
-	v01 := regional_terrain_field_corner_value(key, salt, cell_x, cell_z + 1)
-	v11 := regional_terrain_field_corner_value(key, salt, cell_x + 1, cell_z + 1)
+	corner_hash := regional_terrain_field_corner_hash_base(key, salt)
+	v00 := regional_terrain_field_corner_value_from_hash(corner_hash, salt, cell_x, cell_z)
+	v10 := regional_terrain_field_corner_value_from_hash(corner_hash, salt, cell_x + 1, cell_z)
+	v01 := regional_terrain_field_corner_value_from_hash(corner_hash, salt, cell_x, cell_z + 1)
+	v11 := regional_terrain_field_corner_value_from_hash(corner_hash, salt, cell_x + 1, cell_z + 1)
 
 	return regional_terrain_field_lerp(
 		regional_terrain_field_lerp(v00, v10, t_x),
@@ -399,14 +687,63 @@ regional_terrain_field_value_noise_3 :: proc(
 	t_y := math.smoothstep(f32(0), f32(1), unit_y)
 	t_z := math.smoothstep(f32(0), f32(1), unit_z)
 
-	v000 := regional_terrain_field_corner_value_3(key, salt, cell_x, cell_y, cell_z)
-	v100 := regional_terrain_field_corner_value_3(key, salt, cell_x + 1, cell_y, cell_z)
-	v010 := regional_terrain_field_corner_value_3(key, salt, cell_x, cell_y + 1, cell_z)
-	v110 := regional_terrain_field_corner_value_3(key, salt, cell_x + 1, cell_y + 1, cell_z)
-	v001 := regional_terrain_field_corner_value_3(key, salt, cell_x, cell_y, cell_z + 1)
-	v101 := regional_terrain_field_corner_value_3(key, salt, cell_x + 1, cell_y, cell_z + 1)
-	v011 := regional_terrain_field_corner_value_3(key, salt, cell_x, cell_y + 1, cell_z + 1)
-	v111 := regional_terrain_field_corner_value_3(key, salt, cell_x + 1, cell_y + 1, cell_z + 1)
+	corner_hash := regional_terrain_field_corner_hash_base(key, salt)
+	v000 := regional_terrain_field_corner_value_from_hash_3(
+		corner_hash,
+		salt,
+		cell_x,
+		cell_y,
+		cell_z,
+	)
+	v100 := regional_terrain_field_corner_value_from_hash_3(
+		corner_hash,
+		salt,
+		cell_x + 1,
+		cell_y,
+		cell_z,
+	)
+	v010 := regional_terrain_field_corner_value_from_hash_3(
+		corner_hash,
+		salt,
+		cell_x,
+		cell_y + 1,
+		cell_z,
+	)
+	v110 := regional_terrain_field_corner_value_from_hash_3(
+		corner_hash,
+		salt,
+		cell_x + 1,
+		cell_y + 1,
+		cell_z,
+	)
+	v001 := regional_terrain_field_corner_value_from_hash_3(
+		corner_hash,
+		salt,
+		cell_x,
+		cell_y,
+		cell_z + 1,
+	)
+	v101 := regional_terrain_field_corner_value_from_hash_3(
+		corner_hash,
+		salt,
+		cell_x + 1,
+		cell_y,
+		cell_z + 1,
+	)
+	v011 := regional_terrain_field_corner_value_from_hash_3(
+		corner_hash,
+		salt,
+		cell_x,
+		cell_y + 1,
+		cell_z + 1,
+	)
+	v111 := regional_terrain_field_corner_value_from_hash_3(
+		corner_hash,
+		salt,
+		cell_x + 1,
+		cell_y + 1,
+		cell_z + 1,
+	)
 
 	x00 := regional_terrain_field_lerp(v000, v100, t_x)
 	x10 := regional_terrain_field_lerp(v010, v110, t_x)
@@ -417,28 +754,29 @@ regional_terrain_field_value_noise_3 :: proc(
 	return regional_terrain_field_lerp(y0, y1, t_z)
 }
 
-regional_terrain_field_corner_value :: proc(
-	key: FeatureGridKey,
-	salt: u64,
-	cell_x, cell_z: i32,
-) -> f32 {
+regional_terrain_field_corner_hash_base :: proc(key: FeatureGridKey, salt: u64) -> u64 {
 	h := feature_grid_key_hash(key)
 	h = feature_grid_hash_combine(h, REGIONAL_TERRAIN_FIELD_DOMAIN_SALT)
 	h = feature_grid_hash_combine(h, salt)
-	h = feature_grid_hash_combine(h, feature_grid_hash_i32(cell_x))
+	return h
+}
+
+regional_terrain_field_corner_value_from_hash :: proc(
+	corner_hash: u64,
+	salt: u64,
+	cell_x, cell_z: i32,
+) -> f32 {
+	h := feature_grid_hash_combine(corner_hash, feature_grid_hash_i32(cell_x))
 	h = feature_grid_hash_combine(h, feature_grid_hash_i32(cell_z))
 	return feature_grid_signed_unit_f32(h, salt)
 }
 
-regional_terrain_field_corner_value_3 :: proc(
-	key: FeatureGridKey,
+regional_terrain_field_corner_value_from_hash_3 :: proc(
+	corner_hash: u64,
 	salt: u64,
 	cell_x, cell_y, cell_z: i32,
 ) -> f32 {
-	h := feature_grid_key_hash(key)
-	h = feature_grid_hash_combine(h, REGIONAL_TERRAIN_FIELD_DOMAIN_SALT)
-	h = feature_grid_hash_combine(h, salt)
-	h = feature_grid_hash_combine(h, feature_grid_hash_i32(cell_x))
+	h := feature_grid_hash_combine(corner_hash, feature_grid_hash_i32(cell_x))
 	h = feature_grid_hash_combine(h, feature_grid_hash_i32(cell_y))
 	h = feature_grid_hash_combine(h, feature_grid_hash_i32(cell_z))
 	return feature_grid_signed_unit_f32(h, salt)
@@ -747,8 +1085,14 @@ surface_biome_profile_evaluate_with_hydrology :: proc(
 	sample: SurfaceBiomeFieldSample,
 	hydrology_sample: HydrologyLayerSurfaceSample,
 	block_x, block_z: i32,
+	row_cache: ^SurfaceBiomeProfileRowCache = nil,
 ) -> SurfaceBiomeProfileEvaluation {
-	fields := regional_terrain_fields_sample(key, block_x, 0, block_z)
+	fields: RegionalTerrainFields
+	if row_cache != nil {
+		fields = regional_terrain_fields_sample_row(&row_cache.fields, block_x, 0)
+	} else {
+		fields = regional_terrain_fields_sample(key, block_x, 0, block_z)
+	}
 	evaluation := SurfaceBiomeProfileEvaluation {
 		fields           = fields,
 		hydrology_sample = hydrology_sample,
@@ -789,13 +1133,22 @@ surface_biome_profile_evaluate_with_hydrology :: proc(
 		evaluation.transition_strength,
 		sample.cell_count,
 	)
-	evaluation.transitioned_target = biome_shape_target_apply_surface_relief(
-		key,
-		evaluation.transitioned_target,
-		fields,
-		block_x,
-		block_z,
-	)
+	if row_cache != nil {
+		evaluation.transitioned_target = biome_shape_target_apply_surface_relief_row(
+			row_cache,
+			evaluation.transitioned_target,
+			fields,
+			block_x,
+		)
+	} else {
+		evaluation.transitioned_target = biome_shape_target_apply_surface_relief(
+			key,
+			evaluation.transitioned_target,
+			fields,
+			block_x,
+			block_z,
+		)
+	}
 	evaluation.final_target, evaluation.sea_compression_strength =
 		biome_shape_target_apply_sea_compression(evaluation.transitioned_target)
 	evaluation.hydrology_target = hydrology_layer_apply_surface(
@@ -1176,7 +1529,6 @@ biome_shape_target_apply_surface_relief :: proc(
 	fields: RegionalTerrainFields,
 	block_x, block_z: i32,
 ) -> BiomeShapeTarget {
-	result := target
 	low := regional_terrain_field_value_noise_2(
 		key,
 		block_x,
@@ -1205,6 +1557,42 @@ biome_shape_target_apply_surface_relief :: proc(
 		SURFACE_TERRAIN_RELIEF_RIDGE_CELL_BLOCKS,
 		SURFACE_TERRAIN_RELIEF_RIDGE_SALT,
 	)
+	return biome_shape_target_apply_surface_relief_values(
+		target,
+		fields,
+		low,
+		mid,
+		high,
+		ridge_noise,
+	)
+}
+
+biome_shape_target_apply_surface_relief_row :: proc(
+	cache: ^SurfaceBiomeProfileRowCache,
+	target: BiomeShapeTarget,
+	fields: RegionalTerrainFields,
+	block_x: i32,
+) -> BiomeShapeTarget {
+	low := regional_terrain_value_noise_2_row_cache_sample(&cache.relief_low, block_x)
+	mid := regional_terrain_value_noise_2_row_cache_sample(&cache.relief_mid, block_x)
+	high := regional_terrain_value_noise_2_row_cache_sample(&cache.relief_high, block_x)
+	ridge_noise := regional_terrain_value_noise_2_row_cache_sample(&cache.relief_ridge, block_x)
+	return biome_shape_target_apply_surface_relief_values(
+		target,
+		fields,
+		low,
+		mid,
+		high,
+		ridge_noise,
+	)
+}
+
+biome_shape_target_apply_surface_relief_values :: proc(
+	target: BiomeShapeTarget,
+	fields: RegionalTerrainFields,
+	low, mid, high, ridge_noise: f32,
+) -> BiomeShapeTarget {
+	result := target
 	ridge := 1.0 - math.abs(ridge_noise)
 	ridge_peak := ridge * ridge
 	erosion_damp := 1.0 - fields.erosion * 0.35
@@ -1284,6 +1672,16 @@ when ODIN_DEBUG {
 		fields := regional_terrain_fields_sample(key, 17, -96, -33)
 		fields_again := regional_terrain_fields_sample(key, 17, -96, -33)
 		debug_regional_terrain_fields_assert_equal(fields, fields_again)
+		fields_row_cache := regional_terrain_fields_row_cache_make(key, -33)
+		fields_from_row_cache := regional_terrain_fields_sample_row(&fields_row_cache, 17, -96)
+		debug_regional_terrain_fields_assert_equal(fields, fields_from_row_cache)
+		next_row_fields := regional_terrain_fields_sample(key, 18, -96, -33)
+		next_row_fields_from_cache := regional_terrain_fields_sample_row(
+			&fields_row_cache,
+			18,
+			-96,
+		)
+		debug_regional_terrain_fields_assert_equal(next_row_fields, next_row_fields_from_cache)
 
 		next_version_fields := regional_terrain_fields_sample(next_version_key, 17, -96, -33)
 		log.assert(

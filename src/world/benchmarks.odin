@@ -12,24 +12,21 @@ import time "core:time"
 // Benchmarking
 /////////////////////////////////////
 
-when ODIN_DEBUG {
+RUN_MESH_BENCHMARK :: #config(RUN_MESH_BENCHMARK, false)
+MESH_BENCHMARK_ITERATIONS :: #config(MESH_BENCHMARK_ITERATIONS, 8)
+RUN_TERRAIN_GENERATION_BENCHMARK :: #config(RUN_TERRAIN_GENERATION_BENCHMARK, false)
+TERRAIN_GENERATION_BENCHMARK_ITERATIONS :: #config(TERRAIN_GENERATION_BENCHMARK_ITERATIONS, 1)
+TERRAIN_GENERATION_BENCHMARK_RESET_CACHE :: #config(
+	TERRAIN_GENERATION_BENCHMARK_RESET_CACHE,
+	false,
+)
+TERRAIN_GENERATION_BENCHMARK_CAVE_ONLY :: #config(TERRAIN_GENERATION_BENCHMARK_CAVE_ONLY, false)
+TERRAIN_GENERATION_BENCHMARK_CAPTURE_CAVE_SLICES :: #config(
+	TERRAIN_GENERATION_BENCHMARK_CAPTURE_CAVE_SLICES,
+	false,
+)
 
-	RUN_MESH_BENCHMARK :: #config(RUN_MESH_BENCHMARK, false)
-	MESH_BENCHMARK_ITERATIONS :: #config(MESH_BENCHMARK_ITERATIONS, 8)
-	RUN_TERRAIN_GENERATION_BENCHMARK :: #config(RUN_TERRAIN_GENERATION_BENCHMARK, false)
-	TERRAIN_GENERATION_BENCHMARK_ITERATIONS :: #config(TERRAIN_GENERATION_BENCHMARK_ITERATIONS, 1)
-	TERRAIN_GENERATION_BENCHMARK_RESET_CACHE :: #config(
-		TERRAIN_GENERATION_BENCHMARK_RESET_CACHE,
-		false,
-	)
-	TERRAIN_GENERATION_BENCHMARK_CAVE_ONLY :: #config(
-		TERRAIN_GENERATION_BENCHMARK_CAVE_ONLY,
-		false,
-	)
-	TERRAIN_GENERATION_BENCHMARK_CAPTURE_CAVE_SLICES :: #config(
-		TERRAIN_GENERATION_BENCHMARK_CAPTURE_CAVE_SLICES,
-		false,
-	)
+when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_ALL :: 0
 	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_FUNGAL :: 1
 	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_FUNGAL_ROUTE :: 2
@@ -725,6 +722,8 @@ when ODIN_DEBUG {
 
 		terrain_generation_benchmark_cache_clear :: proc() {
 			state.terrain_generation_region_cache = {}
+			terrain_generation_chunk_cache_clear()
+			terrain_generation_column_cache_clear()
 		}
 
 		terrain_generation_benchmark_floor_i32 :: proc(value: f32) -> i32 {
@@ -1428,6 +1427,8 @@ when ODIN_DEBUG {
 			origin := chunk_origin_from_coord(chunk)
 			region_coord := biomes.generation_region_coord_from_block(origin.x, origin.y, origin.z)
 			region := terrain_generation_region_for_fill(key, region_coord)
+			edge_route_bounds: [biomes.GENERATION_REGION_CAVE_NETWORK_EDGE_CAPACITY]TerrainCaveEdgeRouteBounds
+			terrain_density_cave_edge_route_bounds_fill(&region, edge_route_bounds[:])
 			selection := TerrainGenerationBenchmarkCaveFieldPathSelection {
 				chunk = chunk,
 			}
@@ -1496,6 +1497,7 @@ when ODIN_DEBUG {
 							f32(world_z) + 0.5,
 							radius,
 							path_candidate,
+							edge_route_bounds[:],
 						)
 						if !network_sample.connected {
 							continue
@@ -1633,6 +1635,8 @@ when ODIN_DEBUG {
 			origin := chunk_origin_from_coord(chunk)
 			region_coord := biomes.generation_region_coord_from_block(origin.x, origin.y, origin.z)
 			region := terrain_generation_region_for_fill(key, region_coord)
+			edge_route_bounds: [biomes.GENERATION_REGION_CAVE_NETWORK_EDGE_CAPACITY]TerrainCaveEdgeRouteBounds
+			terrain_density_cave_edge_route_bounds_fill(&region, edge_route_bounds[:])
 			selection := TerrainGenerationBenchmarkCaveFieldPocketSelection {
 				chunk = chunk,
 				score = i64(-9223372036854775807),
@@ -1707,6 +1711,7 @@ when ODIN_DEBUG {
 							f32(world_z) + 0.5,
 							radius,
 							path_candidate,
+							edge_route_bounds[:],
 						)
 						if !network_sample.found ||
 						   (!network_sample.connected && !network_sample.bridgeable) {
@@ -2154,13 +2159,14 @@ when ODIN_DEBUG {
 			view: ^world_async.ChunkVoxelView,
 			coords: TerrainGenerationBenchmarkCoords,
 			seed: u32,
+			quality: world_async.ChunkGenerationQuality = .Full,
 		) -> (
 			checksum: u64,
 			solid_count: u32,
 			water_count: u32,
 		) {
 			for coord in coords {
-				terrain_heightfield_voxel_view_fill(view, coord, seed)
+				terrain_heightfield_voxel_view_fill_quality(view, coord, seed, quality)
 				chunk_checksum, chunk_solid_count, chunk_water_count :=
 					terrain_generation_benchmark_checksum(view^)
 				checksum = checksum * 1099511628211 ~ chunk_checksum
@@ -3115,6 +3121,8 @@ when ODIN_DEBUG {
 					origin.z,
 				)
 				region := terrain_generation_region_for_fill(key, region_coord)
+				edge_route_bounds: [biomes.GENERATION_REGION_CAVE_NETWORK_EDGE_CAPACITY]TerrainCaveEdgeRouteBounds
+				terrain_density_cave_edge_route_bounds_fill(&region, edge_route_bounds[:])
 				for z := TERRAIN_CAVE_FIELD_SAMPLE_STEP_BLOCKS / 2;
 				    z < CHUNK_BLOCK_LENGTH;
 				    z += TERRAIN_CAVE_FIELD_SAMPLE_STEP_BLOCKS {
@@ -3183,6 +3191,7 @@ when ODIN_DEBUG {
 								f32(world_z) + 0.5,
 								radius,
 								path_candidate,
+								edge_route_bounds[:],
 							)
 							if network_sample.connected {
 								stats.network_connected_candidate_count += 1
@@ -3770,6 +3779,8 @@ when ODIN_DEBUG {
 			iterations: u32,
 			reset_cache_each_iteration: bool,
 			view: ^world_async.ChunkVoxelView,
+			clear_chunk_cache_each_iteration: bool = false,
+			quality: world_async.ChunkGenerationQuality = .Full,
 		) {
 			log.assertf(
 				iterations > 0,
@@ -3777,30 +3788,39 @@ when ODIN_DEBUG {
 			)
 			terrain_generation_benchmark_cache_clear()
 			for coord in coords {
-				terrain_heightfield_voxel_view_fill(view, coord, seed)
+				terrain_heightfield_voxel_view_fill_quality(view, coord, seed, quality)
 			}
 
+			when TERRAIN_GENERATION_PROFILE_PHASES {
+				terrain_generation_profile_reset()
+			}
 			start := time.tick_now()
 			for _ in 0 ..< iterations {
 				if reset_cache_each_iteration {
 					terrain_generation_benchmark_cache_clear()
+				} else if clear_chunk_cache_each_iteration {
+					terrain_generation_chunk_cache_clear()
 				}
 				for coord in coords {
-					terrain_heightfield_voxel_view_fill(view, coord, seed)
+					terrain_heightfield_voxel_view_fill_quality(view, coord, seed, quality)
 				}
 			}
 			duration := time.tick_since(start)
 
 			chunk_iterations := iterations * u32(len(coords))
+			when TERRAIN_GENERATION_PROFILE_PHASES {
+				terrain_generation_profile_log(phase)
+			}
 			checksum, solid_count, water_count := terrain_generation_benchmark_checksum_coords(
 				view,
 				coords,
 				seed,
+				quality,
 			)
 			total_ms := time.duration_milliseconds(duration)
 			avg_us := time.duration_microseconds(duration) / f64(chunk_iterations)
 			log.infof(
-				"TERRAIN_GENERATION_BENCH phase=%s iterations=%d chunk_iterations=%d total_ms=%.3f avg_us_per_chunk=%.3f checksum=%d solid_count=%d water_count=%d reset_cache=%v",
+				"TERRAIN_GENERATION_BENCH phase=%s iterations=%d chunk_iterations=%d total_ms=%.3f avg_us_per_chunk=%.3f checksum=%d solid_count=%d water_count=%d reset_cache=%v clear_chunk_cache=%v quality=%v",
 				phase,
 				iterations,
 				chunk_iterations,
@@ -3810,6 +3830,8 @@ when ODIN_DEBUG {
 				solid_count,
 				water_count,
 				reset_cache_each_iteration,
+				clear_chunk_cache_each_iteration,
+				quality,
 			)
 		}
 
@@ -7872,6 +7894,8 @@ when ODIN_DEBUG {
 
 			view := world_async.ChunkVoxelView{}
 			chunk_voxel_view_alloc(&view, allocator)
+			terrain_generation_chunk_cache_init(context.allocator)
+			terrain_generation_chunk_cache_clear()
 			seed := u32(0)
 			key := terrain_generation_key_make(seed)
 			cave_field_path_selection := terrain_generation_benchmark_cave_field_path_selection(
@@ -7969,6 +7993,25 @@ when ODIN_DEBUG {
 				iterations,
 				false,
 				&view,
+			)
+			terrain_generation_benchmark_run_phase(
+				"cave_warm_region_column_cache",
+				cave_coords,
+				seed,
+				iterations,
+				false,
+				&view,
+				true,
+			)
+			terrain_generation_benchmark_run_phase(
+				"cave_proxy_anchors",
+				cave_coords,
+				seed,
+				iterations,
+				false,
+				&view,
+				true,
+				.Proxy,
 			)
 			if !TERRAIN_GENERATION_BENCHMARK_CAVE_ONLY {
 				terrain_generation_benchmark_run_phase(

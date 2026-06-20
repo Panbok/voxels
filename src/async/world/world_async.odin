@@ -89,15 +89,25 @@ ChunkMeshOutput :: struct {
 // Generation Types
 /////////////////////////////////////
 
+ChunkGenerationQuality :: enum u8 {
+	Full,
+	Proxy,
+}
+
 ChunkGenerationJob :: struct {
 	coord:         ChunkCoord,
 	seed:          u32,
 	block_storage: ChunkBlockStorage,
+	prewarm:       bool,
+	quality:       ChunkGenerationQuality,
 }
 
 ChunkGenerationJobResult :: struct {
-	coord:         ChunkCoord,
-	block_storage: ChunkBlockStorage,
+	coord:                  ChunkCoord,
+	block_storage:          ChunkBlockStorage,
+	prewarm:                bool,
+	quality:                ChunkGenerationQuality,
+	generation_duration_us: u64,
 }
 
 //////////////////////////////////////
