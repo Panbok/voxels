@@ -11,8 +11,7 @@ $SourceDir = Join-Path $ProjectRoot "src"
 $VendorDir = Join-Path $ProjectRoot "vendor"
 $AssetsDir = Join-Path $ProjectRoot "assets"
 $BuildDir = Join-Path $ProjectRoot "build"
-$ExePath = Join-Path $BuildDir "debug_build.exe"
-$PdbPath = Join-Path $BuildDir "debug_build.pdb"
+$ExePath = Join-Path $BuildDir "release_build.exe"
 $AsyncCollectionDir = Join-Path $SourceDir "async"
 $GfxCollectionDir = Join-Path $SourceDir "gfx"
 $WorldCollectionDir = Join-Path $SourceDir "world"
@@ -70,7 +69,7 @@ if (Test-Path $ShaderSourceDir) {
 		}
 }
 
-odin build $SourceDir -collection:app=$SourceDir -collection:async=$AsyncCollectionDir -collection:gfx=$GfxCollectionDir -collection:world=$WorldCollectionDir -out:$ExePath -pdb-name:$PdbPath -debug -vet -vet-packages:main,async,world,world_async,gfx,camera,biomes -vet-unused-procedures -warnings-as-errors
+odin build $SourceDir -collection:app=$SourceDir -collection:async=$AsyncCollectionDir -collection:gfx=$GfxCollectionDir -collection:world=$WorldCollectionDir -out:$ExePath -o:speed
 if ($LASTEXITCODE -ne 0) {
 	exit $LASTEXITCODE
 }
