@@ -288,41 +288,15 @@ terrain_cave_material_profile :: proc(
 ) -> (
 	wall_material_id, floor_material_id, ceiling_material_id: world_async.BlockMaterialID,
 ) {
-	switch biome_id {
-	case .Fungal_Vaults:
-		return world_async.BlockMaterialID(
-			TERRAIN_WET_MARSH_MAT_ID,
-		), world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID), world_async.BlockMaterialID(TERRAIN_DIRT_MAT_ID)
-	case .Crystal_Geode_Network:
-		return world_async.BlockMaterialID(
-			TERRAIN_CRYSTAL_MAT_ID,
-		), world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID), world_async.BlockMaterialID(TERRAIN_CRYSTAL_MAT_ID)
-	case .Buried_Aquifer_Caves:
-		return world_async.BlockMaterialID(
-			TERRAIN_AQUIFER_WALL_MAT_ID,
-		), world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID), world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
-	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
-		return world_async.BlockMaterialID(
-			TERRAIN_STONE_MAT_ID,
-		), world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID), world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
-	}
-	return world_async.BlockMaterialID(
-		TERRAIN_STONE_MAT_ID,
-	), world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID), world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+	profile := biomes.biome_material_profile_for(biome_id)
+	return terrain_block_material_id_from_biome_material(
+		profile.cave_wall,
+	), terrain_block_material_id_from_biome_material(profile.cave_floor), terrain_block_material_id_from_biome_material(profile.cave_ceiling)
 }
 
 terrain_cave_wall_material_id :: proc(biome_id: biomes.BiomeID) -> world_async.BlockMaterialID {
-	switch biome_id {
-	case .Fungal_Vaults:
-		return world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID)
-	case .Crystal_Geode_Network:
-		return world_async.BlockMaterialID(TERRAIN_CRYSTAL_MAT_ID)
-	case .Buried_Aquifer_Caves:
-		return world_async.BlockMaterialID(TERRAIN_AQUIFER_WALL_MAT_ID)
-	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
-		return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
-	}
-	return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+	profile := biomes.biome_material_profile_for(biome_id)
+	return terrain_block_material_id_from_biome_material(profile.cave_wall)
 }
 
 terrain_cave_wall_material_id_for_neighbor :: proc(

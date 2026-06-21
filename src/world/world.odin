@@ -509,6 +509,7 @@ when TERRAIN_GENERATION_PROFILE_PHASES {
 		route_pocket_cluster_worley_candidates:    u64,
 		cave_network:                              time.Duration,
 		water:                                     time.Duration,
+		decoration:                                time.Duration,
 		network_connectivity:                      time.Duration,
 		network_nodes:                             time.Duration,
 		network_edges:                             time.Duration,
@@ -542,6 +543,14 @@ when TERRAIN_GENERATION_PROFILE_PHASES {
 		carve_successes:                           u64,
 		wall_neighbor_checks:                      u64,
 		wall_neighbor_writes:                      u64,
+		decoration_surface_candidates:             u64,
+		decoration_surface_accepted:               u64,
+		decoration_cave_candidates:                u64,
+		decoration_cave_accepted:                  u64,
+		decoration_blocks_written:                 u64,
+		decoration_family_candidates:              [biomes.DECORATION_FAMILY_COUNT]u64,
+		decoration_family_accepted:                [biomes.DECORATION_FAMILY_COUNT]u64,
+		decoration_family_blocks:                  [biomes.DECORATION_FAMILY_COUNT]u64,
 	}
 
 	terrain_generation_profile_stats: TerrainGenerationProfileStats
@@ -562,7 +571,7 @@ when TERRAIN_GENERATION_PROFILE_PHASES {
 	terrain_generation_profile_log :: proc(phase: string) {
 		stats := terrain_generation_profile_stats
 		log.infof(
-			"TERRAIN_GENERATION_PROFILE phase=%s chunks=%d total_ms=%.3f avg_us_per_chunk=%.3f clear_ms=%.3f region_ms=%.3f columns_ms=%.3f cave_field_ms=%.3f cave_network_ms=%.3f water_ms=%.3f network_connectivity_ms=%.3f network_nodes_ms=%.3f network_edges_ms=%.3f network_bridges_ms=%.3f network_anchors_ms=%.3f",
+			"TERRAIN_GENERATION_PROFILE phase=%s chunks=%d total_ms=%.3f avg_us_per_chunk=%.3f clear_ms=%.3f region_ms=%.3f columns_ms=%.3f cave_field_ms=%.3f cave_network_ms=%.3f water_ms=%.3f decoration_ms=%.3f network_connectivity_ms=%.3f network_nodes_ms=%.3f network_edges_ms=%.3f network_bridges_ms=%.3f network_anchors_ms=%.3f",
 			phase,
 			stats.chunk_count,
 			time.duration_milliseconds(stats.total),
@@ -573,6 +582,7 @@ when TERRAIN_GENERATION_PROFILE_PHASES {
 			time.duration_milliseconds(stats.cave_field),
 			time.duration_milliseconds(stats.cave_network),
 			time.duration_milliseconds(stats.water),
+			time.duration_milliseconds(stats.decoration),
 			time.duration_milliseconds(stats.network_connectivity),
 			time.duration_milliseconds(stats.network_nodes),
 			time.duration_milliseconds(stats.network_edges),
@@ -647,6 +657,31 @@ when TERRAIN_GENERATION_PROFILE_PHASES {
 			stats.carve_successes,
 			stats.wall_neighbor_checks,
 			stats.wall_neighbor_writes,
+		)
+		log.infof(
+			"TERRAIN_GENERATION_PROFILE_DECORATION phase=%s surface_candidates=%d surface_accepted=%d cave_candidates=%d cave_accepted=%d blocks_written=%d",
+			phase,
+			stats.decoration_surface_candidates,
+			stats.decoration_surface_accepted,
+			stats.decoration_cave_candidates,
+			stats.decoration_cave_accepted,
+			stats.decoration_blocks_written,
+		)
+		log.infof(
+			"TERRAIN_GENERATION_PROFILE_DECORATION_FAMILY phase=%s baseline_candidates=%d baseline_accepted=%d baseline_blocks=%d dead_ash_candidates=%d dead_ash_accepted=%d dead_ash_blocks=%d fungal_candidates=%d fungal_accepted=%d fungal_blocks=%d crystal_candidates=%d crystal_accepted=%d crystal_blocks=%d",
+			phase,
+			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Baseline_Tree)],
+			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Baseline_Tree)],
+			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Baseline_Tree)],
+			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Dead_Ash_Tree)],
+			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Dead_Ash_Tree)],
+			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Dead_Ash_Tree)],
+			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Fungal_Tree)],
+			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Fungal_Tree)],
+			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Fungal_Tree)],
+			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Crystal_Growth_Cluster)],
+			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Crystal_Growth_Cluster)],
+			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Crystal_Growth_Cluster)],
 		)
 	}
 }
@@ -1335,6 +1370,8 @@ TERRAIN_AQUIFER_WALL_MAT_ID :: 6
 TERRAIN_CRYSTAL_MAT_ID :: 7
 TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG :: u8(0x08)
 TERRAIN_CAVE_NETWORK_DEBUG_MATERIAL_FLAG :: u8(0x10)
+TERRAIN_DECORATION_DEBUG_MATERIAL_FLAG ::
+	TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG | TERRAIN_CAVE_NETWORK_DEBUG_MATERIAL_FLAG
 TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_HYDROLOGY :: u32(0x1)
 TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_CAVE_NETWORK :: u32(0x2)
 TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_COUNT :: u32(4)
@@ -1343,7 +1380,7 @@ TERRAIN_MATERIAL_FACE_VARIANT_COUNT :: 32
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == 8)
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == world_async.TERRAIN_MATERIAL_PALETTE_COUNT)
 #assert(TERRAIN_MATERIAL_FACE_VARIANT_COUNT == 32)
-TERRAIN_GENERATOR_VERSION :: u32(3)
+TERRAIN_GENERATOR_VERSION :: #config(TERRAIN_GENERATOR_VERSION, u32(5))
 TERRAIN_GRASS_CAP_BLOCK_DEPTH :: 4
 TERRAIN_DIRT_LAYER_BLOCK_DEPTH :: 4
 TERRAIN_SURFACE_MATERIAL_BLEND_SALT :: u64(0x475c91d2e03af86b)
@@ -2587,7 +2624,7 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 						if column.hydrology_debug_material_active {
 							material_id = terrain_hydrology_debug_material_id(material_id)
 						}
-						if cave_debug_material_active {
+						if cave_debug_material_active && !column.hydrology_debug_material_active {
 							material_id = terrain_cave_anchor_debug_material_id(material_id)
 						}
 					}
@@ -2612,7 +2649,7 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 						if column.hydrology_debug_material_active {
 							material_id = terrain_hydrology_debug_material_id(material_id)
 						}
-						if cave_debug_material_active {
+						if cave_debug_material_active && !column.hydrology_debug_material_active {
 							material_id = terrain_cave_anchor_debug_material_id(material_id)
 						}
 					}
@@ -2707,9 +2744,50 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 		}
 	}
 	terrain_water_volume_fill(view, origin, column_targets[:])
-	terrain_generation_chunk_cache_store(view, key, chunk)
 	when TERRAIN_GENERATION_PROFILE_PHASES {
 		terrain_generation_profile_stats.water += time.tick_since(profile_stage_start)
+		profile_stage_start = time.tick_now()
+	}
+	decoration_stats := terrain_decoration_pass_apply(
+		view,
+		&generation_region,
+		origin,
+		column_targets[:],
+	)
+	when TERRAIN_GENERATION_PROFILE_PHASES {
+		terrain_generation_profile_stats.decoration += time.tick_since(profile_stage_start)
+		terrain_generation_profile_stats.decoration_surface_candidates += u64(
+			decoration_stats.surface_candidates,
+		)
+		terrain_generation_profile_stats.decoration_surface_accepted += u64(
+			decoration_stats.surface_accepted,
+		)
+		terrain_generation_profile_stats.decoration_cave_candidates += u64(
+			decoration_stats.cave_candidates,
+		)
+		terrain_generation_profile_stats.decoration_cave_accepted += u64(
+			decoration_stats.cave_accepted,
+		)
+		terrain_generation_profile_stats.decoration_blocks_written += u64(
+			decoration_stats.blocks_written,
+		)
+		for family_index := 0; family_index < biomes.DECORATION_FAMILY_COUNT; family_index += 1 {
+			terrain_generation_profile_stats.decoration_family_candidates[family_index] += u64(
+				decoration_stats.family_candidates[family_index],
+			)
+			terrain_generation_profile_stats.decoration_family_accepted[family_index] += u64(
+				decoration_stats.family_accepted[family_index],
+			)
+			terrain_generation_profile_stats.decoration_family_blocks[family_index] += u64(
+				decoration_stats.family_blocks[family_index],
+			)
+		}
+	}
+	when !TERRAIN_GENERATION_PROFILE_PHASES {
+		_ = decoration_stats
+	}
+	terrain_generation_chunk_cache_store(view, key, chunk)
+	when TERRAIN_GENERATION_PROFILE_PHASES {
 		terrain_generation_profile_stats.total += time.tick_since(profile_total_start)
 		terrain_generation_profile_stats.chunk_count += 1
 	}
@@ -2963,6 +3041,16 @@ terrain_hydrology_debug_material_id :: proc(
 	return world_async.BlockMaterialID(u8(material_id) | TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG)
 }
 
+when TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
+	terrain_decoration_debug_material_id :: proc(
+		material_id: world_async.BlockMaterialID,
+	) -> world_async.BlockMaterialID {
+		return world_async.BlockMaterialID(
+			u8(material_id) | TERRAIN_DECORATION_DEBUG_MATERIAL_FLAG,
+		)
+	}
+}
+
 terrain_debug_material_flags_from_combo :: proc(combo: u32) -> u32 {
 	flags := u32(0)
 	if (combo & TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_HYDROLOGY) != 0 {
@@ -2987,21 +3075,42 @@ terrain_biome_block_material_id :: proc(
 	return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
 }
 
+terrain_block_material_id_from_biome_material :: proc(
+	material_id: biomes.BiomeMaterialID,
+) -> world_async.BlockMaterialID {
+	switch material_id {
+	case .Grass:
+		return world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID)
+	case .Dirt:
+		return world_async.BlockMaterialID(TERRAIN_DIRT_MAT_ID)
+	case .Stone:
+		return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+	case .Wet_Marsh:
+		return world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID)
+	case .Water:
+		return world_async.BlockMaterialID(TERRAIN_WATER_MAT_ID)
+	case .Corrupted_Ash:
+		return world_async.BlockMaterialID(TERRAIN_CORRUPTED_ASH_MAT_ID)
+	case .Aquifer_Wall:
+		return world_async.BlockMaterialID(TERRAIN_AQUIFER_WALL_MAT_ID)
+	case .Crystal:
+		return world_async.BlockMaterialID(TERRAIN_CRYSTAL_MAT_ID)
+	}
+
+	log.assertf(false, "unhandled Biome Material ID: %v", material_id)
+	return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+}
+
 terrain_biome_surface_material_id :: proc(
 	biome_id: biomes.BiomeID,
 ) -> world_async.BlockMaterialID {
 	switch biome_id {
-	case .Temperate_Hills:
-		return world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID)
-	case .Basalt_Spire_Highlands:
-		return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
-	case .Wet_Lowland_Marsh:
-		return world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID)
-	case .Corrupted_Ash_Forest:
-		return world_async.BlockMaterialID(TERRAIN_CORRUPTED_ASH_MAT_ID)
 	case .Fungal_Vaults, .Crystal_Geode_Network, .Buried_Aquifer_Caves:
 		log.assert(false, "surface terrain fill received subterranean biome identity")
 		return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+		profile := biomes.biome_material_profile_for(biome_id)
+		return terrain_block_material_id_from_biome_material(profile.surface)
 	}
 
 	log.assertf(false, "unhandled terrain biome surface material: %v", biome_id)
@@ -3012,15 +3121,12 @@ terrain_biome_subsurface_material_id :: proc(
 	biome_id: biomes.BiomeID,
 ) -> world_async.BlockMaterialID {
 	switch biome_id {
-	case .Basalt_Spire_Highlands:
-		return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
-	case .Corrupted_Ash_Forest:
-		return world_async.BlockMaterialID(TERRAIN_CORRUPTED_ASH_MAT_ID)
-	case .Temperate_Hills, .Wet_Lowland_Marsh:
-		return world_async.BlockMaterialID(TERRAIN_DIRT_MAT_ID)
 	case .Fungal_Vaults, .Crystal_Geode_Network, .Buried_Aquifer_Caves:
 		log.assert(false, "surface terrain fill received subterranean biome identity")
 		return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+		profile := biomes.biome_material_profile_for(biome_id)
+		return terrain_block_material_id_from_biome_material(profile.subsurface)
 	}
 
 	log.assertf(false, "unhandled terrain biome subsurface material: %v", biome_id)

@@ -424,6 +424,15 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 	when RUN_TERRAIN_GENERATION_BENCHMARK {
 
 		TerrainGenerationBenchmarkCoords :: [TERRAIN_GENERATION_BENCHMARK_COORD_COUNT]world_async.ChunkCoord
+		TerrainGenerationBenchmarkMaterialStats :: struct {
+			solid_count:             u64,
+			empty_count:             u64,
+			water_count:             u64,
+			material_counts:         [TERRAIN_MATERIAL_PALETTE_COUNT]u64,
+			hydrology_debug_blocks:  u64,
+			cave_debug_blocks:       u64,
+			decoration_debug_blocks: u64,
+		}
 		TerrainGenerationBenchmarkCaveSlicePixels :: [TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH *
 		TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT]u8
 		TerrainGenerationBenchmarkCaveViewPixels :: [TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH *
@@ -2136,20 +2145,36 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 			view: world_async.ChunkVoxelView,
 		) -> (
 			checksum: u64,
-			solid_count: u32,
-			water_count: u32,
+			stats: TerrainGenerationBenchmarkMaterialStats,
 		) {
 			for index := 0; index < CHUNK_BLOCK_COUNT; index += 1 {
 				material := u32(view.blocks.material_id[index])
 				if view.blocks.occupancy[index] == .Solid {
-					solid_count += 1
+					stats.solid_count += 1
 					checksum = checksum * 1099511628211 ~ u64(index + 1)
 					checksum = checksum * 1099511628211 ~ u64(material + 17)
-					if terrain_material_palette_index(view.blocks.material_id[index]) ==
-					   TERRAIN_WATER_MAT_ID {
-						water_count += 1
+					palette := terrain_material_palette_index(view.blocks.material_id[index])
+					stats.material_counts[palette] += 1
+					if palette == TERRAIN_WATER_MAT_ID {
+						stats.water_count += 1
+					}
+					if (u8(view.blocks.material_id[index]) &
+						   TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG) !=
+					   0 {
+						stats.hydrology_debug_blocks += 1
+					}
+					if (u8(view.blocks.material_id[index]) &
+						   TERRAIN_CAVE_NETWORK_DEBUG_MATERIAL_FLAG) !=
+					   0 {
+						stats.cave_debug_blocks += 1
+					}
+					if (u8(view.blocks.material_id[index]) &
+						   TERRAIN_DECORATION_DEBUG_MATERIAL_FLAG) ==
+					   TERRAIN_DECORATION_DEBUG_MATERIAL_FLAG {
+						stats.decoration_debug_blocks += 1
 					}
 				} else {
+					stats.empty_count += 1
 					checksum = checksum * 1099511628211 ~ u64(index + 3)
 				}
 			}
@@ -2163,18 +2188,30 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 			quality: world_async.ChunkGenerationQuality = .Full,
 		) -> (
 			checksum: u64,
-			solid_count: u32,
-			water_count: u32,
+			stats: TerrainGenerationBenchmarkMaterialStats,
 		) {
 			for coord in coords {
 				terrain_heightfield_voxel_view_fill_quality(view, coord, seed, quality)
-				chunk_checksum, chunk_solid_count, chunk_water_count :=
-					terrain_generation_benchmark_checksum(view^)
+				chunk_checksum, chunk_stats := terrain_generation_benchmark_checksum(view^)
 				checksum = checksum * 1099511628211 ~ chunk_checksum
-				solid_count += chunk_solid_count
-				water_count += chunk_water_count
+				terrain_generation_benchmark_material_stats_add(&stats, chunk_stats)
 			}
 			return
+		}
+
+		terrain_generation_benchmark_material_stats_add :: proc(
+			total: ^TerrainGenerationBenchmarkMaterialStats,
+			stats: TerrainGenerationBenchmarkMaterialStats,
+		) {
+			total.solid_count += stats.solid_count
+			total.empty_count += stats.empty_count
+			total.water_count += stats.water_count
+			total.hydrology_debug_blocks += stats.hydrology_debug_blocks
+			total.cave_debug_blocks += stats.cave_debug_blocks
+			total.decoration_debug_blocks += stats.decoration_debug_blocks
+			for i := 0; i < TERRAIN_MATERIAL_PALETTE_COUNT; i += 1 {
+				total.material_counts[i] += stats.material_counts[i]
+			}
 		}
 
 		terrain_generation_benchmark_surface_water_stats_from_coords :: proc(
@@ -2183,9 +2220,9 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 		) -> TerrainGenerationBenchmarkSurfaceWaterStats {
 			key := terrain_generation_key_make(seed)
 			stats := TerrainGenerationBenchmarkSurfaceWaterStats {
-					min_surface_height_blocks = max(f32),
-					max_surface_height_blocks = -max(f32),
-				}
+				min_surface_height_blocks = max(f32),
+				max_surface_height_blocks = -max(f32),
+			}
 			for chunk_coord in coords {
 				origin := chunk_origin_from_coord(chunk_coord)
 				region_coord := biomes.generation_region_coord_from_block(
@@ -3812,7 +3849,7 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 			when TERRAIN_GENERATION_PROFILE_PHASES {
 				terrain_generation_profile_log(phase)
 			}
-			checksum, solid_count, water_count := terrain_generation_benchmark_checksum_coords(
+			checksum, material_stats := terrain_generation_benchmark_checksum_coords(
 				view,
 				coords,
 				seed,
@@ -3828,11 +3865,28 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 				total_ms,
 				avg_us,
 				checksum,
-				solid_count,
-				water_count,
+				material_stats.solid_count,
+				material_stats.water_count,
 				reset_cache_each_iteration,
 				clear_chunk_cache_each_iteration,
 				quality,
+			)
+			log.infof(
+				"TERRAIN_GENERATION_BENCH_MATERIALS phase=%s empty=%d solid=%d grass=%d dirt=%d stone=%d wet=%d water=%d ash=%d aquifer=%d crystal=%d hydrology_debug=%d cave_debug=%d decoration_debug=%d",
+				phase,
+				material_stats.empty_count,
+				material_stats.solid_count,
+				material_stats.material_counts[TERRAIN_GRASS_MAT_ID],
+				material_stats.material_counts[TERRAIN_DIRT_MAT_ID],
+				material_stats.material_counts[TERRAIN_STONE_MAT_ID],
+				material_stats.material_counts[TERRAIN_WET_MARSH_MAT_ID],
+				material_stats.material_counts[TERRAIN_WATER_MAT_ID],
+				material_stats.material_counts[TERRAIN_CORRUPTED_ASH_MAT_ID],
+				material_stats.material_counts[TERRAIN_AQUIFER_WALL_MAT_ID],
+				material_stats.material_counts[TERRAIN_CRYSTAL_MAT_ID],
+				material_stats.hydrology_debug_blocks,
+				material_stats.cave_debug_blocks,
+				material_stats.decoration_debug_blocks,
 			)
 		}
 

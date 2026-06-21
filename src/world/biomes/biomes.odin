@@ -1970,6 +1970,8 @@ when ODIN_DEBUG {
 		)
 
 		profile_debug_contract_checks_run()
+		biome_material_debug_contract_checks_run()
+		decoration_debug_contract_checks_run()
 		hydrology_debug_contract_checks_run()
 		cave_network_debug_contract_checks_run()
 
