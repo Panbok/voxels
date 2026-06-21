@@ -80,27 +80,28 @@ GraphicsState :: struct {
 
 state := struct {
 	// Memory
-	persistent_allocator:              mem.Allocator,
-	transient_allocator:               mem.Allocator,
-	transient_arena:                   ^mem.Arena,
+	persistent_allocator:               mem.Allocator,
+	transient_allocator:                mem.Allocator,
+	transient_arena:                    ^mem.Arena,
 
 	// Geometry
-	geometry_pool:                     GeometryPool,
+	geometry_pool:                      GeometryPool,
 
 	// Graphics
-	using graphics:                    GraphicsState,
+	using graphics:                     GraphicsState,
 
 	// Metrics
-	render_stats:                      RenderStats,
+	render_stats:                       RenderStats,
 
 	// State
-	initialized:                       bool,
-	resources_ready:                   bool,
-	debug_mode:                        bool,
-	enable_vsync:                      bool,
-	use_wireframe_mode:                bool,
-	use_hydrology_debug_visualization: bool,
-	use_cave_debug_visualization:      bool,
+	initialized:                        bool,
+	resources_ready:                    bool,
+	debug_mode:                         bool,
+	enable_vsync:                       bool,
+	use_wireframe_mode:                 bool,
+	use_hydrology_debug_visualization:  bool,
+	use_cave_debug_visualization:       bool,
+	use_decoration_debug_visualization: bool,
 }{}
 
 //////////////////////////////////////
@@ -128,32 +129,32 @@ init :: proc(config: InitConfig) {
 		window_height = WINDOW_DEFAULT_HEIGHT
 	}
 
-	log.assertf(sdl.Init({.VIDEO}), "Failed to initialize SDL: %s", sdl.GetError())
+	sdl_init_ok := sdl.Init({.VIDEO})
+	log.assertf(sdl_init_ok, "Failed to initialize SDL: %s", sdl.GetError())
 
 	state.device = sdl.CreateGPUDevice({.DXIL}, state.debug_mode, nil)
 	log.assertf(state.device != nil, "Failed to create GPU device: %s", sdl.GetError())
 
 	state.window = sdl.CreateWindow("Voxels Engine", window_width, window_height, {.RESIZABLE})
 	log.assertf(state.window != nil, "Failed to create window: %s", sdl.GetError())
+	relative_mouse_mode_set := sdl.SetWindowRelativeMouseMode(state.window, true)
 	log.assertf(
-		sdl.SetWindowRelativeMouseMode(state.window, true),
+		relative_mouse_mode_set,
 		"Failed to enable relative mouse mode: %s",
 		sdl.GetError(),
 	)
 
-	log.assertf(
-		sdl.ClaimWindowForGPUDevice(state.device, state.window),
-		"Failed to claim window for GPU device: %s",
-		sdl.GetError(),
-	)
+	window_claimed := sdl.ClaimWindowForGPUDevice(state.device, state.window)
+	log.assertf(window_claimed, "Failed to claim window for GPU device: %s", sdl.GetError())
 
+	swapchain_parameters_set := sdl.SetGPUSwapchainParameters(
+		state.device,
+		state.window,
+		sdl.GPUSwapchainComposition.SDR,
+		state.enable_vsync ? sdl.GPUPresentMode.VSYNC : sdl.GPUPresentMode.IMMEDIATE,
+	)
 	log.assertf(
-		sdl.SetGPUSwapchainParameters(
-			state.device,
-			state.window,
-			sdl.GPUSwapchainComposition.SDR,
-			state.enable_vsync ? sdl.GPUPresentMode.VSYNC : sdl.GPUPresentMode.IMMEDIATE,
-		),
+		swapchain_parameters_set,
 		"Failed to set GPU swapchain parameters: %s",
 		sdl.GetError(),
 	)
@@ -188,6 +189,7 @@ shutdown :: proc() {
 	state.use_wireframe_mode = false
 	state.use_hydrology_debug_visualization = false
 	state.use_cave_debug_visualization = false
+	state.use_decoration_debug_visualization = false
 }
 
 setup_resources :: proc() {
@@ -241,15 +243,12 @@ setup_resources :: proc() {
 		sdl.GetError(),
 	)
 	defer sdl.DestroyProperties(depth_texture_props)
-	log.assertf(
-		sdl.SetFloatProperty(
-			depth_texture_props,
-			sdl.PROP_GPU_TEXTURE_CREATE_D3D12_CLEAR_DEPTH_FLOAT,
-			DEPTH_CLEAR_VALUE,
-		),
-		"SetFloatProperty depth clear value failed: %s",
-		sdl.GetError(),
+	depth_clear_set := sdl.SetFloatProperty(
+		depth_texture_props,
+		sdl.PROP_GPU_TEXTURE_CREATE_D3D12_CLEAR_DEPTH_FLOAT,
+		DEPTH_CLEAR_VALUE,
 	)
+	log.assertf(depth_clear_set, "SetFloatProperty depth clear value failed: %s", sdl.GetError())
 
 	state.depth_texture = sdl.CreateGPUTexture(
 		state.device,
@@ -275,7 +274,8 @@ destroy_resources :: proc() {
 		return
 	}
 	log.debug("Destroying gfx resources")
-	log.assertf(sdl.WaitForGPUIdle(state.device), "WaitForGPUIdle failed: %s", sdl.GetError())
+	gpu_idle := sdl.WaitForGPUIdle(state.device)
+	log.assertf(gpu_idle, "WaitForGPUIdle failed: %s", sdl.GetError())
 	geometry_destroy(&state.geometry_pool)
 	sdl.ReleaseGPUTexture(state.device, state.depth_texture)
 	sdl.ReleaseGPUGraphicsPipeline(state.device, state.prototype_fill_pipeline)
@@ -307,6 +307,11 @@ hydrology_debug_visualization_toggle :: proc() {
 cave_debug_visualization_toggle :: proc() {
 	state.use_cave_debug_visualization = !state.use_cave_debug_visualization
 	log.debugf("Cave debug visualization: %v", state.use_cave_debug_visualization)
+}
+
+decoration_debug_visualization_toggle :: proc() {
+	state.use_decoration_debug_visualization = !state.use_decoration_debug_visualization
+	log.debugf("Decoration debug visualization: %v", state.use_decoration_debug_visualization)
 }
 
 view_projection_update :: proc() {
@@ -378,10 +383,12 @@ Geometry :: struct {
 	vertex_allocation:   []byte,
 	index_allocation:    []byte,
 	vertex_byte_offset:  u32,
+	vertex_byte_count:   u32,
 	vertex_stride_bytes: u32,
 	vertex_count:        u32,
 	first_index:         u32,
 	index_count:         u32,
+	index_byte_count:    u32,
 }
 
 GeometrySlot :: struct {
@@ -868,10 +875,11 @@ geometry_alloc :: proc(
 
 	index_bytes_wide := u64(index_count) * u64(size_of(u32))
 	log.assertf(
-		index_bytes_wide <= u64(max(int)),
-		"index allocation size exceeds int: %d",
+		index_bytes_wide <= u64(max(u32)),
+		"index allocation size exceeds u32: %d",
 		index_bytes_wide,
 	)
+	index_byte_count := u32(index_bytes_wide)
 
 	vertex_allocation, vertex_err := mem.alloc_bytes_non_zeroed(
 		int(vertex_byte_count),
@@ -928,10 +936,12 @@ geometry_alloc :: proc(
 		vertex_allocation   = vertex_allocation,
 		index_allocation    = index_allocation,
 		vertex_byte_offset  = vertex_byte_offset,
+		vertex_byte_count   = vertex_byte_count,
 		vertex_stride_bytes = vertex_stride_bytes,
 		vertex_count        = vertex_count,
 		first_index         = index_byte_offset / u32(size_of(u32)),
 		index_count         = index_count,
+		index_byte_count    = index_byte_count,
 	}
 	slot.occupied = true
 
@@ -951,13 +961,13 @@ geometry_release :: proc(pool: ^GeometryPool, id: GeometryID) {
 	geometry := slot.geometry
 
 	log.assertf(
-		pool.vertex_byte_count >= u32(len(geometry.vertex_allocation)),
+		pool.vertex_byte_count >= geometry.vertex_byte_count,
 		"geometry vertex byte count underflow",
 	)
 	log.assertf(pool.index_element_count >= geometry.index_count, "geometry index count underflow")
 	log.assertf(pool.geometry_count > 0, "geometry count underflow")
 
-	pool.vertex_byte_count -= u32(len(geometry.vertex_allocation))
+	pool.vertex_byte_count -= geometry.vertex_byte_count
 	pool.index_element_count -= geometry.index_count
 	pool.geometry_count -= 1
 
@@ -986,11 +996,8 @@ geometry_upload_bytes :: proc(
 	)
 	index_bytes := u32(index_bytes_wide)
 
-	log.assertf(
-		vertex_byte_count == u32(len(geometry.vertex_allocation)),
-		"vertex upload size mismatch",
-	)
-	log.assertf(index_bytes == u32(len(geometry.index_allocation)), "index upload size mismatch")
+	log.assertf(vertex_byte_count == geometry.vertex_byte_count, "vertex upload size mismatch")
+	log.assertf(index_bytes == geometry.index_byte_count, "index upload size mismatch")
 	log.assertf(
 		vertex_byte_count <= pool.vertex_upload_byte_capacity,
 		"geometry vertex append exceeds upload buffer capacity",
@@ -1048,11 +1055,8 @@ geometry_upload_bytes :: proc(
 	)
 
 	sdl.EndGPUCopyPass(copy_pass)
-	log.assertf(
-		sdl.SubmitGPUCommandBuffer(upload_cmd_buf),
-		"SubmitGPUCommandBuffer failed: %s",
-		sdl.GetError(),
-	)
+	upload_submitted := sdl.SubmitGPUCommandBuffer(upload_cmd_buf)
+	log.assertf(upload_submitted, "SubmitGPUCommandBuffer failed: %s", sdl.GetError())
 }
 
 geometry_append_bytes :: proc(
@@ -1360,6 +1364,7 @@ terrain_draw_begin :: proc(cmdbuf: ^sdl.GPUCommandBuffer, render_pass: ^sdl.GPUR
 		cast(u32)size_of(matrix[4, 4]f32),
 	)
 	materials := world.TERRAIN_MATERIAL_COLORS
+	materials[5][3] = state.use_decoration_debug_visualization ? f32(1) : f32(0)
 	materials[6][3] = state.use_cave_debug_visualization ? f32(1) : f32(0)
 	materials[7][3] = state.use_hydrology_debug_visualization ? f32(1) : f32(0)
 	sdl.PushGPUFragmentUniformData(
@@ -1478,11 +1483,14 @@ render :: proc() -> RenderStats {
 	log.assertf(cmdbuf != nil, "AcquireGPUCommandBuffer failed: %s", sdl.GetError())
 
 	swapchain_texture: ^sdl.GPUTexture
-	log.assertf(
-		sdl.WaitAndAcquireGPUSwapchainTexture(cmdbuf, state.window, &swapchain_texture, nil, nil),
-		"WaitAndAcquireGPUSwapchainTexture failed: %s",
-		sdl.GetError(),
+	swapchain_acquired := sdl.WaitAndAcquireGPUSwapchainTexture(
+		cmdbuf,
+		state.window,
+		&swapchain_texture,
+		nil,
+		nil,
 	)
+	log.assertf(swapchain_acquired, "WaitAndAcquireGPUSwapchainTexture failed: %s", sdl.GetError())
 
 	if (swapchain_texture != nil) {
 		frustum := camera.frustum_from_camera(state.camera, math.to_radians_f32(FOV), ASPECT_RATIO)
@@ -1558,11 +1566,8 @@ render :: proc() -> RenderStats {
 		log.assertf(fence != nil, "SubmitGPUCommandBufferAndAcquireFence: %s", sdl.GetError())
 		geometry_deferred_releases_attach_pending_to_fence(&state.geometry_pool, fence)
 	} else {
-		log.assertf(
-			sdl.SubmitGPUCommandBuffer(cmdbuf),
-			"SubmitGPUCommandBuffer: %s",
-			sdl.GetError(),
-		)
+		submitted := sdl.SubmitGPUCommandBuffer(cmdbuf)
+		log.assertf(submitted, "SubmitGPUCommandBuffer: %s", sdl.GetError())
 	}
 	geometry_deferred_releases_poll(&state.geometry_pool)
 	state.render_stats.deferred_geometry_count = state.geometry_pool.deferred_release_count

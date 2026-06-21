@@ -25,6 +25,10 @@ TERRAIN_GENERATION_BENCHMARK_CAPTURE_CAVE_SLICES :: #config(
 	TERRAIN_GENERATION_BENCHMARK_CAPTURE_CAVE_SLICES,
 	false,
 )
+TERRAIN_GENERATION_BENCHMARK_CAPTURE_SURFACE_MORPHOLOGY :: #config(
+	TERRAIN_GENERATION_BENCHMARK_CAPTURE_SURFACE_MORPHOLOGY,
+	false,
+)
 
 when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_TARGET_ALL :: 0
@@ -71,6 +75,13 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT :: 96
 	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_STEP_BLOCKS :: i32(2)
 	TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_CHUNK_CACHE_CAPACITY :: 16
+	TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_WIDTH :: 192
+	TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_HEIGHT :: 128
+	TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_STEP_BLOCKS :: i32(4)
+	TERRAIN_GENERATION_BENCHMARK_SURFACE_SHAPE_STEP_BLOCKS :: i32(4)
+	TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_SCAN_Y_MIN :: i32(-96)
+	TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_SCAN_Y_MAX :: i32(160)
+	TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_HEADROOM_BLOCKS :: i32(32)
 	TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH :: 128
 	TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_HEIGHT :: 72
 	TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_MAX_DISTANCE_BLOCKS :: f32(160)
@@ -433,8 +444,22 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 			cave_debug_blocks:       u64,
 			decoration_debug_blocks: u64,
 		}
+		TerrainGenerationBenchmarkSurfaceMorphologyStats :: struct {
+			chunk_count:              u32,
+			active_column_count:      u64,
+			sample_count:             u64,
+			base_solid_count:         u64,
+			morphology_solid_count:   u64,
+			added_solid_count:        u64,
+			removed_solid_count:      u64,
+			unsupported_solid_count:  u64,
+			max_added_height_blocks:  f32,
+			max_removed_depth_blocks: f32,
+		}
 		TerrainGenerationBenchmarkCaveSlicePixels :: [TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_WIDTH *
 		TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_HEIGHT]u8
+		TerrainGenerationBenchmarkSurfaceCapturePixels :: [TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_WIDTH *
+		TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_HEIGHT]u8
 		TerrainGenerationBenchmarkCaveViewPixels :: [TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_WIDTH *
 		TERRAIN_GENERATION_BENCHMARK_CAVE_VIEW_HEIGHT]u8
 
@@ -448,6 +473,11 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 			Route_Endpoint_Plan,
 			Mouth_Longitudinal,
 			Mouth_Plan,
+		}
+		TerrainGenerationBenchmarkSurfaceCaptureMode :: enum u32 {
+			Vertical_XY,
+			Plan_Surface,
+			Morphology_Delta_XY,
 		}
 
 		TerrainGenerationBenchmarkCaveSliceChunkCacheEntry :: struct {
@@ -489,6 +519,19 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 			max_surface_height_blocks:    f32,
 			top_soft_zone_columns:        u32,
 			bottom_soft_zone_columns:     u32,
+		}
+
+		TerrainGenerationBenchmarkSurfaceShapeStats :: struct {
+			column_count:              u32,
+			slope_sample_count:        u32,
+			high_slope_columns:        u32,
+			peak_columns:              u32,
+			valley_columns:            u32,
+			min_surface_height_blocks: f32,
+			max_surface_height_blocks: f32,
+			height_sum_blocks:         f32,
+			abs_slope_sum:             f32,
+			max_abs_slope:             f32,
 		}
 
 		TerrainGenerationBenchmarkSurfaceCaveAnchors :: struct {
@@ -2214,6 +2257,162 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 			}
 		}
 
+		terrain_generation_benchmark_surface_morphology_stats_add_column :: proc(
+			stats: ^TerrainGenerationBenchmarkSurfaceMorphologyStats,
+			key: biomes.FeatureGridKey,
+			column: TerrainBiomeColumn,
+			world_x, chunk_bottom_world_y, chunk_top_world_y, world_z: i32,
+		) {
+			if !terrain_surface_density_column_may_intersect_chunk(
+				column,
+				chunk_bottom_world_y,
+				chunk_top_world_y,
+			) {
+				return
+			}
+			stats.active_column_count += 1
+			morphology_profile := biomes.surface_morphology_profile_for_biome(
+				column.dominant_biome_id,
+			)
+			morphology_shape := terrain_surface_morphology_column_shape_make(
+				key,
+				column,
+				world_x,
+				world_z,
+			)
+			for world_y := chunk_bottom_world_y; world_y <= chunk_top_world_y; world_y += 1 {
+				base_density := terrain_surface_base_density_sample(column, world_y)
+				if base_density < -morphology_profile.band_above_blocks ||
+				   base_density > terrain_surface_density_column_lower_influence_blocks(column) {
+					continue
+				}
+
+				morphology_density := terrain_surface_density_sample_from_shape(
+					column,
+					morphology_shape,
+					world_y,
+				)
+				base_solid := base_density >= 0
+				morphology_solid := morphology_density >= 0
+				stats.sample_count += 1
+				if base_solid {
+					stats.base_solid_count += 1
+				}
+				if morphology_solid {
+					stats.morphology_solid_count += 1
+					below_solid :=
+						terrain_surface_density_sample_from_shape(
+							column,
+							morphology_shape,
+							world_y - 1,
+						) >=
+						0
+					if !below_solid {
+						stats.unsupported_solid_count += 1
+					}
+				}
+				if morphology_solid && !base_solid {
+					stats.added_solid_count += 1
+					stats.max_added_height_blocks = math.max(
+						stats.max_added_height_blocks,
+						-base_density,
+					)
+				}
+				if !morphology_solid && base_solid {
+					stats.removed_solid_count += 1
+					stats.max_removed_depth_blocks = math.max(
+						stats.max_removed_depth_blocks,
+						base_density,
+					)
+				}
+			}
+		}
+
+		terrain_generation_benchmark_surface_morphology_stats_from_coords :: proc(
+			coords: TerrainGenerationBenchmarkCoords,
+			seed: u32,
+		) -> TerrainGenerationBenchmarkSurfaceMorphologyStats {
+			key := terrain_generation_key_make(seed)
+			stats := TerrainGenerationBenchmarkSurfaceMorphologyStats {
+				chunk_count = u32(len(coords)),
+			}
+			for chunk_coord in coords {
+				origin := chunk_origin_from_coord(chunk_coord)
+				region_coord := biomes.generation_region_coord_from_block(
+					origin.x,
+					origin.y,
+					origin.z,
+				)
+				region := terrain_generation_region_for_fill(key, region_coord)
+				for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+					world_z := origin.z + z
+					profile_row_cache := biomes.surface_biome_profile_row_cache_make(key, world_z)
+					for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+						world_x := origin.x + x
+						surface_sample := biomes.surface_biome_field_sample_from_region(
+							&region,
+							world_x,
+							world_z,
+						)
+						hydrology_sample := biomes.hydrology_layer_surface_sample_from_region(
+							&region,
+							world_x,
+							world_z,
+						)
+						evaluation := biomes.surface_biome_profile_evaluate_with_hydrology(
+							key,
+							surface_sample,
+							hydrology_sample,
+							world_x,
+							world_z,
+							&profile_row_cache,
+						)
+						column := terrain_biome_column_from_profile_evaluation(
+							key,
+							evaluation,
+							world_x,
+							world_z,
+						)
+						terrain_generation_benchmark_surface_morphology_stats_add_column(
+							&stats,
+							key,
+							column,
+							world_x,
+							origin.y,
+							origin.y + CHUNK_BLOCK_LENGTH - 1,
+							world_z,
+						)
+					}
+				}
+			}
+			return stats
+		}
+
+		terrain_generation_benchmark_surface_morphology_stats_log :: proc(
+			phase: string,
+			coords: TerrainGenerationBenchmarkCoords,
+			seed: u32,
+		) {
+			stats := terrain_generation_benchmark_surface_morphology_stats_from_coords(
+				coords,
+				seed,
+			)
+			log.infof(
+				"TERRAIN_GENERATION_BENCH_SURFACE_MORPHOLOGY phase=%s chunks=%d active_columns=%d samples=%d base_solid=%d morphology_solid=%d added_solid=%d removed_solid=%d unsupported_solid=%d max_added_height=%.3f max_removed_depth=%.3f",
+				phase,
+				stats.chunk_count,
+				stats.active_column_count,
+				stats.sample_count,
+				stats.base_solid_count,
+				stats.morphology_solid_count,
+				stats.added_solid_count,
+				stats.removed_solid_count,
+				stats.unsupported_solid_count,
+				stats.max_added_height_blocks,
+				stats.max_removed_depth_blocks,
+			)
+		}
+
 		terrain_generation_benchmark_surface_water_stats_from_coords :: proc(
 			coords: TerrainGenerationBenchmarkCoords,
 			seed: u32,
@@ -2402,6 +2601,90 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 				stats.max_unfilled_water_influence,
 				stats.max_unfilled_water_depth,
 				stats.max_floor_depression_blocks,
+			)
+		}
+
+		terrain_generation_benchmark_surface_shape_stats_from_coords :: proc(
+			coords: TerrainGenerationBenchmarkCoords,
+			seed: u32,
+		) -> TerrainGenerationBenchmarkSurfaceShapeStats {
+			key := terrain_generation_key_make(seed)
+			stats := TerrainGenerationBenchmarkSurfaceShapeStats {
+				min_surface_height_blocks = max(f32),
+				max_surface_height_blocks = -max(f32),
+			}
+			step := TERRAIN_GENERATION_BENCHMARK_SURFACE_SHAPE_STEP_BLOCKS
+			step_f32 := f32(step)
+			for chunk_coord in coords {
+				origin := chunk_origin_from_coord(chunk_coord)
+				for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += step {
+					world_z := origin.z + z
+					for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += step {
+						world_x := origin.x + x
+						column := terrain_biome_column_sample_direct(key, world_x, world_z)
+						height := column.surface_height_blocks
+						stats.column_count += 1
+						stats.height_sum_blocks += height
+						stats.min_surface_height_blocks = math.min(
+							stats.min_surface_height_blocks,
+							height,
+						)
+						stats.max_surface_height_blocks = math.max(
+							stats.max_surface_height_blocks,
+							height,
+						)
+						if height >= TERRAIN_SURFACE_HEIGHT_TOP_SOFT_START_BLOCKS - 6 {
+							stats.peak_columns += 1
+						}
+						if height <= biomes.SEA_LEVEL_BLOCKS + 8 {
+							stats.valley_columns += 1
+						}
+
+						east := terrain_biome_column_sample_direct(key, world_x + step, world_z)
+						south := terrain_biome_column_sample_direct(key, world_x, world_z + step)
+						slope_x := math.abs(east.surface_height_blocks - height) / step_f32
+						slope_z := math.abs(south.surface_height_blocks - height) / step_f32
+						local_slope := math.max(slope_x, slope_z)
+						stats.slope_sample_count += 1
+						stats.abs_slope_sum += local_slope
+						stats.max_abs_slope = math.max(stats.max_abs_slope, local_slope)
+						if local_slope >= 0.85 {
+							stats.high_slope_columns += 1
+						}
+					}
+				}
+			}
+			return stats
+		}
+
+		terrain_generation_benchmark_surface_shape_stats_log :: proc(
+			phase: string,
+			coords: TerrainGenerationBenchmarkCoords,
+			seed: u32,
+		) {
+			stats := terrain_generation_benchmark_surface_shape_stats_from_coords(coords, seed)
+			mean_height := f32(0)
+			avg_abs_slope := f32(0)
+			if stats.column_count > 0 {
+				mean_height = stats.height_sum_blocks / f32(stats.column_count)
+			}
+			if stats.slope_sample_count > 0 {
+				avg_abs_slope = stats.abs_slope_sum / f32(stats.slope_sample_count)
+			}
+			height_range := stats.max_surface_height_blocks - stats.min_surface_height_blocks
+			log.infof(
+				"TERRAIN_GENERATION_BENCH_SURFACE_SHAPE phase=%s columns=%d min_height=%.3f max_height=%.3f range=%.3f mean_height=%.3f avg_abs_slope=%.3f max_abs_slope=%.3f high_slope=%d peaks=%d valleys=%d",
+				phase,
+				stats.column_count,
+				stats.min_surface_height_blocks,
+				stats.max_surface_height_blocks,
+				height_range,
+				mean_height,
+				avg_abs_slope,
+				stats.max_abs_slope,
+				stats.high_slope_columns,
+				stats.peak_columns,
+				stats.valley_columns,
 			)
 		}
 
@@ -3888,6 +4171,728 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 				material_stats.cave_debug_blocks,
 				material_stats.decoration_debug_blocks,
 			)
+		}
+
+		when TERRAIN_GENERATION_BENCHMARK_CAPTURE_SURFACE_MORPHOLOGY {
+			terrain_generation_benchmark_surface_capture_chunk_view_get :: proc(
+				cache: ^TerrainGenerationBenchmarkCaveSliceChunkCache,
+				coord: world_async.ChunkCoord,
+				seed: u32,
+				allocator: mem.Allocator,
+			) -> ^world_async.ChunkVoxelView {
+				for i := u32(0); i < cache.count; i += 1 {
+					if cache.entries[i].valid && cache.entries[i].coord == coord {
+						return &cache.entries[i].view
+					}
+				}
+				entry: ^TerrainGenerationBenchmarkCaveSliceChunkCacheEntry
+				if cache.count < TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_CHUNK_CACHE_CAPACITY {
+					entry = &cache.entries[cache.count]
+					cache.count += 1
+				} else {
+					entry = &cache.entries[cache.next_reuse_index]
+					cache.next_reuse_index =
+						(cache.next_reuse_index + 1) %
+						TERRAIN_GENERATION_BENCHMARK_CAVE_SLICE_CHUNK_CACHE_CAPACITY
+				}
+				entry.coord = coord
+				entry.valid = true
+				if len(entry.view.blocks) != CHUNK_BLOCK_COUNT {
+					chunk_voxel_view_alloc(&entry.view, allocator)
+				}
+				terrain_heightfield_voxel_view_fill(&entry.view, coord, seed)
+				return &entry.view
+			}
+
+			terrain_generation_benchmark_surface_capture_pixel_from_view :: proc(
+				view: ^world_async.ChunkVoxelView,
+				local: world_async.BlockCoord,
+			) -> u8 {
+				index := chunk_block_index(u32(local.x), u32(local.y), u32(local.z))
+				palette := terrain_material_palette_index(view.blocks.material_id[index])
+				if palette == TERRAIN_WATER_MAT_ID {
+					return '~'
+				}
+				if view.blocks.occupancy[index] == .Empty {
+					return '.'
+				}
+				switch palette {
+				case TERRAIN_GRASS_MAT_ID:
+					return 'g'
+				case TERRAIN_DIRT_MAT_ID:
+					return 'd'
+				case TERRAIN_WET_MARSH_MAT_ID:
+					return 'm'
+				case TERRAIN_CORRUPTED_ASH_MAT_ID:
+					return 'x'
+				case TERRAIN_AQUIFER_WALL_MAT_ID:
+					return 'a'
+				case TERRAIN_CRYSTAL_MAT_ID:
+					return 'c'
+				}
+				return '#'
+			}
+
+			terrain_generation_benchmark_surface_capture_sample_pixel :: proc(
+				cache: ^TerrainGenerationBenchmarkCaveSliceChunkCache,
+				block: world_async.BlockCoord,
+				seed: u32,
+				allocator: mem.Allocator,
+			) -> u8 {
+				chunk_coord := chunk_coord_from_block_coord(block)
+				view := terrain_generation_benchmark_surface_capture_chunk_view_get(
+					cache,
+					chunk_coord,
+					seed,
+					allocator,
+				)
+				local := block_coord_local_from_chunk_coord(block, chunk_coord)
+				if !chunk_block_coord_is_inside(local.x, local.y, local.z) {
+					return '?'
+				}
+				return terrain_generation_benchmark_surface_capture_pixel_from_view(view, local)
+			}
+
+			terrain_generation_benchmark_surface_capture_highest_pixel_y :: proc(
+				cache: ^TerrainGenerationBenchmarkCaveSliceChunkCache,
+				world_x, world_z: i32,
+				seed: u32,
+				allocator: mem.Allocator,
+			) -> (
+				highest_y: i32,
+				found: bool,
+			) {
+				for world_y := TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_SCAN_Y_MAX;
+				    world_y >= TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_SCAN_Y_MIN;
+				    world_y -= 1 {
+					pixel := terrain_generation_benchmark_surface_capture_sample_pixel(
+						cache,
+						{x = world_x, y = world_y, z = world_z},
+						seed,
+						allocator,
+					)
+					if pixel != '.' {
+						highest_y = world_y
+						found = true
+						return
+					}
+				}
+				return
+			}
+
+			terrain_generation_benchmark_surface_capture_plan_pixel :: proc(
+				cache: ^TerrainGenerationBenchmarkCaveSliceChunkCache,
+				world_x, world_z: i32,
+				seed: u32,
+				allocator: mem.Allocator,
+			) -> u8 {
+				highest_y, found := terrain_generation_benchmark_surface_capture_highest_pixel_y(
+					cache,
+					world_x,
+					world_z,
+					seed,
+					allocator,
+				)
+				if !found {
+					return '.'
+				}
+				return terrain_generation_benchmark_surface_capture_sample_pixel(
+					cache,
+					{x = world_x, y = highest_y, z = world_z},
+					seed,
+					allocator,
+				)
+			}
+
+			terrain_generation_benchmark_surface_capture_column_for_block :: proc(
+				key: biomes.FeatureGridKey,
+				block: world_async.BlockCoord,
+			) -> TerrainBiomeColumn {
+				return terrain_generation_benchmark_surface_capture_column_for_xz(
+					key,
+					block.x,
+					block.z,
+				)
+			}
+
+			terrain_generation_benchmark_surface_capture_column_for_xz :: proc(
+				key: biomes.FeatureGridKey,
+				world_x, world_z: i32,
+			) -> TerrainBiomeColumn {
+				region_coord := biomes.generation_region_coord_from_block(world_x, 0, world_z)
+				region := terrain_generation_region_for_fill(key, region_coord)
+				surface_sample := biomes.surface_biome_field_sample_from_region(
+					&region,
+					world_x,
+					world_z,
+				)
+				hydrology_sample := biomes.hydrology_layer_surface_sample_from_region(
+					&region,
+					world_x,
+					world_z,
+				)
+				profile_row_cache := biomes.surface_biome_profile_row_cache_make(key, world_z)
+				evaluation := biomes.surface_biome_profile_evaluate_with_hydrology(
+					key,
+					surface_sample,
+					hydrology_sample,
+					world_x,
+					world_z,
+					&profile_row_cache,
+				)
+				return terrain_biome_column_from_profile_evaluation(
+					key,
+					evaluation,
+					world_x,
+					world_z,
+				)
+			}
+
+			terrain_generation_benchmark_surface_capture_material_char :: proc(
+				material_id: world_async.BlockMaterialID,
+			) -> u8 {
+				switch terrain_material_palette_index(material_id) {
+				case TERRAIN_GRASS_MAT_ID:
+					return 'g'
+				case TERRAIN_DIRT_MAT_ID:
+					return 'd'
+				case TERRAIN_WET_MARSH_MAT_ID:
+					return 'm'
+				case TERRAIN_WATER_MAT_ID:
+					return '~'
+				case TERRAIN_CORRUPTED_ASH_MAT_ID:
+					return 'x'
+				case TERRAIN_AQUIFER_WALL_MAT_ID:
+					return 'a'
+				case TERRAIN_CRYSTAL_MAT_ID:
+					return 'c'
+				}
+				return '#'
+			}
+
+			terrain_generation_benchmark_surface_capture_shape_pixel_from_column :: proc(
+				key: biomes.FeatureGridKey,
+				column: TerrainBiomeColumn,
+				world_x, world_y, world_z: i32,
+			) -> u8 {
+				world_y_f32 := f32(world_y)
+				if column.water_fill_active &&
+				   world_y_f32 <= column.water_level_blocks &&
+				   world_y_f32 > column.surface_height_blocks {
+					return '~'
+				}
+
+				density := terrain_surface_base_density_sample(column, world_y)
+				profile := biomes.surface_morphology_profile_for_biome(column.dominant_biome_id)
+				if terrain_surface_morphology_effective_strength(column, profile) > 0.001 {
+					shape := terrain_surface_morphology_column_shape_make(
+						key,
+						column,
+						world_x,
+						world_z,
+					)
+					density = terrain_surface_density_sample_from_shape(column, shape, world_y)
+				}
+				if density < 0 {
+					return '.'
+				}
+
+				blocks_below_surface := column.surface_height - world_y
+				material_id := terrain_biome_block_material_id(column, blocks_below_surface)
+				return terrain_generation_benchmark_surface_capture_material_char(material_id)
+			}
+
+			terrain_generation_benchmark_surface_capture_shape_pixel :: proc(
+				key: biomes.FeatureGridKey,
+				block: world_async.BlockCoord,
+			) -> u8 {
+				column := terrain_generation_benchmark_surface_capture_column_for_xz(
+					key,
+					block.x,
+					block.z,
+				)
+				return terrain_generation_benchmark_surface_capture_shape_pixel_from_column(
+					key,
+					column,
+					block.x,
+					block.y,
+					block.z,
+				)
+			}
+
+			terrain_generation_benchmark_surface_capture_shape_highest_y :: proc(
+				key: biomes.FeatureGridKey,
+				world_x, world_z: i32,
+			) -> (
+				highest_y: i32,
+				found: bool,
+			) {
+				column := terrain_generation_benchmark_surface_capture_column_for_xz(
+					key,
+					world_x,
+					world_z,
+				)
+				for world_y := TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_SCAN_Y_MAX;
+				    world_y >= TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_SCAN_Y_MIN;
+				    world_y -= 1 {
+					pixel := terrain_generation_benchmark_surface_capture_shape_pixel_from_column(
+						key,
+						column,
+						world_x,
+						world_y,
+						world_z,
+					)
+					if pixel != '.' {
+						highest_y = world_y
+						found = true
+						return
+					}
+				}
+				return
+			}
+
+			terrain_generation_benchmark_surface_capture_shape_plan_pixel :: proc(
+				key: biomes.FeatureGridKey,
+				world_x, world_z: i32,
+			) -> u8 {
+				highest_y, found := terrain_generation_benchmark_surface_capture_shape_highest_y(
+					key,
+					world_x,
+					world_z,
+				)
+				if !found {
+					return '.'
+				}
+				column := terrain_generation_benchmark_surface_capture_column_for_xz(
+					key,
+					world_x,
+					world_z,
+				)
+				return terrain_generation_benchmark_surface_capture_shape_pixel_from_column(
+					key,
+					column,
+					world_x,
+					highest_y,
+					world_z,
+				)
+			}
+
+			terrain_generation_benchmark_surface_capture_delta_pixel :: proc(
+				key: biomes.FeatureGridKey,
+				block: world_async.BlockCoord,
+			) -> u8 {
+				column := terrain_generation_benchmark_surface_capture_column_for_block(key, block)
+				base_density := terrain_surface_base_density_sample(column, block.y)
+				base_solid := base_density >= 0
+				profile := biomes.surface_morphology_profile_for_biome(column.dominant_biome_id)
+				if column.water_fill_active {
+					block_y_f32 := f32(block.y)
+					if block_y_f32 <= column.water_level_blocks &&
+					   block_y_f32 > column.surface_height_blocks {
+						return '~'
+					}
+					if base_solid {
+						return '#'
+					}
+					return '.'
+				}
+				if terrain_surface_morphology_effective_strength(column, profile) <= 0.001 {
+					if base_solid {
+						return '#'
+					}
+					return '.'
+				}
+
+				shape := terrain_surface_morphology_column_shape_make(
+					key,
+					column,
+					block.x,
+					block.z,
+				)
+				morphology_density := terrain_surface_density_sample_from_shape(
+					column,
+					shape,
+					block.y,
+				)
+				morphology_solid := morphology_density >= 0
+				if morphology_solid && !base_solid {
+					return '+'
+				}
+				if !morphology_solid && base_solid {
+					return '-'
+				}
+				if morphology_solid {
+					return '#'
+				}
+				return '.'
+			}
+
+			terrain_generation_benchmark_surface_capture_vertical_block_coord :: proc(
+				center: world_async.BlockCoord,
+				column, row: i32,
+			) -> world_async.BlockCoord {
+				half_width := i32(TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_WIDTH / 2)
+				half_height := i32(TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_HEIGHT / 2)
+				offset_x :=
+					(column - half_width) *
+					TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_STEP_BLOCKS
+				offset_y :=
+					(row - half_height) * TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_STEP_BLOCKS
+				return {x = center.x + offset_x, y = center.y - offset_y, z = center.z}
+			}
+
+			terrain_generation_benchmark_surface_capture_plan_block_xz :: proc(
+				center: world_async.BlockCoord,
+				column, row: i32,
+			) -> (
+				world_x, world_z: i32,
+			) {
+				half_width := i32(TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_WIDTH / 2)
+				half_height := i32(TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_HEIGHT / 2)
+				world_x =
+					center.x +
+					(column - half_width) *
+						TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_STEP_BLOCKS
+				world_z =
+					center.z +
+					(row - half_height) * TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_STEP_BLOCKS
+				return
+			}
+
+			terrain_generation_benchmark_surface_capture_center_refit_y :: proc(
+				center: world_async.BlockCoord,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) -> world_async.BlockCoord {
+				_ = transient_arena
+				result := center
+				key := terrain_generation_key_make(seed)
+				highest_y, found := terrain_generation_benchmark_surface_capture_shape_highest_y(
+					key,
+					center.x,
+					center.z,
+				)
+				if found {
+					result.y =
+						highest_y - TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_HEADROOM_BLOCKS
+				}
+				return result
+			}
+
+			terrain_generation_benchmark_surface_capture_center_from_coords :: proc(
+				coords: TerrainGenerationBenchmarkCoords,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) -> world_async.BlockCoord {
+				origin := chunk_origin_from_coord(coords[0])
+				center := world_async.BlockCoord {
+					x = origin.x + CHUNK_BLOCK_LENGTH / 2,
+					y = origin.y + CHUNK_BLOCK_LENGTH / 2,
+					z = origin.z + CHUNK_BLOCK_LENGTH / 2,
+				}
+				return terrain_generation_benchmark_surface_capture_center_refit_y(
+					center,
+					seed,
+					transient_arena,
+				)
+			}
+
+			terrain_generation_benchmark_surface_capture_peak_center_find :: proc(
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) -> world_async.BlockCoord {
+				_ = transient_arena
+				key := terrain_generation_key_make(seed)
+				best_center := world_async.BlockCoord{}
+				best_score := -max(f32)
+				found := false
+				for world_z := i32(-2048); world_z <= 2048; world_z += 32 {
+					for world_x := i32(-2048); world_x <= 2048; world_x += 32 {
+						column := terrain_generation_benchmark_surface_capture_column_for_xz(
+							key,
+							world_x,
+							world_z,
+						)
+						if column.water_fill_active {
+							continue
+						}
+						profile := biomes.surface_morphology_profile_for_biome(
+							column.dominant_biome_id,
+						)
+						score := column.surface_height_blocks + profile.strength * 12
+						#partial switch column.dominant_biome_id {
+						case .Basalt_Spire_Highlands, .Corrupted_Ash_Forest:
+							score += 18
+						}
+						if !found || score > best_score {
+							found = true
+							best_score = score
+							best_center = {
+								x = world_x,
+								y = i32(
+									math.floor_f32(column.surface_height_blocks),
+								) - TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_HEADROOM_BLOCKS,
+								z = world_z,
+							}
+						}
+					}
+				}
+				found_text := "false"
+				if found {
+					found_text = "true"
+				}
+				log.infof(
+					"TERRAIN_GENERATION_SURFACE_MORPHOLOGY_PEAK_CENTER found=%s center=(%d,%d,%d) score=%.3f",
+					found_text,
+					best_center.x,
+					best_center.y,
+					best_center.z,
+					best_score,
+				)
+				return best_center
+			}
+
+			terrain_generation_benchmark_surface_capture_count_pixel :: proc(
+				pixel: u8,
+				added_count,
+				removed_count,
+				unchanged_solid_count,
+				unchanged_empty_count,
+				water_count: ^u32,
+			) {
+				switch pixel {
+				case '+':
+					added_count^ += 1
+				case '-':
+					removed_count^ += 1
+				case '~':
+					water_count^ += 1
+				case '.':
+					unchanged_empty_count^ += 1
+				case '?':
+				case:
+					unchanged_solid_count^ += 1
+				}
+			}
+
+			terrain_generation_benchmark_surface_capture_emit :: proc(
+				label: string,
+				mode: TerrainGenerationBenchmarkSurfaceCaptureMode,
+				center: world_async.BlockCoord,
+				seed: u32,
+				transient_arena: ^mem.Arena,
+			) {
+				temp := mem.begin_arena_temp_memory(transient_arena)
+				defer mem.end_arena_temp_memory(temp)
+				allocator := mem.arena_allocator(transient_arena)
+				pixels := new(TerrainGenerationBenchmarkSurfaceCapturePixels, allocator)
+				key := terrain_generation_key_make(seed)
+
+				added_count: u32
+				removed_count: u32
+				unchanged_solid_count: u32
+				unchanged_empty_count: u32
+				water_count: u32
+				for row := i32(0);
+				    row < i32(TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_HEIGHT);
+				    row += 1 {
+					for column := i32(0);
+					    column < i32(TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_WIDTH);
+					    column += 1 {
+						pixel := u8('?')
+						switch mode {
+						case .Plan_Surface:
+							world_x, world_z :=
+								terrain_generation_benchmark_surface_capture_plan_block_xz(
+									center,
+									column,
+									row,
+								)
+							pixel = terrain_generation_benchmark_surface_capture_shape_plan_pixel(
+								key,
+								world_x,
+								world_z,
+							)
+						case .Morphology_Delta_XY:
+							block :=
+								terrain_generation_benchmark_surface_capture_vertical_block_coord(
+									center,
+									column,
+									row,
+								)
+							pixel = terrain_generation_benchmark_surface_capture_delta_pixel(
+								key,
+								block,
+							)
+						case .Vertical_XY:
+							block :=
+								terrain_generation_benchmark_surface_capture_vertical_block_coord(
+									center,
+									column,
+									row,
+								)
+							pixel = terrain_generation_benchmark_surface_capture_shape_pixel(
+								key,
+								block,
+							)
+						}
+						pixel_index :=
+							row * i32(TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_WIDTH) + column
+						pixels[pixel_index] = pixel
+						terrain_generation_benchmark_surface_capture_count_pixel(
+							pixel,
+							&added_count,
+							&removed_count,
+							&unchanged_solid_count,
+							&unchanged_empty_count,
+							&water_count,
+						)
+					}
+				}
+
+				log.infof(
+					"TERRAIN_GENERATION_SURFACE_MORPHOLOGY_SLICE_BEGIN label=%s mode=%v center=(%d,%d,%d) width=%d height=%d step=%d chunks=%d added=%d removed=%d unchanged_solid=%d unchanged_empty=%d water=%d",
+					label,
+					mode,
+					center.x,
+					center.y,
+					center.z,
+					TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_WIDTH,
+					TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_HEIGHT,
+					TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_STEP_BLOCKS,
+					0,
+					added_count,
+					removed_count,
+					unchanged_solid_count,
+					unchanged_empty_count,
+					water_count,
+				)
+				for row := i32(0);
+				    row < i32(TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_HEIGHT);
+				    row += 1 {
+					row_bytes: [TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_WIDTH]u8
+					for column := i32(0);
+					    column < i32(TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_WIDTH);
+					    column += 1 {
+						pixel_index :=
+							row * i32(TERRAIN_GENERATION_BENCHMARK_SURFACE_CAPTURE_WIDTH) + column
+						row_bytes[column] = pixels[pixel_index]
+					}
+					log.infof(
+						"TERRAIN_GENERATION_SURFACE_MORPHOLOGY_SLICE_ROW label=%s mode=%v row=%d data=%s",
+						label,
+						mode,
+						row,
+						string(row_bytes[:]),
+					)
+				}
+				log.infof(
+					"TERRAIN_GENERATION_SURFACE_MORPHOLOGY_SLICE_END label=%s mode=%v",
+					label,
+					mode,
+				)
+			}
+
+			terrain_generation_benchmark_surface_capture_runs_run :: proc(
+				seed: u32,
+				surface_water_coords: TerrainGenerationBenchmarkCoords,
+				surface_cave_coords: TerrainGenerationBenchmarkCoords,
+				surface_cave_anchors: TerrainGenerationBenchmarkSurfaceCaveAnchors,
+				transient_arena: ^mem.Arena,
+			) {
+				water_center := terrain_generation_benchmark_surface_capture_center_from_coords(
+					surface_water_coords,
+					seed,
+					transient_arena,
+				)
+				cave_center := terrain_generation_benchmark_surface_capture_center_from_coords(
+					surface_cave_coords,
+					seed,
+					transient_arena,
+				)
+				if surface_cave_anchors.mouth_found {
+					cave_center = {
+						x = terrain_generation_benchmark_floor_i32(surface_cave_anchors.mouth.x),
+						y = terrain_generation_benchmark_floor_i32(surface_cave_anchors.mouth.y),
+						z = terrain_generation_benchmark_floor_i32(surface_cave_anchors.mouth.z),
+					}
+					cave_center = terrain_generation_benchmark_surface_capture_center_refit_y(
+						cave_center,
+						seed,
+						transient_arena,
+					)
+				}
+				peak_center := terrain_generation_benchmark_surface_capture_peak_center_find(
+					seed,
+					transient_arena,
+				)
+
+				log.info("TERRAIN_GENERATION_SURFACE_MORPHOLOGY_CAPTURE_START")
+				terrain_generation_benchmark_surface_capture_emit(
+					"surface_water_actual_xy",
+					.Vertical_XY,
+					water_center,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_surface_capture_emit(
+					"surface_water_delta_xy",
+					.Morphology_Delta_XY,
+					water_center,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_surface_capture_emit(
+					"surface_water_plan",
+					.Plan_Surface,
+					water_center,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_surface_capture_emit(
+					"surface_cave_actual_xy",
+					.Vertical_XY,
+					cave_center,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_surface_capture_emit(
+					"surface_cave_delta_xy",
+					.Morphology_Delta_XY,
+					cave_center,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_surface_capture_emit(
+					"surface_cave_plan",
+					.Plan_Surface,
+					cave_center,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_surface_capture_emit(
+					"surface_peak_actual_xy",
+					.Vertical_XY,
+					peak_center,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_surface_capture_emit(
+					"surface_peak_delta_xy",
+					.Morphology_Delta_XY,
+					peak_center,
+					seed,
+					transient_arena,
+				)
+				terrain_generation_benchmark_surface_capture_emit(
+					"surface_peak_plan",
+					.Plan_Surface,
+					peak_center,
+					seed,
+					transient_arena,
+				)
+				log.info("TERRAIN_GENERATION_SURFACE_MORPHOLOGY_CAPTURE_END")
+			}
 		}
 
 		when TERRAIN_GENERATION_BENCHMARK_CAPTURE_CAVE_SLICES {
@@ -7999,7 +9004,26 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 				)
 			}
 			if !TERRAIN_GENERATION_BENCHMARK_CAVE_ONLY {
+				when TERRAIN_GENERATION_BENCHMARK_CAPTURE_SURFACE_MORPHOLOGY {
+					terrain_generation_benchmark_surface_capture_runs_run(
+						seed,
+						surface_water_coords,
+						surface_cave_coords,
+						surface_cave_anchors,
+						transient_arena,
+					)
+				}
 				terrain_generation_benchmark_surface_water_stats_log(
+					"surface_water_pre",
+					surface_water_coords,
+					seed,
+				)
+				terrain_generation_benchmark_surface_shape_stats_log(
+					"surface_water_pre",
+					surface_water_coords,
+					seed,
+				)
+				terrain_generation_benchmark_surface_morphology_stats_log(
 					"surface_water_pre",
 					surface_water_coords,
 					seed,
@@ -8013,6 +9037,16 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 					&view,
 					surface_cave_coords,
 					surface_cave_anchors,
+					seed,
+				)
+				terrain_generation_benchmark_surface_shape_stats_log(
+					"surface_cave_pre",
+					surface_cave_coords,
+					seed,
+				)
+				terrain_generation_benchmark_surface_morphology_stats_log(
+					"surface_cave_pre",
+					surface_cave_coords,
 					seed,
 				)
 				terrain_generation_benchmark_surface_cave_mouth_size_stats_log(

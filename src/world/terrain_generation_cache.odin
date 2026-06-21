@@ -2,6 +2,7 @@ package world
 
 import world_async "async:world"
 import "core:log"
+import math "core:math"
 import "core:mem"
 import "core:sync"
 
@@ -91,11 +92,28 @@ terrain_cave_chunk_overlay_mask_set :: proc(
 terrain_cave_chunk_overlay_base_block :: proc(
 	column: TerrainBiomeColumn,
 	world_y: i32,
+	surface_morphology_enabled: bool,
+	surface_shape: TerrainSurfaceMorphologyColumnShape,
+	sample_max_world_y: i32,
 ) -> (
 	occupancy: world_async.BlockOccupancy,
 	material_id: world_async.BlockMaterialID,
 ) {
-	if !terrain_density_surface_is_solid(column, world_y) {
+	solid := false
+	if surface_morphology_enabled {
+		if surface_shape.strength <= 0.001 {
+			solid = terrain_density_surface_is_solid(column, world_y)
+		} else if terrain_density_surface_is_solid(column, world_y) {
+			solid = true
+		} else if world_y > sample_max_world_y {
+			return .Empty, world_async.BlockMaterialID(0)
+		} else {
+			solid = terrain_surface_density_sample_from_shape(column, surface_shape, world_y) >= 0
+		}
+	} else {
+		solid = terrain_density_surface_is_solid(column, world_y)
+	}
+	if !solid {
 		return .Empty, world_async.BlockMaterialID(0)
 	}
 
@@ -106,6 +124,7 @@ terrain_cave_chunk_overlay_base_block :: proc(
 terrain_cave_chunk_overlay_build_from_columns :: proc(
 	overlay: ^TerrainCaveChunkOverlay,
 	final: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
 	chunk_origin: world_async.BlockCoord,
 	columns: []TerrainBiomeColumn,
 ) {
@@ -122,16 +141,36 @@ terrain_cave_chunk_overlay_build_from_columns :: proc(
 	)
 
 	overlay^ = {}
+	surface_morphology_enabled := chunk_origin.y + CHUNK_BLOCK_LENGTH - 1 >= 0
 	for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
-		for y := i32(0); y < CHUNK_BLOCK_LENGTH; y += 1 {
-			world_y := chunk_origin.y + y
-			for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+		for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+			column := columns[x + z * CHUNK_BLOCK_LENGTH]
+			surface_shape: TerrainSurfaceMorphologyColumnShape
+			sample_max_world_y: i32 = -1
+			if surface_morphology_enabled {
+				surface_shape = terrain_surface_morphology_column_shape_make(
+					key,
+					column,
+					chunk_origin.x + x,
+					chunk_origin.z + z,
+				)
+				if surface_shape.strength > 0.001 {
+					sample_max_world_y = i32(
+						math.floor_f32(column.surface_height_blocks + surface_shape.band_above),
+					)
+				}
+			}
+			for y := i32(0); y < CHUNK_BLOCK_LENGTH; y += 1 {
+				world_y := chunk_origin.y + y
 				index := chunk_block_index(u32(x), u32(y), u32(z))
 				final_occupancy := final.blocks.occupancy[index]
 				final_material_id := final.blocks.material_id[index]
 				base_occupancy, base_material_id := terrain_cave_chunk_overlay_base_block(
-					columns[x + z * CHUNK_BLOCK_LENGTH],
+					column,
 					world_y,
+					surface_morphology_enabled,
+					surface_shape,
+					sample_max_world_y,
 				)
 
 				if final_occupancy == .Empty {
@@ -429,7 +468,7 @@ terrain_generation_cave_overlay_cache_store_from_columns :: proc(
 		defer {
 			_ = mem.free(rawptr(overlay), context.allocator)
 		}
-		terrain_cave_chunk_overlay_build_from_columns(overlay, final, chunk_origin, columns)
+		terrain_cave_chunk_overlay_build_from_columns(overlay, final, key, chunk_origin, columns)
 
 		sync.lock(&cache.mutex)
 		defer sync.unlock(&cache.mutex)

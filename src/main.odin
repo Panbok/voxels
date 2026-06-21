@@ -10,6 +10,7 @@ import "core:c"
 import "core:log"
 import math "core:math"
 import "core:mem"
+import "core:os"
 
 //////////////////////////////////////
 // Constants
@@ -24,7 +25,20 @@ AUTO_TEST_DURATION_MS :: #config(AUTO_TEST_DURATION_MS, 0)
 LOG_FRAME_METRICS :: #config(LOG_FRAME_METRICS, false)
 FRAME_METRICS_LOG_INTERVAL_MS :: #config(FRAME_METRICS_LOG_INTERVAL_MS, 1000)
 AUTO_TEST_DISABLE_VSYNC :: #config(AUTO_TEST_DISABLE_VSYNC, false)
-PERSISTENT_SLAB_BYTES :: 448 * mem.Megabyte
+AUTO_CAVE_VIEW :: #config(AUTO_CAVE_VIEW, false)
+AUTO_CAVE_VIEW_DEBUG_MATERIALS :: #config(AUTO_CAVE_VIEW_DEBUG_MATERIALS, false)
+AUTO_CAVE_VIEW_X :: #config(AUTO_CAVE_VIEW_X, 0)
+AUTO_CAVE_VIEW_Y :: #config(AUTO_CAVE_VIEW_Y, 0)
+AUTO_CAVE_VIEW_Z :: #config(AUTO_CAVE_VIEW_Z, 0)
+AUTO_CAVE_VIEW_YAW_DEGREES :: #config(AUTO_CAVE_VIEW_YAW_DEGREES, 0)
+AUTO_CAVE_VIEW_PITCH_DEGREES :: #config(AUTO_CAVE_VIEW_PITCH_DEGREES, 0)
+PERSISTENT_SLAB_BYTES :: 768 * mem.Megabyte
+RESOURCE_GENERATION_WORKER_MAX :: #config(RESOURCE_GENERATION_WORKER_MAX, 6)
+RESOURCE_MESH_WORKER_MAX :: #config(RESOURCE_MESH_WORKER_MAX, 8)
+RESOURCE_MESH_REQUESTS_PER_WORKER :: #config(RESOURCE_MESH_REQUESTS_PER_WORKER, 2)
+#assert(RESOURCE_GENERATION_WORKER_MAX > 0)
+#assert(RESOURCE_MESH_WORKER_MAX > 0)
+#assert(RESOURCE_MESH_REQUESTS_PER_WORKER > 0)
 
 //////////////////////////////////////
 // State Types
@@ -51,6 +65,14 @@ Metrics :: struct {
 	frame_metrics_max_ms:                     f32,
 	frame_metrics_sample_count:               u32,
 	frame_metrics_chunks_generated:           u32,
+	frame_metrics_chunks_generated_full:      u32,
+	frame_metrics_chunks_generated_proxy:     u32,
+	frame_metrics_chunks_refined_full:        u32,
+	frame_metrics_chunks_prewarmed:           u32,
+	frame_metrics_generation_full_us:         u64,
+	frame_metrics_generation_proxy_us:        u64,
+	frame_metrics_generation_refined_full_us: u64,
+	frame_metrics_generation_prewarm_us:      u64,
 	frame_metrics_chunks_evicted:             u32,
 	frame_metrics_mesh_submitted:             u32,
 	frame_metrics_mesh_committed:             u32,
@@ -75,6 +97,14 @@ Metrics :: struct {
 	terrain_triangles_drawn:                  u32,
 	terrain_indices_drawn:                    u32,
 	chunks_generated:                         u32,
+	chunks_generated_full:                    u32,
+	chunks_generated_proxy:                   u32,
+	chunks_refined_full:                      u32,
+	chunks_prewarmed:                         u32,
+	generation_full_us:                       u64,
+	generation_proxy_us:                      u64,
+	generation_refined_full_us:               u64,
+	generation_prewarm_us:                    u64,
 	chunk_mesh_jobs_submitted:                u32,
 	chunk_mesh_results_committed:             u32,
 	chunk_mesh_results_uploaded:              u32,
@@ -97,6 +127,14 @@ Metrics :: struct {
 	prev_terrain_triangles_drawn:             u32,
 	prev_terrain_indices_drawn:               u32,
 	prev_chunks_generated:                    u32,
+	prev_chunks_generated_full:               u32,
+	prev_chunks_generated_proxy:              u32,
+	prev_chunks_refined_full:                 u32,
+	prev_chunks_prewarmed:                    u32,
+	prev_generation_full_us:                  u64,
+	prev_generation_proxy_us:                 u64,
+	prev_generation_refined_full_us:          u64,
+	prev_generation_prewarm_us:               u64,
 	prev_chunk_mesh_jobs_submitted:           u32,
 	prev_chunk_mesh_results_committed:        u32,
 	prev_chunk_mesh_results_uploaded:         u32,
@@ -107,25 +145,33 @@ Metrics :: struct {
 	prev_deferred_release_completed_total:    u64,
 }
 
+RuntimeResourceConfig :: struct {
+	logical_thread_count:    u32,
+	generation_worker_count: u32,
+	mesh_worker_count:       u32,
+	chunk_work_budget:       world.ChunkWorkBudget,
+}
+
 //////////////////////////////////////
 // State
 /////////////////////////////////////
 
 state := struct {
 	// Memory
-	using memory:   Memory,
+	using memory:    Memory,
 
 	// Metrics
-	using metrics:  Metrics,
+	using metrics:   Metrics,
 
 	// Player
-	auto_move_on:   bool,
-	sprint_on:      bool,
+	auto_move_on:    bool,
+	sprint_on:       bool,
 
 	// State variables
-	debug_mode:     bool,
-	enable_vsync:   bool,
-	is_window_open: bool,
+	debug_mode:      bool,
+	enable_vsync:    bool,
+	is_window_open:  bool,
+	resource_config: RuntimeResourceConfig,
 } {
 	auto_move_on   = AUTO_MOVE_STRESS_TEST,
 	sprint_on      = AUTO_MOVE_STRESS_TEST,
@@ -152,6 +198,73 @@ memory_init :: proc() {
 
 	state.transient_allocator = mem.arena_allocator(&state.transient_arena)
 	state.persistent_allocator = mem.arena_allocator(&state.persistent_arena)
+}
+
+//////////////////////////////////////
+// Resource Config Methods
+/////////////////////////////////////
+
+resource_u32_min :: proc(a, b: u32) -> u32 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+resource_u32_max :: proc(a, b: u32) -> u32 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+resource_u32_clamp :: proc(value, min_value, max_value: u32) -> u32 {
+	return resource_u32_min(resource_u32_max(value, min_value), max_value)
+}
+
+resource_logical_thread_count_query :: proc() -> u32 {
+	logical_thread_count := os.get_processor_core_count()
+	if logical_thread_count < 1 {
+		return 1
+	}
+	return u32(logical_thread_count)
+}
+
+runtime_resource_config_make :: proc() -> RuntimeResourceConfig {
+	logical_thread_count := resource_logical_thread_count_query()
+	reserved_thread_count := u32(1)
+	if logical_thread_count >= 6 {
+		reserved_thread_count = 2
+	}
+
+	background_thread_budget := u32(1)
+	if logical_thread_count > reserved_thread_count {
+		background_thread_budget = logical_thread_count - reserved_thread_count
+	}
+	background_thread_budget = resource_u32_max(background_thread_budget, 2)
+
+	generation_worker_count := resource_u32_clamp(
+		background_thread_budget / 3,
+		1,
+		u32(RESOURCE_GENERATION_WORKER_MAX),
+	)
+	mesh_worker_count := resource_u32_clamp(
+		background_thread_budget - generation_worker_count,
+		1,
+		u32(RESOURCE_MESH_WORKER_MAX),
+	)
+
+	return {
+		logical_thread_count = logical_thread_count,
+		generation_worker_count = generation_worker_count,
+		mesh_worker_count = mesh_worker_count,
+		chunk_work_budget = {
+			generation_requests_per_frame = generation_worker_count,
+			generation_results_per_frame = generation_worker_count,
+			mesh_requests_per_frame = mesh_worker_count * u32(RESOURCE_MESH_REQUESTS_PER_WORKER),
+			mesh_results_per_frame = mesh_worker_count,
+		},
+	}
 }
 
 //////////////////////////////////////
@@ -192,6 +305,14 @@ metrics_record_frame :: proc(dt: f32) {
 	state.prev_terrain_triangles_drawn = state.terrain_triangles_drawn
 	state.prev_terrain_indices_drawn = state.terrain_indices_drawn
 	state.prev_chunks_generated = state.chunks_generated
+	state.prev_chunks_generated_full = state.chunks_generated_full
+	state.prev_chunks_generated_proxy = state.chunks_generated_proxy
+	state.prev_chunks_refined_full = state.chunks_refined_full
+	state.prev_chunks_prewarmed = state.chunks_prewarmed
+	state.prev_generation_full_us = state.generation_full_us
+	state.prev_generation_proxy_us = state.generation_proxy_us
+	state.prev_generation_refined_full_us = state.generation_refined_full_us
+	state.prev_generation_prewarm_us = state.generation_prewarm_us
 	state.prev_chunk_mesh_jobs_submitted = state.chunk_mesh_jobs_submitted
 	state.prev_chunk_mesh_results_committed = state.chunk_mesh_results_committed
 	state.prev_chunk_mesh_results_uploaded = state.chunk_mesh_results_uploaded
@@ -213,6 +334,14 @@ metrics_record_frame :: proc(dt: f32) {
 	state.frame_metrics_elapsed_ms += state.current_frame_ms
 	state.frame_metrics_sample_count += 1
 	state.frame_metrics_chunks_generated += state.prev_chunks_generated
+	state.frame_metrics_chunks_generated_full += state.prev_chunks_generated_full
+	state.frame_metrics_chunks_generated_proxy += state.prev_chunks_generated_proxy
+	state.frame_metrics_chunks_refined_full += state.prev_chunks_refined_full
+	state.frame_metrics_chunks_prewarmed += state.prev_chunks_prewarmed
+	state.frame_metrics_generation_full_us += state.prev_generation_full_us
+	state.frame_metrics_generation_proxy_us += state.prev_generation_proxy_us
+	state.frame_metrics_generation_refined_full_us += state.prev_generation_refined_full_us
+	state.frame_metrics_generation_prewarm_us += state.prev_generation_prewarm_us
 	state.frame_metrics_chunks_evicted += state.prev_chunks_evicted
 	state.frame_metrics_mesh_submitted += state.prev_chunk_mesh_jobs_submitted
 	state.frame_metrics_mesh_committed += state.prev_chunk_mesh_results_committed
@@ -231,8 +360,32 @@ metrics_record_frame :: proc(dt: f32) {
 		if state.frame_metrics_elapsed_ms >= f32(FRAME_METRICS_LOG_INTERVAL_MS) {
 			avg_ms := state.frame_metrics_accum_ms / f32(state.frame_metrics_sample_count)
 			avg_fps := avg_ms > 0 ? 1000.0 / avg_ms : 0.0
+			generation_full_avg_us := f64(0)
+			if state.frame_metrics_chunks_generated_full > 0 {
+				generation_full_avg_us =
+					f64(state.frame_metrics_generation_full_us) /
+					f64(state.frame_metrics_chunks_generated_full)
+			}
+			generation_proxy_avg_us := f64(0)
+			if state.frame_metrics_chunks_generated_proxy > 0 {
+				generation_proxy_avg_us =
+					f64(state.frame_metrics_generation_proxy_us) /
+					f64(state.frame_metrics_chunks_generated_proxy)
+			}
+			generation_refined_full_avg_us := f64(0)
+			if state.frame_metrics_chunks_refined_full > 0 {
+				generation_refined_full_avg_us =
+					f64(state.frame_metrics_generation_refined_full_us) /
+					f64(state.frame_metrics_chunks_refined_full)
+			}
+			generation_prewarm_avg_us := f64(0)
+			if state.frame_metrics_chunks_prewarmed > 0 {
+				generation_prewarm_avg_us =
+					f64(state.frame_metrics_generation_prewarm_us) /
+					f64(state.frame_metrics_chunks_prewarmed)
+			}
 			log.infof(
-				"Frame metrics: frame=%d samples=%d avg_ms=%.3f min_ms=%.3f max_ms=%.3f avg_fps=%.1f chunks_generated=%d chunks_evicted=%d mesh_submitted=%d mesh_committed=%d mesh_uploaded=%d dirty_remaining_max=%d draw_units_tested=%d draw_units_frustum_culled=%d draw_units_occlusion_culled=%d draw_units_drawn=%d terrain_triangles_drawn=%d deferred_geometry=%d deferred_enqueued=%d deferred_completed=%d",
+				"Frame metrics: frame=%d samples=%d avg_ms=%.3f min_ms=%.3f max_ms=%.3f avg_fps=%.1f chunks_generated=%d chunks_generated_full=%d chunks_generated_proxy=%d chunks_refined_full=%d chunks_prewarmed=%d generation_full_avg_us=%.1f generation_proxy_avg_us=%.1f generation_refined_full_avg_us=%.1f generation_prewarm_avg_us=%.1f chunks_evicted=%d mesh_submitted=%d mesh_committed=%d mesh_uploaded=%d dirty_remaining_max=%d draw_units_tested=%d draw_units_frustum_culled=%d draw_units_occlusion_culled=%d draw_units_drawn=%d terrain_triangles_drawn=%d deferred_geometry=%d deferred_enqueued=%d deferred_completed=%d",
 				state.frame_count,
 				state.frame_metrics_sample_count,
 				avg_ms,
@@ -240,6 +393,14 @@ metrics_record_frame :: proc(dt: f32) {
 				state.frame_metrics_max_ms,
 				avg_fps,
 				state.frame_metrics_chunks_generated,
+				state.frame_metrics_chunks_generated_full,
+				state.frame_metrics_chunks_generated_proxy,
+				state.frame_metrics_chunks_refined_full,
+				state.frame_metrics_chunks_prewarmed,
+				generation_full_avg_us,
+				generation_proxy_avg_us,
+				generation_refined_full_avg_us,
+				generation_prewarm_avg_us,
 				state.frame_metrics_chunks_evicted,
 				state.frame_metrics_mesh_submitted,
 				state.frame_metrics_mesh_committed,
@@ -261,6 +422,14 @@ metrics_record_frame :: proc(dt: f32) {
 			state.frame_metrics_min_ms = 0
 			state.frame_metrics_max_ms = 0
 			state.frame_metrics_chunks_generated = 0
+			state.frame_metrics_chunks_generated_full = 0
+			state.frame_metrics_chunks_generated_proxy = 0
+			state.frame_metrics_chunks_refined_full = 0
+			state.frame_metrics_chunks_prewarmed = 0
+			state.frame_metrics_generation_full_us = 0
+			state.frame_metrics_generation_proxy_us = 0
+			state.frame_metrics_generation_refined_full_us = 0
+			state.frame_metrics_generation_prewarm_us = 0
 			state.frame_metrics_chunks_evicted = 0
 			state.frame_metrics_mesh_submitted = 0
 			state.frame_metrics_mesh_committed = 0
@@ -286,6 +455,14 @@ metrics_record_frame :: proc(dt: f32) {
 	state.terrain_triangles_drawn = 0
 	state.terrain_indices_drawn = 0
 	state.chunks_generated = 0
+	state.chunks_generated_full = 0
+	state.chunks_generated_proxy = 0
+	state.chunks_refined_full = 0
+	state.chunks_prewarmed = 0
+	state.generation_full_us = 0
+	state.generation_proxy_us = 0
+	state.generation_refined_full_us = 0
+	state.generation_prewarm_us = 0
 	state.chunk_mesh_jobs_submitted = 0
 	state.chunk_mesh_results_committed = 0
 	state.chunk_mesh_results_uploaded = 0
@@ -302,6 +479,15 @@ metrics_record_frame :: proc(dt: f32) {
 
 init :: proc() {
 	log.debug("Init application")
+	state.resource_config = runtime_resource_config_make()
+	log.debugf(
+		"Runtime resource config: logical_threads=%d generation_workers=%d mesh_workers=%d generation_request_budget=%d mesh_request_budget=%d",
+		state.resource_config.logical_thread_count,
+		state.resource_config.generation_worker_count,
+		state.resource_config.mesh_worker_count,
+		state.resource_config.chunk_work_budget.generation_requests_per_frame,
+		state.resource_config.chunk_work_budget.mesh_requests_per_frame,
+	)
 
 	gfx.init(
 		{
@@ -318,6 +504,8 @@ init :: proc() {
 	async.init(
 		{
 			allocator = state.persistent_allocator,
+			generation_worker_count = state.resource_config.generation_worker_count,
+			mesh_worker_count = state.resource_config.mesh_worker_count,
 			generation_execute = world.generation_job_execute_sync,
 			mesh_execute = world.mesh_job_execute_sync,
 		},
@@ -340,6 +528,7 @@ setup_resources :: proc() {
 	world.init(
 		{
 			persistent_allocator = state.persistent_allocator,
+			chunk_work_budget = state.resource_config.chunk_work_budget,
 			generation_request = async.generation_request,
 			generation_poll_results = async.generation_results_poll,
 			mesh_request = async.mesh_request,
@@ -349,12 +538,38 @@ setup_resources :: proc() {
 			chunk_geometry_release = gfx.chunk_geometry_release,
 		},
 	)
+	when AUTO_CAVE_VIEW {
+		auto_cave_view_camera_apply()
+	}
 	when ODIN_DEBUG {
 		world.debug_chunk_edit_contract_checks_run(&state.transient_arena)
 	}
-	world.streaming_update_for_observer(gfx.camera_get().position)
+	cam := gfx.camera_get()
+	world.streaming_update_for_observer(cam.position)
 
 	log.debug("Resources initialized")
+}
+
+when AUTO_CAVE_VIEW {
+	auto_cave_view_camera_apply :: proc() {
+		cam := gfx.camera_get()
+		cam.position = {f32(AUTO_CAVE_VIEW_X), f32(AUTO_CAVE_VIEW_Y), f32(AUTO_CAVE_VIEW_Z)}
+		cam.yaw = math.to_radians_f32(f32(AUTO_CAVE_VIEW_YAW_DEGREES))
+		cam.pitch = math.to_radians_f32(f32(AUTO_CAVE_VIEW_PITCH_DEGREES))
+		camera.vectors_update(cam)
+		when AUTO_CAVE_VIEW_DEBUG_MATERIALS {
+			gfx.cave_debug_visualization_toggle()
+		}
+		log.debugf(
+			"Auto cave view camera: position=(%.2f,%.2f,%.2f) yaw=%d pitch=%d cave_debug=%v",
+			cam.position[0],
+			cam.position[1],
+			cam.position[2],
+			AUTO_CAVE_VIEW_YAW_DEGREES,
+			AUTO_CAVE_VIEW_PITCH_DEGREES,
+			AUTO_CAVE_VIEW_DEBUG_MATERIALS,
+		)
+	}
 }
 
 destroy_resources :: proc() {
@@ -390,6 +605,10 @@ process_events :: proc() {
 					gfx.cave_debug_visualization_toggle()
 				}
 
+				if event.key.scancode == sdl.Scancode.F3 && !event.key.repeat {
+					gfx.decoration_debug_visualization_toggle()
+				}
+
 				if event.key.scancode == sdl.Scancode.L && !event.key.repeat {
 					state.auto_move_on = !state.auto_move_on
 				}
@@ -400,11 +619,15 @@ process_events :: proc() {
 
 				if event.key.scancode == sdl.Scancode.I && !event.key.repeat {
 					log.debugf(
-						"Debug info: streaming_center=(%d,%d,%d), streaming_targets=%d, chunks_total=%d, chunks_without_geometry=%d, chunks_frustum_culled=%d, chunks_drawn=%d, draw_units_tested=%d, draw_units_frustum_culled=%d, draw_units_occlusion_culled=%d, draw_units_drawn=%d, terrain_faces_drawn=%d, terrain_triangles_drawn=%d, terrain_indices_drawn=%d, chunks_generated=%d, chunks_evicted=%d, chunk_mesh_jobs_submitted=%d, chunk_mesh_results_committed=%d, chunk_mesh_results_uploaded=%d, chunks_dirty_remaining=%d",
+						"Debug info: streaming_center=(%d,%d,%d), streaming_targets=%d, streaming_prewarm_targets=%d, streaming_prewarm_inflight=%d, streaming_radius_y_down=%d, streaming_radius_y_up=%d, chunks_total=%d, chunks_without_geometry=%d, chunks_frustum_culled=%d, chunks_drawn=%d, draw_units_tested=%d, draw_units_frustum_culled=%d, draw_units_occlusion_culled=%d, draw_units_drawn=%d, terrain_faces_drawn=%d, terrain_triangles_drawn=%d, terrain_indices_drawn=%d, chunks_generated=%d, chunks_generated_full=%d, chunks_generated_proxy=%d, chunks_refined_full=%d, chunks_prewarmed=%d, chunks_evicted=%d, chunk_mesh_jobs_submitted=%d, chunk_mesh_results_committed=%d, chunk_mesh_results_uploaded=%d, chunks_dirty_remaining=%d",
 						world.streaming_center_coord().x,
 						world.streaming_center_coord().y,
 						world.streaming_center_coord().z,
 						world.streaming_target_count(),
+						world.streaming_prewarm_target_count(),
+						world.streaming_prewarm_inflight_count(),
+						world.streaming_radius_y_down(),
+						world.streaming_radius_y_up(),
 						state.prev_chunks_total,
 						state.prev_chunks_without_geometry,
 						state.prev_chunks_frustum_culled,
@@ -417,6 +640,10 @@ process_events :: proc() {
 						state.prev_terrain_triangles_drawn,
 						state.prev_terrain_indices_drawn,
 						state.prev_chunks_generated,
+						state.prev_chunks_generated_full,
+						state.prev_chunks_generated_proxy,
+						state.prev_chunks_refined_full,
+						state.prev_chunks_prewarmed,
 						state.prev_chunks_evicted,
 						state.prev_chunk_mesh_jobs_submitted,
 						state.prev_chunk_mesh_results_committed,
@@ -449,6 +676,14 @@ update :: proc() {
 	streaming_stats := world.streaming_update_budgeted(cam.position)
 	state.chunks_evicted = streaming_stats.chunks_evicted
 	state.chunks_generated = streaming_stats.chunks_generated
+	state.chunks_generated_full = streaming_stats.chunks_generated_full
+	state.chunks_generated_proxy = streaming_stats.chunks_generated_proxy
+	state.chunks_refined_full = streaming_stats.chunks_refined_full
+	state.chunks_prewarmed = streaming_stats.chunks_prewarmed
+	state.generation_full_us = streaming_stats.generation_full_us
+	state.generation_proxy_us = streaming_stats.generation_proxy_us
+	state.generation_refined_full_us = streaming_stats.generation_refined_full_us
+	state.generation_prewarm_us = streaming_stats.generation_prewarm_us
 	state.chunk_mesh_jobs_submitted = streaming_stats.chunk_mesh_jobs_submitted
 	state.chunk_mesh_results_committed = streaming_stats.chunk_mesh_results_committed
 	state.chunk_mesh_results_uploaded = streaming_stats.chunk_mesh_results_uploaded
@@ -507,11 +742,28 @@ main :: proc() {
 			return
 		}
 
+		when world.RUN_TERRAIN_GENERATION_BENCHMARK {
+			world.terrain_generation_benchmark_runs_run(
+				&state.transient_arena,
+				world.TERRAIN_GENERATION_BENCHMARK_ITERATIONS,
+			)
+			return
+		}
+
 		when gfx.RUN_CULLING_BENCHMARK {
 			gfx.culling_benchmark_runs_run(
 				gfx.CULLING_BENCHMARK_ITERATIONS,
 				state.persistent_allocator,
 				&state.transient_arena,
+			)
+			return
+		}
+	}
+	when !ODIN_DEBUG {
+		when world.RUN_TERRAIN_GENERATION_BENCHMARK {
+			world.terrain_generation_benchmark_runs_run(
+				&state.transient_arena,
+				world.TERRAIN_GENERATION_BENCHMARK_ITERATIONS,
 			)
 			return
 		}

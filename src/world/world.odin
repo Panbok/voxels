@@ -493,6 +493,8 @@ when TERRAIN_GENERATION_PROFILE_PHASES {
 		clear:                                       time.Duration,
 		region:                                      time.Duration,
 		columns:                                     time.Duration,
+		column_cache:                                time.Duration,
+		base_fill:                                   time.Duration,
 		cave_field:                                  time.Duration,
 		cave_field_scan:                             time.Duration,
 		cave_field_network:                          time.Duration,
@@ -555,6 +557,8 @@ when TERRAIN_GENERATION_PROFILE_PHASES {
 		decoration_family_candidates:                [biomes.DECORATION_FAMILY_COUNT]u64,
 		decoration_family_accepted:                  [biomes.DECORATION_FAMILY_COUNT]u64,
 		decoration_family_blocks:                    [biomes.DECORATION_FAMILY_COUNT]u64,
+		surface_morphology_chunks:                   u64,
+		surface_heightfield_chunks:                  u64,
 	}
 
 	terrain_generation_profile_stats: TerrainGenerationProfileStats
@@ -592,6 +596,14 @@ when TERRAIN_GENERATION_PROFILE_PHASES {
 			time.duration_milliseconds(stats.network_edges),
 			time.duration_milliseconds(stats.network_bridges),
 			time.duration_milliseconds(stats.network_anchors),
+		)
+		log.infof(
+			"TERRAIN_GENERATION_PROFILE_SURFACE_FILL phase=%s column_cache_ms=%.3f base_fill_ms=%.3f morphology_chunks=%d heightfield_chunks=%d",
+			phase,
+			time.duration_milliseconds(stats.column_cache),
+			time.duration_milliseconds(stats.base_fill),
+			stats.surface_morphology_chunks,
+			stats.surface_heightfield_chunks,
 		)
 		log.infof(
 			"TERRAIN_GENERATION_PROFILE_NODE phase=%s node_rooms_ms=%.3f node_perimeter_ms=%.3f node_satellites_ms=%.3f node_portals_ms=%.3f",
@@ -1395,11 +1407,19 @@ TERRAIN_MATERIAL_FACE_VARIANT_COUNT :: 32
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == 8)
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == world_async.TERRAIN_MATERIAL_PALETTE_COUNT)
 #assert(TERRAIN_MATERIAL_FACE_VARIANT_COUNT == 32)
-TERRAIN_GENERATOR_VERSION :: #config(TERRAIN_GENERATOR_VERSION, u32(8))
+TERRAIN_GENERATOR_VERSION :: #config(TERRAIN_GENERATOR_VERSION, u32(9))
 TERRAIN_GRASS_CAP_BLOCK_DEPTH :: 4
 TERRAIN_DIRT_LAYER_BLOCK_DEPTH :: 4
 TERRAIN_SURFACE_MATERIAL_BLEND_SALT :: u64(0x475c91d2e03af86b)
 TERRAIN_SHORE_MATERIAL_BLEND_SALT :: u64(0xa65f9d2c8b7140e3)
+TERRAIN_SURFACE_MORPHOLOGY_WARP_X_SALT :: u64(0x5c8ec1a76d4932bf)
+TERRAIN_SURFACE_MORPHOLOGY_WARP_Y_SALT :: u64(0xaef37d148b6c5091)
+TERRAIN_SURFACE_MORPHOLOGY_WARP_Z_SALT :: u64(0x39bf4d207ae158c6)
+TERRAIN_SURFACE_MORPHOLOGY_BROAD_SALT :: u64(0xd2476f9a31b80e54)
+TERRAIN_SURFACE_MORPHOLOGY_FINE_SALT :: u64(0x7ea9c32158f4bd06)
+TERRAIN_SURFACE_MORPHOLOGY_RIDGE_SALT :: u64(0x91b68f0cd24735ae)
+TERRAIN_SURFACE_MORPHOLOGY_SPIRE_SALT :: u64(0xc42d87a59f3016be)
+TERRAIN_SURFACE_MORPHOLOGY_SHELF_SALT :: u64(0x164fd73a8c9e250b)
 TERRAIN_SHORE_MATERIAL_DITHER_AMPLITUDE :: f32(0.25)
 TERRAIN_SHORE_CAP_THIN_BAND_FRACTION :: f32(0.56)
 TERRAIN_LOCAL_WATER_FILL_INFLUENCE_MIN :: f32(0.30)
@@ -2561,6 +2581,16 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 		terrain_generation_profile_stats.region += time.tick_since(profile_stage_start)
 		profile_stage_start = time.tick_now()
 	}
+	profile_column_cache_start: time.Tick
+	profile_base_fill_start: time.Tick
+	when TERRAIN_GENERATION_PROFILE_PHASES {
+		profile_column_cache_start = time.tick_now()
+	}
+	when !TERRAIN_GENERATION_PROFILE_PHASES {
+		_ = profile_column_cache_start
+		_ = profile_base_fill_start
+	}
+
 	column_targets: [CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH]TerrainBiomeColumn
 	if !terrain_generation_column_cache_try_read(column_targets[:], key, chunk) {
 		for z in 0 ..< CHUNK_BLOCK_LENGTH {
@@ -2593,16 +2623,36 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 		terrain_generation_column_cache_store(column_targets[:], key, chunk)
 	}
 	block_fill_done := false
+	chunk_bottom_world_y := origin.y
+	chunk_top_world_y := origin.y + CHUNK_BLOCK_LENGTH - 1
+	surface_morphology_enabled := chunk_top_world_y >= 0
+	when TERRAIN_GENERATION_PROFILE_PHASES {
+		terrain_generation_profile_stats.column_cache += time.tick_since(
+			profile_column_cache_start,
+		)
+		profile_base_fill_start = time.tick_now()
+		if surface_morphology_enabled {
+			terrain_generation_profile_stats.surface_morphology_chunks += 1
+		} else {
+			terrain_generation_profile_stats.surface_heightfield_chunks += 1
+		}
+	}
 	if !TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
-		chunk_top_world_y := origin.y + CHUNK_BLOCK_LENGTH - 1
 		all_deep_stone := true
 		for i in 0 ..< CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH {
 			column := column_targets[i]
-			if !terrain_density_surface_is_solid(column, chunk_top_world_y) ||
-			   column.surface_height - chunk_top_world_y <
-				   column.surface_layer_depth + TERRAIN_DIRT_LAYER_BLOCK_DEPTH {
-				all_deep_stone = false
-				break
+			if surface_morphology_enabled {
+				if !terrain_surface_density_column_is_deep_stone_chunk(column, chunk_top_world_y) {
+					all_deep_stone = false
+					break
+				}
+			} else {
+				if !terrain_density_surface_is_solid(column, chunk_top_world_y) ||
+				   column.surface_height - chunk_top_world_y <
+					   column.surface_layer_depth + TERRAIN_DIRT_LAYER_BLOCK_DEPTH {
+					all_deep_stone = false
+					break
+				}
 			}
 		}
 		if all_deep_stone {
@@ -2627,13 +2677,19 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 				if TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
 					cave_debug_material_active = (cave_debug_columns[z] & (u64(1) << u32(x))) != 0
 				}
-				chunk_bottom_world_y := origin.y
-				chunk_top_world_y := origin.y + CHUNK_BLOCK_LENGTH - 1
-				if !terrain_density_surface_is_solid(column, chunk_bottom_world_y) {
-					continue
+				deep_stone_column := false
+				if surface_morphology_enabled {
+					deep_stone_column = terrain_surface_density_column_is_deep_stone_chunk(
+						column,
+						chunk_top_world_y,
+					)
+				} else {
+					deep_stone_column =
+						terrain_density_surface_is_solid(column, chunk_top_world_y) &&
+						column.surface_height - chunk_top_world_y >=
+							column.surface_layer_depth + TERRAIN_DIRT_LAYER_BLOCK_DEPTH
 				}
-				if column.surface_height - chunk_top_world_y >=
-				   column.surface_layer_depth + TERRAIN_DIRT_LAYER_BLOCK_DEPTH {
+				if deep_stone_column {
 					material_id := world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
 					if TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
 						if column.hydrology_debug_material_active {
@@ -2650,7 +2706,136 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 					}
 					continue
 				}
+				if surface_morphology_enabled {
+					if !terrain_surface_density_column_may_intersect_chunk(
+						column,
+						chunk_bottom_world_y,
+						chunk_top_world_y,
+					) {
+						continue
+					}
+				} else {
+					if !terrain_density_surface_is_solid(column, chunk_bottom_world_y) {
+						continue
+					}
+				}
 
+				if surface_morphology_enabled {
+					surface_shape := terrain_surface_morphology_column_shape_make(
+						key,
+						column,
+						origin.x + i32(x),
+						origin.z + i32(z),
+					)
+					if surface_shape.strength <= 0.001 {
+						heightfield_top_y := math.min(
+							CHUNK_BLOCK_LENGTH - 1,
+							column.surface_height - origin.y,
+						)
+						if heightfield_top_y >= 0 {
+							for y in 0 ..= heightfield_top_y {
+								world_y := origin.y + i32(y)
+								blocks_below_surface := column.surface_height - world_y
+								material_id := terrain_biome_block_material_id(
+									column,
+									blocks_below_surface,
+								)
+								if TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
+									if column.hydrology_debug_material_active {
+										material_id = terrain_hydrology_debug_material_id(
+											material_id,
+										)
+									}
+									if cave_debug_material_active &&
+									   !column.hydrology_debug_material_active {
+										material_id = terrain_cave_anchor_debug_material_id(
+											material_id,
+										)
+									}
+								}
+
+								index := chunk_block_index(u32(x), u32(y), u32(z))
+								view.blocks.occupancy[index] = .Solid
+								view.blocks.material_id[index] = material_id
+							}
+						}
+						continue
+					}
+					sample_max_world_y := i32(
+						math.floor_f32(column.surface_height_blocks + surface_shape.band_above),
+					)
+					heightfield_top_y := math.min(
+						CHUNK_BLOCK_LENGTH - 1,
+						column.surface_height - origin.y,
+					)
+					if heightfield_top_y >= 0 {
+						for y in 0 ..= heightfield_top_y {
+							world_y := origin.y + i32(y)
+							blocks_below_surface := column.surface_height - world_y
+							material_id := terrain_biome_block_material_id(
+								column,
+								blocks_below_surface,
+							)
+							if TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
+								if column.hydrology_debug_material_active {
+									material_id = terrain_hydrology_debug_material_id(material_id)
+								}
+								if cave_debug_material_active &&
+								   !column.hydrology_debug_material_active {
+									material_id = terrain_cave_anchor_debug_material_id(
+										material_id,
+									)
+								}
+							}
+
+							index := chunk_block_index(u32(x), u32(y), u32(z))
+							view.blocks.occupancy[index] = .Solid
+							view.blocks.material_id[index] = material_id
+						}
+					}
+
+					sample_min_y := math.clamp(heightfield_top_y + 1, 0, CHUNK_BLOCK_LENGTH)
+					sample_max_y := math.clamp(
+						sample_max_world_y - origin.y,
+						-1,
+						CHUNK_BLOCK_LENGTH - 1,
+					)
+					if sample_min_y <= sample_max_y {
+						for y := sample_min_y; y <= sample_max_y; y += 1 {
+							world_y := origin.y + i32(y)
+							if terrain_surface_density_sample_from_shape(
+								   column,
+								   surface_shape,
+								   world_y,
+							   ) <
+							   0 {
+								continue
+							}
+
+							blocks_below_surface := column.surface_height - world_y
+							material_id := terrain_biome_block_material_id(
+								column,
+								blocks_below_surface,
+							)
+							if TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
+								if column.hydrology_debug_material_active {
+									material_id = terrain_hydrology_debug_material_id(material_id)
+								}
+								if cave_debug_material_active &&
+								   !column.hydrology_debug_material_active {
+									material_id = terrain_cave_anchor_debug_material_id(
+										material_id,
+									)
+								}
+							}
+
+							index := chunk_block_index(u32(x), u32(y), u32(z))
+							view.blocks.occupancy[index] = .Solid
+							view.blocks.material_id[index] = material_id
+						}
+					}
+					continue
+				}
 				for y in 0 ..< CHUNK_BLOCK_LENGTH {
 					world_y := origin.y + i32(y)
 
@@ -2677,6 +2862,7 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 		}
 	}
 	when TERRAIN_GENERATION_PROFILE_PHASES {
+		terrain_generation_profile_stats.base_fill += time.tick_since(profile_base_fill_start)
 		terrain_generation_profile_stats.columns += time.tick_since(profile_stage_start)
 		profile_stage_start = time.tick_now()
 	}

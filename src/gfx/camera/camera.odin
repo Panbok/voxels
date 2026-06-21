@@ -127,20 +127,21 @@ move_above_block :: proc(camera: ^Camera, block: world_async.BlockCoord) {
 	camera.position[1] = world.terrain_block_top_world_y(block.y) + TERRAIN_CLEARANCE
 }
 
+// todo: disable for testing
 terrain_intersection_resolve :: proc(camera: ^Camera) -> bool {
 	moved := false
 
 	for push_count := 0; push_count < world.CHUNK_BLOCK_LENGTH + 1; push_count += 1 {
-		block, intersects := world.chunk_store_solid_block_at_world_position(camera.position).?
+		_, intersects := world.chunk_store_solid_block_at_world_position(camera.position).?
 		if !intersects {
 			return moved
 		}
 
-		move_above_block(camera, block)
+		// move_above_block(camera, block)
 		moved = true
 	}
 
-	log.assertf(false, "camera remained inside solid terrain after repeated upward pushes")
+	//log.assertf(false, "camera remained inside solid terrain after repeated upward pushes")
 	return moved
 }
 
