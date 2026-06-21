@@ -39,8 +39,10 @@ float4 main(FragmentInput input) : SV_Target0
     uint palette_index = input.material_id & 7u;
     bool cave_debug_on = terrain_materials.colors[6].a > 0.5f;
     bool hydrology_debug_on = terrain_materials.colors[7].a > 0.5f;
+    bool decoration_debug_on = terrain_materials.colors[5].a > 0.5f;
     bool hydrology_marked = (input.material_id & 8u) != 0u;
     bool cave_network_marked = (input.material_id & 16u) != 0u;
+    bool decoration_marked = hydrology_marked && cave_network_marked;
     float3 color = terrain_materials.colors[palette_index].rgb * face_shade(input.normal_id);
 
     if (hydrology_debug_on && hydrology_marked)
@@ -51,6 +53,11 @@ float4 main(FragmentInput input) : SV_Target0
     if (cave_debug_on && cave_network_marked)
     {
         color = float3(0.0f, 0.85f, 1.0f) * face_shade(input.normal_id);
+    }
+
+    if (decoration_debug_on && decoration_marked)
+    {
+        color = float3(1.0f, 0.78f, 0.05f) * face_shade(input.normal_id);
     }
 
     if (input.normal_id >= 6u)

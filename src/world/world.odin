@@ -488,69 +488,73 @@ TERRAIN_CAVE_EDGE_CHUNK_INTERSECT_SEAM_PADDING_BLOCKS :: #config(
 
 when TERRAIN_GENERATION_PROFILE_PHASES {
 	TerrainGenerationProfileStats :: struct {
-		chunk_count:                               u64,
-		total:                                     time.Duration,
-		clear:                                     time.Duration,
-		region:                                    time.Duration,
-		columns:                                   time.Duration,
-		cave_field:                                time.Duration,
-		cave_field_scan:                           time.Duration,
-		cave_field_network:                        time.Duration,
-		cave_field_path:                           time.Duration,
-		cave_field_pocket_throat:                  time.Duration,
-		cave_field_pocket_cluster:                 time.Duration,
-		cave_field_chamber:                        time.Duration,
-		cave_field_bridge:                         time.Duration,
-		route_pocket_cluster_rows_scanned:         u64,
-		route_pocket_cluster_rows_box:             u64,
-		route_pocket_cluster_voxel_candidates:     u64,
-		route_pocket_cluster_carveable_candidates: u64,
-		route_pocket_cluster_shape_candidates:     u64,
-		route_pocket_cluster_worley_candidates:    u64,
-		cave_network:                              time.Duration,
-		water:                                     time.Duration,
-		decoration:                                time.Duration,
-		network_connectivity:                      time.Duration,
-		network_nodes:                             time.Duration,
-		network_edges:                             time.Duration,
-		network_bridges:                           time.Duration,
-		network_anchors:                           time.Duration,
-		node_rooms:                                time.Duration,
-		node_perimeter:                            time.Duration,
-		node_satellites:                           time.Duration,
-		node_portals:                              time.Duration,
-		node_satellite_direct:                     time.Duration,
-		node_satellite_apron:                      time.Duration,
-		node_satellite_cluster:                    time.Duration,
-		edge_core:                                 time.Duration,
-		edge_approach:                             time.Duration,
-		edge_braids:                               time.Duration,
-		edge_bypasses:                             time.Duration,
-		edge_alcoves:                              time.Duration,
-		edge_chamberlets:                          time.Duration,
-		edge_seams:                                time.Duration,
-		edge_core_segment_calls:                   u64,
-		edge_core_segment_bounds_hits:             u64,
-		edge_core_rows_scanned:                    u64,
-		edge_core_rows_projected:                  u64,
-		edge_core_rows_capsule:                    u64,
-		edge_core_voxel_candidates:                u64,
-		edge_core_carveable_candidates:            u64,
-		edge_core_shape_candidates:                u64,
-		edge_core_noise_candidates:                u64,
-		edge_core_threshold_candidates:            u64,
-		carve_attempts:                            u64,
-		carve_successes:                           u64,
-		wall_neighbor_checks:                      u64,
-		wall_neighbor_writes:                      u64,
-		decoration_surface_candidates:             u64,
-		decoration_surface_accepted:               u64,
-		decoration_cave_candidates:                u64,
-		decoration_cave_accepted:                  u64,
-		decoration_blocks_written:                 u64,
-		decoration_family_candidates:              [biomes.DECORATION_FAMILY_COUNT]u64,
-		decoration_family_accepted:                [biomes.DECORATION_FAMILY_COUNT]u64,
-		decoration_family_blocks:                  [biomes.DECORATION_FAMILY_COUNT]u64,
+		chunk_count:                                 u64,
+		total:                                       time.Duration,
+		clear:                                       time.Duration,
+		region:                                      time.Duration,
+		columns:                                     time.Duration,
+		cave_field:                                  time.Duration,
+		cave_field_scan:                             time.Duration,
+		cave_field_network:                          time.Duration,
+		cave_field_path:                             time.Duration,
+		cave_field_pocket_throat:                    time.Duration,
+		cave_field_pocket_cluster:                   time.Duration,
+		cave_field_chamber:                          time.Duration,
+		cave_field_bridge:                           time.Duration,
+		route_pocket_cluster_rows_scanned:           u64,
+		route_pocket_cluster_rows_box:               u64,
+		route_pocket_cluster_voxel_candidates:       u64,
+		route_pocket_cluster_carveable_candidates:   u64,
+		route_pocket_cluster_shape_candidates:       u64,
+		route_pocket_cluster_worley_candidates:      u64,
+		cave_network:                                time.Duration,
+		water:                                       time.Duration,
+		decoration:                                  time.Duration,
+		network_connectivity:                        time.Duration,
+		network_nodes:                               time.Duration,
+		network_edges:                               time.Duration,
+		network_bridges:                             time.Duration,
+		network_anchors:                             time.Duration,
+		node_rooms:                                  time.Duration,
+		node_perimeter:                              time.Duration,
+		node_satellites:                             time.Duration,
+		node_portals:                                time.Duration,
+		node_satellite_direct:                       time.Duration,
+		node_satellite_apron:                        time.Duration,
+		node_satellite_cluster:                      time.Duration,
+		edge_core:                                   time.Duration,
+		edge_approach:                               time.Duration,
+		edge_braids:                                 time.Duration,
+		edge_bypasses:                               time.Duration,
+		edge_alcoves:                                time.Duration,
+		edge_chamberlets:                            time.Duration,
+		edge_seams:                                  time.Duration,
+		edge_core_segment_calls:                     u64,
+		edge_core_segment_bounds_hits:               u64,
+		edge_core_rows_scanned:                      u64,
+		edge_core_rows_projected:                    u64,
+		edge_core_rows_capsule:                      u64,
+		edge_core_voxel_candidates:                  u64,
+		edge_core_carveable_candidates:              u64,
+		edge_core_shape_candidates:                  u64,
+		edge_core_noise_candidates:                  u64,
+		edge_core_threshold_candidates:              u64,
+		carve_attempts:                              u64,
+		carve_successes:                             u64,
+		wall_neighbor_checks:                        u64,
+		wall_neighbor_writes:                        u64,
+		decoration_surface_candidates:               u64,
+		decoration_surface_accepted:                 u64,
+		decoration_surface_tree_instances_attempted: u64,
+		decoration_surface_tree_instances_accepted:  u64,
+		decoration_surface_tree_root_rejected:       u64,
+		decoration_surface_tree_shape_rejected:      u64,
+		decoration_cave_candidates:                  u64,
+		decoration_cave_accepted:                    u64,
+		decoration_blocks_written:                   u64,
+		decoration_family_candidates:                [biomes.DECORATION_FAMILY_COUNT]u64,
+		decoration_family_accepted:                  [biomes.DECORATION_FAMILY_COUNT]u64,
+		decoration_family_blocks:                    [biomes.DECORATION_FAMILY_COUNT]u64,
 	}
 
 	terrain_generation_profile_stats: TerrainGenerationProfileStats
@@ -668,7 +672,15 @@ when TERRAIN_GENERATION_PROFILE_PHASES {
 			stats.decoration_blocks_written,
 		)
 		log.infof(
-			"TERRAIN_GENERATION_PROFILE_DECORATION_FAMILY phase=%s baseline_candidates=%d baseline_accepted=%d baseline_blocks=%d dead_ash_candidates=%d dead_ash_accepted=%d dead_ash_blocks=%d fungal_candidates=%d fungal_accepted=%d fungal_blocks=%d crystal_candidates=%d crystal_accepted=%d crystal_blocks=%d",
+			"TERRAIN_GENERATION_PROFILE_DECORATION_TREE phase=%s attempted=%d accepted=%d root_rejected=%d shape_rejected=%d",
+			phase,
+			stats.decoration_surface_tree_instances_attempted,
+			stats.decoration_surface_tree_instances_accepted,
+			stats.decoration_surface_tree_root_rejected,
+			stats.decoration_surface_tree_shape_rejected,
+		)
+		log.infof(
+			"TERRAIN_GENERATION_PROFILE_DECORATION_FAMILY phase=%s baseline_candidates=%d baseline_accepted=%d baseline_blocks=%d dead_ash_candidates=%d dead_ash_accepted=%d dead_ash_blocks=%d fungal_candidates=%d fungal_accepted=%d fungal_blocks=%d stone_candidates=%d stone_accepted=%d stone_blocks=%d crystal_candidates=%d crystal_accepted=%d crystal_blocks=%d",
 			phase,
 			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Baseline_Tree)],
 			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Baseline_Tree)],
@@ -679,6 +691,9 @@ when TERRAIN_GENERATION_PROFILE_PHASES {
 			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Fungal_Tree)],
 			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Fungal_Tree)],
 			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Fungal_Tree)],
+			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Stone_Tree)],
+			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Stone_Tree)],
+			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Stone_Tree)],
 			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Crystal_Growth_Cluster)],
 			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Crystal_Growth_Cluster)],
 			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Crystal_Growth_Cluster)],
@@ -1380,7 +1395,7 @@ TERRAIN_MATERIAL_FACE_VARIANT_COUNT :: 32
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == 8)
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == world_async.TERRAIN_MATERIAL_PALETTE_COUNT)
 #assert(TERRAIN_MATERIAL_FACE_VARIANT_COUNT == 32)
-TERRAIN_GENERATOR_VERSION :: #config(TERRAIN_GENERATOR_VERSION, u32(5))
+TERRAIN_GENERATOR_VERSION :: #config(TERRAIN_GENERATOR_VERSION, u32(8))
 TERRAIN_GRASS_CAP_BLOCK_DEPTH :: 4
 TERRAIN_DIRT_LAYER_BLOCK_DEPTH :: 4
 TERRAIN_SURFACE_MATERIAL_BLEND_SALT :: u64(0x475c91d2e03af86b)
@@ -2399,14 +2414,14 @@ TERRAIN_FACE_DESCS := [?]TerrainFaceDesc {
 }
 
 TERRAIN_MATERIAL_COLORS := TerrainMaterialColorPalette {
-	{0.38, 0.75, 0.34, 1.0}, // Grass
-	{0.55, 0.38, 0.22, 1.0}, // Dirt
-	{0.45, 0.45, 0.48, 1.0}, // Stone
-	{0.70, 0.68, 0.55, 1.0}, // Sand
-	{0.25, 0.45, 0.85, 1.0}, // Water
-	{0.24, 0.22, 0.24, 1.0}, // Corrupted Ash
-	{0.85, 0.78, 0.36, 1.0}, // Aquifer wall
-	{0.85, 0.85, 0.85, 1.0}, // Crystal
+	{0.30, 0.62, 0.27, 1.0}, // Grass
+	{0.43, 0.28, 0.15, 1.0}, // Dirt
+	{0.40, 0.41, 0.45, 1.0}, // Stone
+	{0.66, 0.63, 0.49, 1.0}, // Sand
+	{0.18, 0.37, 0.72, 1.0}, // Water
+	{0.20, 0.18, 0.20, 1.0}, // Corrupted Ash
+	{0.48, 0.56, 0.46, 1.0}, // Aquifer wall
+	{0.58, 0.82, 0.92, 1.0}, // Crystal
 }
 
 //////////////////////////////////////
@@ -2761,6 +2776,18 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 		)
 		terrain_generation_profile_stats.decoration_surface_accepted += u64(
 			decoration_stats.surface_accepted,
+		)
+		terrain_generation_profile_stats.decoration_surface_tree_instances_attempted += u64(
+			decoration_stats.surface_tree_instances_attempted,
+		)
+		terrain_generation_profile_stats.decoration_surface_tree_instances_accepted += u64(
+			decoration_stats.surface_tree_instances_accepted,
+		)
+		terrain_generation_profile_stats.decoration_surface_tree_root_rejected += u64(
+			decoration_stats.surface_tree_root_rejected,
+		)
+		terrain_generation_profile_stats.decoration_surface_tree_shape_rejected += u64(
+			decoration_stats.surface_tree_shape_rejected,
 		)
 		terrain_generation_profile_stats.decoration_cave_candidates += u64(
 			decoration_stats.cave_candidates,
