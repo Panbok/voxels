@@ -106,7 +106,7 @@ default_create :: proc() -> Camera {
 		yaw = 0.0,
 		pitch = 0.0,
 		near_plane = 0.1,
-		far_plane = 100.0,
+		far_plane = 1000.0,
 	}
 }
 
