@@ -1,0 +1,71 @@
+#include <metal_stdlib>
+using namespace metal;
+
+struct TerrainMaterials {
+	float4 colors[8];
+};
+
+struct FragmentInput {
+	float3 local_position [[user(TEXCOORD)]];
+	uint material_id [[user(TEXCOORD_1), flat]];
+	uint normal_id [[user(TEXCOORD_2), flat]];
+};
+
+struct FragmentOutput {
+	float4 color [[color(0)]];
+};
+
+float face_shade(uint normal_id) {
+	switch (normal_id) {
+	case 0:
+		return 0.85f;
+	case 1:
+		return 0.65f;
+	case 2:
+		return 1.00f;
+	case 3:
+		return 0.50f;
+	case 4:
+		return 0.78f;
+	case 5:
+		return 0.70f;
+	default:
+		return 1.0f;
+	}
+}
+
+[[fragment]]
+FragmentOutput fragment_main(
+	FragmentInput input [[stage_in]],
+	constant TerrainMaterials &terrain_materials [[buffer(0)]]
+) {
+	uint palette_index = input.material_id & 7u;
+	bool cave_debug_on = terrain_materials.colors[6].a > 0.5f;
+	bool hydrology_debug_on = terrain_materials.colors[7].a > 0.5f;
+	bool decoration_debug_on = terrain_materials.colors[5].a > 0.5f;
+	bool hydrology_marked = (input.material_id & 8u) != 0u;
+	bool cave_network_marked = (input.material_id & 16u) != 0u;
+	bool decoration_marked = hydrology_marked && cave_network_marked;
+	float shade = face_shade(input.normal_id);
+	float3 color = terrain_materials.colors[palette_index].rgb * shade;
+
+	if (hydrology_debug_on && hydrology_marked) {
+		color = float3(1.0f, 0.1f, 0.95f) * shade;
+	}
+
+	if (cave_debug_on && cave_network_marked) {
+		color = float3(0.0f, 0.85f, 1.0f) * shade;
+	}
+
+	if (decoration_debug_on && decoration_marked) {
+		color = float3(1.0f, 0.78f, 0.05f) * shade;
+	}
+
+	if (input.normal_id >= 6u) {
+		color = float3(1.0f, 0.0f, 1.0f);
+	}
+
+	FragmentOutput output;
+	output.color = float4(color, 1.0f);
+	return output;
+}

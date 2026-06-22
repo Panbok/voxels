@@ -22,7 +22,28 @@ import "core:strings"
 
 WINDOW_DEFAULT_HEIGHT :: 720
 WINDOW_DEFAULT_WIDTH :: 1280
-RENDERER_DEFAULT_DRIVER :: "direct3d12"
+RENDERER_DEFAULT_DRIVER ::
+	"direct3d12" when ODIN_OS == .Windows else "metal" when ODIN_OS == .Darwin else nil
+RENDERER_SHADER_FORMAT ::
+	sdl.GPUShaderFormat{.DXIL} when ODIN_OS ==
+	.Windows else sdl.GPUShaderFormat{.MSL} when ODIN_OS ==
+	.Darwin else sdl.GPUShaderFormat{.DXIL}
+MESH_VERT_SHADER_PATH ::
+	"assets/shaders/Mesh.vert.dxil" when ODIN_OS ==
+	.Windows else "assets/shaders/Mesh.vert.msl" when ODIN_OS ==
+	.Darwin else "assets/shaders/Mesh.vert.dxil"
+SOLID_COLOR_FRAG_SHADER_PATH ::
+	"assets/shaders/SolidColor.frag.dxil" when ODIN_OS ==
+	.Windows else "assets/shaders/SolidColor.frag.msl" when ODIN_OS ==
+	.Darwin else "assets/shaders/SolidColor.frag.dxil"
+TERRAIN_VERT_SHADER_PATH ::
+	"assets/shaders/Terrain.vert.dxil" when ODIN_OS ==
+	.Windows else "assets/shaders/Terrain.vert.msl" when ODIN_OS ==
+	.Darwin else "assets/shaders/Terrain.vert.dxil"
+TERRAIN_FRAG_SHADER_PATH ::
+	"assets/shaders/Terrain.frag.dxil" when ODIN_OS ==
+	.Windows else "assets/shaders/Terrain.frag.msl" when ODIN_OS ==
+	.Darwin else "assets/shaders/Terrain.frag.dxil"
 DEPTH_CLEAR_VALUE :: f32(1.0)
 ANGLE :: f32(0.6)
 FOV :: f32(70.0)
@@ -132,8 +153,13 @@ init :: proc(config: InitConfig) {
 	sdl_init_ok := sdl.Init({.VIDEO})
 	log.assertf(sdl_init_ok, "Failed to initialize SDL: %s", sdl.GetError())
 
-	state.device = sdl.CreateGPUDevice({.DXIL}, state.debug_mode, nil)
+	state.device = sdl.CreateGPUDevice(
+		RENDERER_SHADER_FORMAT,
+		state.debug_mode,
+		RENDERER_DEFAULT_DRIVER,
+	)
 	log.assertf(state.device != nil, "Failed to create GPU device: %s", sdl.GetError())
+	log.debugf("SDL GPU driver: %s", sdl.GetGPUDeviceDriver(state.device))
 
 	state.window = sdl.CreateWindow("Voxels Engine", window_width, window_height, {.RESIZABLE})
 	log.assertf(state.window != nil, "Failed to create window: %s", sdl.GetError())
@@ -209,11 +235,11 @@ setup_resources :: proc() {
 
 	// Mesh.vert uses one vertex storage buffer for PVP geometry bytes.
 	// Indices are bound through SDL's hardware index-buffer path, not as shader storage.
-	vert_shader, _ := gfx_load_shader("assets/shaders/Mesh.vert.dxil", 0, 2, 1, 0)
-	frag_shader, _ := gfx_load_shader("assets/shaders/SolidColor.frag.dxil", 0, 0, 0, 0)
+	vert_shader, _ := gfx_load_shader(MESH_VERT_SHADER_PATH, 0, 2, 1, 0)
+	frag_shader, _ := gfx_load_shader(SOLID_COLOR_FRAG_SHADER_PATH, 0, 0, 0, 0)
 
-	terrain_vert_shader, _ := gfx_load_shader("assets/shaders/Terrain.vert.dxil", 0, 2, 1, 0)
-	terrain_frag_shader, _ := gfx_load_shader("assets/shaders/Terrain.frag.dxil", 0, 1, 0, 0)
+	terrain_vert_shader, _ := gfx_load_shader(TERRAIN_VERT_SHADER_PATH, 0, 2, 1, 0)
+	terrain_frag_shader, _ := gfx_load_shader(TERRAIN_FRAG_SHADER_PATH, 0, 1, 0, 0)
 
 	gfx_create_pipelines_fill_and_line(
 		vert_shader,
@@ -236,19 +262,25 @@ setup_resources :: proc() {
 	w, h: c.int
 	sdl.GetWindowSizeInPixels(state.window, &w, &h)
 
-	depth_texture_props := sdl.CreateProperties()
-	log.assertf(
-		depth_texture_props != 0,
-		"CreateProperties depth texture failed: %s",
-		sdl.GetError(),
-	)
-	defer sdl.DestroyProperties(depth_texture_props)
-	depth_clear_set := sdl.SetFloatProperty(
-		depth_texture_props,
-		sdl.PROP_GPU_TEXTURE_CREATE_D3D12_CLEAR_DEPTH_FLOAT,
-		DEPTH_CLEAR_VALUE,
-	)
-	log.assertf(depth_clear_set, "SetFloatProperty depth clear value failed: %s", sdl.GetError())
+	depth_texture_props := sdl.PropertiesID(0)
+	when ODIN_OS == .Windows {
+		depth_texture_props = sdl.CreateProperties()
+		log.assertf(
+			depth_texture_props != 0,
+			"CreateProperties depth texture failed: %s",
+			sdl.GetError(),
+		)
+		defer sdl.DestroyProperties(depth_texture_props)
+		log.assertf(
+			sdl.SetFloatProperty(
+				depth_texture_props,
+				sdl.PROP_GPU_TEXTURE_CREATE_D3D12_CLEAR_DEPTH_FLOAT,
+				DEPTH_CLEAR_VALUE,
+			),
+			"SetFloatProperty depth clear value failed: %s",
+			sdl.GetError(),
+		)
+	}
 
 	state.depth_texture = sdl.CreateGPUTexture(
 		state.device,
@@ -382,13 +414,13 @@ Geometry :: struct {
 	layout_kind:         GeometryLayoutKind,
 	vertex_allocation:   []byte,
 	index_allocation:    []byte,
-	vertex_byte_offset:  u32,
 	vertex_byte_count:   u32,
+	index_byte_count:    u32,
+	vertex_byte_offset:  u32,
 	vertex_stride_bytes: u32,
 	vertex_count:        u32,
 	first_index:         u32,
 	index_count:         u32,
-	index_byte_count:    u32,
 }
 
 GeometrySlot :: struct {
@@ -935,13 +967,13 @@ geometry_alloc :: proc(
 		layout_kind         = layout_kind,
 		vertex_allocation   = vertex_allocation,
 		index_allocation    = index_allocation,
-		vertex_byte_offset  = vertex_byte_offset,
 		vertex_byte_count   = vertex_byte_count,
+		index_byte_count    = index_byte_count,
+		vertex_byte_offset  = vertex_byte_offset,
 		vertex_stride_bytes = vertex_stride_bytes,
 		vertex_count        = vertex_count,
 		first_index         = index_byte_offset / u32(size_of(u32)),
 		index_count         = index_count,
-		index_byte_count    = index_byte_count,
 	}
 	slot.occupied = true
 
@@ -1223,10 +1255,12 @@ gfx_load_shader :: proc(
 	log.debugf("Loading shader: %s", filename)
 
 	shader_type: ShaderType
-	if strings.contains(
-		filename,
-		".vert.dxil",
-	) {shader_type = ShaderType.Vertex} else if strings.contains(filename, ".frag.dxil") {shader_type = ShaderType.Fragment} else {
+	if strings.has_suffix(filename, ".vert.dxil") || strings.has_suffix(filename, ".vert.msl") {
+		shader_type = ShaderType.Vertex
+	} else if strings.has_suffix(filename, ".frag.dxil") ||
+	   strings.has_suffix(filename, ".frag.msl") {
+		shader_type = ShaderType.Fragment
+	} else {
 		log.assertf(false, "Unknown shader type: %s", filename)
 	}
 
@@ -1241,10 +1275,17 @@ gfx_load_shader :: proc(
 	code_data := ([^]sdl.Uint8)(raw_data(code))
 
 	stage: sdl.GPUShaderStage
+	entrypoint := cstring("main")
 	if shader_type == ShaderType.Fragment {
 		stage = sdl.GPUShaderStage.FRAGMENT
+		when ODIN_OS == .Darwin {
+			entrypoint = "fragment_main"
+		}
 	} else if shader_type == ShaderType.Vertex {
 		stage = sdl.GPUShaderStage.VERTEX
+		when ODIN_OS == .Darwin {
+			entrypoint = "vertex_main"
+		}
 	} else {
 		log.assertf(false, "Unknown shader type: %s", filename)
 	}
@@ -1252,8 +1293,8 @@ gfx_load_shader :: proc(
 	shader_info := sdl.GPUShaderCreateInfo {
 		code                 = code_data,
 		code_size            = code_size,
-		entrypoint           = "main",
-		format               = {.DXIL},
+		entrypoint           = entrypoint,
+		format               = RENDERER_SHADER_FORMAT,
 		stage                = stage,
 		num_samplers         = sampler_count,
 		num_uniform_buffers  = uniform_buffer_count,

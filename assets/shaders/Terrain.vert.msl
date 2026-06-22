@@ -1,0 +1,60 @@
+#include <metal_stdlib>
+using namespace metal;
+
+constant uint LOCAL_X_SHIFT = 0;
+constant uint LOCAL_Y_SHIFT = 7;
+constant uint LOCAL_Z_SHIFT = 14;
+constant uint NORMAL_SHIFT = 21;
+constant uint MATERIAL_SHIFT = 24;
+
+constant uint LOCAL_MASK = 0x7fu;
+constant uint NORMAL_MASK = 0x7u;
+constant uint MATERIAL_MASK = 0xffu;
+
+struct Frame {
+	float4x4 mvp;
+};
+
+struct Draw {
+	uint vertex_byte_offset;
+	uint vertex_stride_bytes;
+	uint2 _padding;
+	float4 chunk_origin_block_size;
+};
+
+struct VertexOutput {
+	float3 local_position [[user(TEXCOORD)]];
+	uint material_id [[user(TEXCOORD_1), flat]];
+	uint normal_id [[user(TEXCOORD_2), flat]];
+	float4 position [[position]];
+};
+
+[[vertex]]
+VertexOutput vertex_main(
+	uint vertex_index [[vertex_id]],
+	constant Frame &frame [[buffer(0)]],
+	constant Draw &draw [[buffer(1)]],
+	device const uint *geometry_vertices [[buffer(2)]]
+) {
+	uint vertex_byte_offset =
+		draw.vertex_byte_offset + vertex_index * draw.vertex_stride_bytes;
+	uint packed = geometry_vertices[vertex_byte_offset >> 2];
+
+	uint block_x = (packed >> LOCAL_X_SHIFT) & LOCAL_MASK;
+	uint block_y = (packed >> LOCAL_Y_SHIFT) & LOCAL_MASK;
+	uint block_z = (packed >> LOCAL_Z_SHIFT) & LOCAL_MASK;
+	uint normal_id = (packed >> NORMAL_SHIFT) & NORMAL_MASK;
+	uint material_id = (packed >> MATERIAL_SHIFT) & MATERIAL_MASK;
+
+	float3 block_cell_position = float3(block_x, block_y, block_z);
+	float3 world_position =
+		draw.chunk_origin_block_size.xyz +
+		block_cell_position * draw.chunk_origin_block_size.w;
+
+	VertexOutput output;
+	output.position = frame.mvp * float4(world_position, 1.0f);
+	output.local_position = block_cell_position;
+	output.material_id = material_id;
+	output.normal_id = normal_id;
+	return output;
+}

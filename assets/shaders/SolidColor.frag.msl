@@ -1,0 +1,17 @@
+#include <metal_stdlib>
+using namespace metal;
+
+struct FragmentInput {
+	float4 color [[user(TEXCOORD)]];
+};
+
+struct FragmentOutput {
+	float4 color [[color(0)]];
+};
+
+[[fragment]]
+FragmentOutput fragment_main(FragmentInput input [[stage_in]]) {
+	FragmentOutput output;
+	output.color = input.color;
+	return output;
+}

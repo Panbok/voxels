@@ -1,0 +1,50 @@
+#include <metal_stdlib>
+using namespace metal;
+
+constant uint POSITION_COLOR_POSITION_OFFSET_BYTES = 0;
+constant uint POSITION_COLOR_COLOR_OFFSET_BYTES = 16;
+
+struct Frame {
+	float4x4 mvp;
+};
+
+struct Draw {
+	uint vertex_byte_offset;
+	uint vertex_stride_bytes;
+	uint2 _padding;
+};
+
+struct VertexOutput {
+	float4 color [[user(TEXCOORD)]];
+	float4 position [[position]];
+};
+
+float4 load_float4(device const uint *data, uint byte_offset) {
+	uint word_offset = byte_offset >> 2;
+	return as_type<float4>(uint4(
+		data[word_offset + 0],
+		data[word_offset + 1],
+		data[word_offset + 2],
+		data[word_offset + 3]
+	));
+}
+
+[[vertex]]
+VertexOutput vertex_main(
+	uint vertex_index [[vertex_id]],
+	constant Frame &frame [[buffer(0)]],
+	constant Draw &draw [[buffer(1)]],
+	device const uint *geometry_vertices [[buffer(2)]]
+) {
+	uint vertex_byte_offset =
+		draw.vertex_byte_offset + vertex_index * draw.vertex_stride_bytes;
+	float4 position =
+		load_float4(geometry_vertices, vertex_byte_offset + POSITION_COLOR_POSITION_OFFSET_BYTES);
+	float4 color =
+		load_float4(geometry_vertices, vertex_byte_offset + POSITION_COLOR_COLOR_OFFSET_BYTES);
+
+	VertexOutput output;
+	output.position = frame.mvp * float4(position.xyz, 1.0f);
+	output.color = color;
+	return output;
+}
