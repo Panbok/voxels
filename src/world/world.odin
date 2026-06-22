@@ -1,6 +1,7 @@
 package world
 
 import world_async "async:world"
+import "base:runtime"
 import "core:log"
 import math "core:math"
 import bits "core:math/bits"
@@ -458,8 +459,6 @@ TERRAIN_CAVE_FIELD_NETWORK_ROUTE_BOUNDS_ENABLED :: #config(
 	TERRAIN_CAVE_FIELD_NETWORK_ROUTE_BOUNDS_ENABLED,
 	true,
 )
-TERRAIN_CAVE_FAST_SKELETON :: #config(TERRAIN_CAVE_FAST_SKELETON, false)
-TERRAIN_CAVE_DEFER_WALL_MATERIAL_BUFFER :: #config(TERRAIN_CAVE_DEFER_WALL_MATERIAL_BUFFER, false)
 TERRAIN_CAVE_ROUTE_POCKET_CORE_BYPASS :: #config(TERRAIN_CAVE_ROUTE_POCKET_CORE_BYPASS, true)
 TERRAIN_CAVE_ROUTE_POCKET_CORE_BYPASS_SHAPE_MAX :: #config(
 	TERRAIN_CAVE_ROUTE_POCKET_CORE_BYPASS_SHAPE_MAX,
@@ -1931,9 +1930,7 @@ TERRAIN_CAVE_ROOM_STRATA_CEILING_RIB_SCALE :: f32(0.10)
 #assert(TERRAIN_CAVE_FIELD_DOMAIN_WARP_DETAIL_SCALE > 0)
 #assert(TERRAIN_CAVE_FIELD_DOMAIN_WARP_DETAIL_SCALE < 0.5)
 #assert(TERRAIN_CAVE_EDGE_ROUTE_SEGMENT_COUNT >= 3)
-when !TERRAIN_CAVE_FAST_SKELETON {
-	#assert(TERRAIN_CAVE_EDGE_ROUTE_SEGMENT_COUNT >= TERRAIN_CAVE_EDGE_CHAMBERLET_COUNT)
-}
+#assert(TERRAIN_CAVE_EDGE_ROUTE_SEGMENT_COUNT >= TERRAIN_CAVE_EDGE_CHAMBERLET_COUNT)
 #assert(TERRAIN_CAVE_EDGE_ROUTE_SIDE_WARP_SCALE > TERRAIN_CAVE_EDGE_ROUTE_LIFT_WARP_SCALE)
 #assert(TERRAIN_CAVE_EDGE_ROUTE_SIDE_WARP_SCALE < 1.0)
 #assert(TERRAIN_CAVE_EDGE_ROUTE_LIFT_WARP_SCALE < 0.5)
@@ -2866,31 +2863,16 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 		terrain_generation_profile_stats.columns += time.tick_since(profile_stage_start)
 		profile_stage_start = time.tick_now()
 	}
-	wall_buffer_ptr: ^TerrainCaveWallMaterialBuffer
-	when TERRAIN_CAVE_DEFER_WALL_MATERIAL_BUFFER {
-		wall_buffer_ptr = new(TerrainCaveWallMaterialBuffer, context.allocator)
-		defer {
-			_ = mem.free(rawptr(wall_buffer_ptr), context.allocator)
-		}
-		terrain_cave_wall_material_buffer_clear(wall_buffer_ptr)
-	}
-	when !TERRAIN_CAVE_DEFER_WALL_MATERIAL_BUFFER {
-		wall_buffer_ptr = nil
-	}
 	if quality == .Proxy {
 		terrain_density_cave_proxy_anchors_apply(
 			view,
 			&generation_region,
 			origin,
 			column_targets[:],
-			wall_buffer_ptr,
 		)
 		when TERRAIN_GENERATION_PROFILE_PHASES {
 			terrain_generation_profile_stats.cave_network += time.tick_since(profile_stage_start)
 			profile_stage_start = time.tick_now()
-		}
-		when TERRAIN_CAVE_DEFER_WALL_MATERIAL_BUFFER {
-			terrain_cave_wall_material_buffer_flush(view, wall_buffer_ptr)
 		}
 		terrain_water_volume_fill(view, origin, column_targets[:])
 		when TERRAIN_GENERATION_PROFILE_PHASES {
@@ -2908,36 +2890,28 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 		}
 	} else {
 		overlay_capture := terrain_generation_cave_overlay_cache_capture_enabled()
+		overlay_base: ^TerrainCaveChunkOverlayBaseSnapshot
+		overlay_scratch_allocator := runtime.heap_allocator()
+		if overlay_capture {
+			overlay_base = new(TerrainCaveChunkOverlayBaseSnapshot, overlay_scratch_allocator)
+			terrain_cave_chunk_overlay_base_snapshot_capture(overlay_base, view)
+		}
 
 		terrain_density_subterranean_biome_caves_apply(
 			view,
 			&generation_region,
 			origin,
 			column_targets[:],
-			wall_buffer_ptr,
 		)
 		when TERRAIN_GENERATION_PROFILE_PHASES {
 			terrain_generation_profile_stats.cave_field += time.tick_since(profile_stage_start)
 			profile_stage_start = time.tick_now()
 		}
-		terrain_density_cave_network_apply(
-			view,
-			&generation_region,
-			origin,
-			column_targets[:],
-			wall_buffer_ptr,
-		)
-		when TERRAIN_CAVE_DEFER_WALL_MATERIAL_BUFFER {
-			terrain_cave_wall_material_buffer_flush(view, wall_buffer_ptr)
-		}
+		terrain_density_cave_network_apply(view, &generation_region, origin, column_targets[:])
 		if overlay_capture {
-			terrain_generation_cave_overlay_cache_store_from_columns(
-				view,
-				key,
-				chunk,
-				origin,
-				column_targets[:],
-			)
+			terrain_generation_cave_overlay_cache_store_from_base(view, key, chunk, overlay_base)
+			_ = mem.free(rawptr(overlay_base), overlay_scratch_allocator)
+			overlay_base = nil
 		}
 		when TERRAIN_GENERATION_PROFILE_PHASES {
 			terrain_generation_profile_stats.cave_network += time.tick_since(profile_stage_start)

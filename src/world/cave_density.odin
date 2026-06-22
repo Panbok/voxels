@@ -131,17 +131,7 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 	region: ^biomes.GenerationRegion,
 	chunk_origin: world_async.BlockCoord,
 	columns: []TerrainBiomeColumn,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
-	when TERRAIN_CAVE_FAST_SKELETON {
-		_ = view
-		_ = region
-		_ = chunk_origin
-		_ = columns
-		_ = wall_buffer
-		return
-	}
-
 	key := region.key
 	log.assertf(
 		len(columns) == CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH,
@@ -315,7 +305,6 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 						TERRAIN_CAVE_FIELD_DETAIL_SALT,
 						biome_id,
 						false,
-						wall_buffer,
 					)
 					when TERRAIN_GENERATION_PROFILE_PHASES {
 						terrain_generation_profile_stats.cave_field_path += time.tick_since(
@@ -366,7 +355,6 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 						TERRAIN_CAVE_BRANCH_SALT,
 						biome_id,
 						false,
-						wall_buffer,
 					)
 					when TERRAIN_GENERATION_PROFILE_PHASES {
 						terrain_generation_profile_stats.cave_field_pocket_throat +=
@@ -391,7 +379,6 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 						radius_z * TERRAIN_CAVE_FIELD_ROUTE_POCKET_ROOM_SCALE,
 						TERRAIN_CAVE_FIELD_DETAIL_SALT,
 						biome_id,
-						wall_buffer,
 					)
 					when TERRAIN_GENERATION_PROFILE_PHASES {
 						terrain_generation_profile_stats.cave_field_pocket_cluster +=
@@ -417,7 +404,6 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 					TERRAIN_CAVE_FIELD_DETAIL_SALT,
 					biome_id,
 					true,
-					wall_buffer,
 				)
 				when TERRAIN_GENERATION_PROFILE_PHASES {
 					terrain_generation_profile_stats.cave_field_chamber += time.tick_since(
@@ -458,7 +444,6 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 						TERRAIN_CAVE_BRANCH_SALT,
 						biome_id,
 						false,
-						wall_buffer,
 					)
 					when TERRAIN_GENERATION_PROFILE_PHASES {
 						terrain_generation_profile_stats.cave_field_bridge += time.tick_since(
@@ -609,7 +594,6 @@ terrain_density_carve_cave_field_route_pocket_cluster :: proc(
 	radius_x, radius_y, radius_z: f32,
 	noise_salt: u64,
 	biome_id: biomes.BiomeID,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	rx := math.max(f32(1), radius_x)
 	ry := math.max(f32(1), radius_y)
@@ -1014,7 +998,6 @@ terrain_density_carve_cave_field_route_pocket_cluster :: proc(
 								z,
 								biome_id,
 								false,
-								wall_buffer,
 							)
 							continue
 						}
@@ -1080,7 +1063,6 @@ terrain_density_carve_cave_field_route_pocket_cluster :: proc(
 							z,
 							biome_id,
 							true,
-							wall_buffer,
 						)
 					}
 				}
@@ -1869,7 +1851,6 @@ terrain_density_cave_network_apply :: proc(
 	region: ^biomes.GenerationRegion,
 	chunk_origin: world_async.BlockCoord,
 	columns: []TerrainBiomeColumn,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	profile_stage_start: time.Tick
 	when TERRAIN_GENERATION_PROFILE_PHASES {
@@ -1924,7 +1905,6 @@ terrain_density_cave_network_apply :: proc(
 			chunk_origin,
 			columns,
 			edge,
-			wall_buffer,
 			chunk_features.edge_core_segment_masks[bucket_i],
 			&carveable_row_mask,
 		)
@@ -1937,7 +1917,7 @@ terrain_density_cave_network_apply :: proc(
 	for bucket_i := u32(0); bucket_i < chunk_features.node_count; bucket_i += 1 {
 		i := chunk_features.node_indices[bucket_i]
 		node := region.cave_network_nodes[i]
-		terrain_density_carve_cave_node(view, region.key, chunk_origin, columns, node, wall_buffer)
+		terrain_density_carve_cave_node(view, region.key, chunk_origin, columns, node)
 		node_portal_profile_start: time.Tick
 		when TERRAIN_GENERATION_PROFILE_PHASES {
 			node_portal_profile_start = time.tick_now()
@@ -1945,9 +1925,7 @@ terrain_density_cave_network_apply :: proc(
 		when !TERRAIN_GENERATION_PROFILE_PHASES {
 			_ = node_portal_profile_start
 		}
-		when !TERRAIN_CAVE_FAST_SKELETON {
-			terrain_density_carve_cave_node_edge_portals(view, region, chunk_origin, columns, node)
-		}
+		terrain_density_carve_cave_node_edge_portals(view, region, chunk_origin, columns, node)
 		when TERRAIN_GENERATION_PROFILE_PHASES {
 			terrain_generation_profile_stats.node_portals += time.tick_since(
 				node_portal_profile_start,
@@ -1995,7 +1973,6 @@ terrain_density_cave_network_apply :: proc(
 			TERRAIN_CAVE_BRANCH_SALT,
 			node.biome_id,
 			false,
-			wall_buffer,
 		)
 	}
 	when TERRAIN_GENERATION_PROFILE_PHASES {
@@ -2013,7 +1990,6 @@ terrain_density_cave_network_apply :: proc(
 			columns,
 			anchor,
 			&node_connectivity,
-			wall_buffer,
 		)
 	}
 	when TERRAIN_GENERATION_PROFILE_PHASES {
@@ -2267,7 +2243,6 @@ terrain_density_cave_proxy_anchors_apply :: proc(
 	region: ^biomes.GenerationRegion,
 	chunk_origin: world_async.BlockCoord,
 	columns: []TerrainBiomeColumn,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	log.assertf(
 		len(columns) == CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH,
@@ -2320,7 +2295,6 @@ terrain_density_cave_proxy_anchors_apply :: proc(
 
 		terrain_density_cave_proxy_entrance_carve(view, chunk_origin, anchor, node, link_radius)
 	}
-	_ = wall_buffer
 }
 
 terrain_density_cave_chunk_feature_bucket_build :: proc(
@@ -2406,7 +2380,6 @@ terrain_density_cave_anchor_apply :: proc(
 	columns: []TerrainBiomeColumn,
 	anchor: biomes.CaveAnchor,
 	node_connectivity: ^[biomes.GENERATION_REGION_CAVE_NETWORK_NODE_CAPACITY]TerrainCaveNodeConnectivity,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	anchor_radius := math.max(f32(3), anchor.influence_radius_blocks * 0.55)
 	node, node_index, found := terrain_density_cave_anchor_node_find(region, anchor)
@@ -2426,7 +2399,6 @@ terrain_density_cave_anchor_apply :: proc(
 		anchor,
 		node,
 		link_radius,
-		wall_buffer,
 	)
 }
 
@@ -2487,7 +2459,6 @@ terrain_density_carve_cave_node :: proc(
 	chunk_origin: world_async.BlockCoord,
 	columns: []TerrainBiomeColumn,
 	node: biomes.CaveNetworkNode,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	radius_x, radius_y, radius_z := terrain_density_cave_node_base_radii(node)
 
@@ -2515,45 +2486,38 @@ terrain_density_carve_cave_node :: proc(
 			room_radius_z,
 			node.kind,
 			node.biome_id,
-			wall_buffer,
 		)
 		when TERRAIN_GENERATION_PROFILE_PHASES {
 			terrain_generation_profile_stats.node_rooms += time.tick_since(profile_stage_start)
 			profile_stage_start = time.tick_now()
 		}
 		if node.major_region {
-			when !TERRAIN_CAVE_FAST_SKELETON {
-				terrain_density_carve_cave_node_major_room_perimeter_field(
-					view,
-					key,
-					chunk_origin,
-					columns,
-					node,
-					room_radius_x,
-					room_radius_y,
-					room_radius_z,
-					wall_buffer,
-				)
-			}
+			terrain_density_carve_cave_node_major_room_perimeter_field(
+				view,
+				key,
+				chunk_origin,
+				columns,
+				node,
+				room_radius_x,
+				room_radius_y,
+				room_radius_z,
+			)
 			when TERRAIN_GENERATION_PROFILE_PHASES {
 				terrain_generation_profile_stats.node_perimeter += time.tick_since(
 					profile_stage_start,
 				)
 				profile_stage_start = time.tick_now()
 			}
-			when !TERRAIN_CAVE_FAST_SKELETON {
-				terrain_density_carve_cave_node_macro_satellites(
-					view,
-					key,
-					chunk_origin,
-					columns,
-					node,
-					room_radius_x,
-					room_radius_y,
-					room_radius_z,
-					wall_buffer,
-				)
-			}
+			terrain_density_carve_cave_node_macro_satellites(
+				view,
+				key,
+				chunk_origin,
+				columns,
+				node,
+				room_radius_x,
+				room_radius_y,
+				room_radius_z,
+			)
 			when TERRAIN_GENERATION_PROFILE_PHASES {
 				terrain_generation_profile_stats.node_satellites += time.tick_since(
 					profile_stage_start,
@@ -2584,7 +2548,6 @@ terrain_density_carve_cave_node :: proc(
 		TERRAIN_CAVE_ROUGHNESS_SALT,
 		node.biome_id,
 		false,
-		wall_buffer,
 	)
 	when TERRAIN_GENERATION_PROFILE_PHASES {
 		terrain_generation_profile_stats.node_rooms += time.tick_since(profile_stage_start)
@@ -2878,7 +2841,6 @@ terrain_density_carve_cave_node_major_room_perimeter_field :: proc(
 	columns: []TerrainBiomeColumn,
 	node: biomes.CaveNetworkNode,
 	radius_x, radius_y, radius_z: f32,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	log.assert(node.major_region, "major cave room perimeter fields are only for major cave rooms")
 
@@ -3062,7 +3024,6 @@ terrain_density_carve_cave_node_major_room_perimeter_field :: proc(
 						z,
 						node.biome_id,
 						true,
-						wall_buffer,
 					)
 				}
 			}
@@ -3077,7 +3038,6 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 	columns: []TerrainBiomeColumn,
 	node: biomes.CaveNetworkNode,
 	radius_x, radius_y, radius_z: f32,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	log.assert(node.major_region, "macro cave satellites are only for major cave rooms")
 
@@ -3232,7 +3192,6 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 			TERRAIN_CAVE_FIELD_CHAMBER_SALT ~ u64(satellite_index + 857),
 			node.biome_id,
 			true,
-			wall_buffer,
 		)
 		terrain_density_carve_cave_room_lobed_ellipsoid(
 			view,
@@ -3248,7 +3207,6 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 			TERRAIN_CAVE_FIELD_CHAMBER_SALT ~ u64(satellite_index + 907),
 			node.biome_id,
 			true,
-			wall_buffer,
 		)
 		when TERRAIN_GENERATION_PROFILE_PHASES {
 			terrain_generation_profile_stats.node_satellite_direct += time.tick_since(
@@ -3273,7 +3231,6 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 			dir_z,
 			TERRAIN_CAVE_FIELD_CHAMBER_SALT ~ u64(satellite_index + 919),
 			satellite_index,
-			wall_buffer,
 		)
 		when TERRAIN_GENERATION_PROFILE_PHASES {
 			terrain_generation_profile_stats.node_satellite_apron += time.tick_since(
@@ -3364,7 +3321,6 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 			TERRAIN_CAVE_ROOM_DETAIL_SALT ~ u64(satellite_index + 941),
 			node.biome_id,
 			true,
-			wall_buffer,
 		)
 		terrain_density_carve_rough_segment_shaped(
 			view,
@@ -3382,7 +3338,6 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 			TERRAIN_CAVE_ROOM_DETAIL_SALT ~ u64(satellite_index + 953),
 			node.biome_id,
 			true,
-			wall_buffer,
 		)
 
 		pocket_radius := math.clamp(
@@ -3422,7 +3377,6 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 			TERRAIN_CAVE_FIELD_CHAMBER_SALT ~ u64(satellite_index + 967),
 			node.biome_id,
 			true,
-			wall_buffer,
 		)
 
 		alcove_sign := f32(1)
@@ -3466,7 +3420,6 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 			TERRAIN_CAVE_ROOM_DETAIL_SALT ~ u64(satellite_index + 983),
 			node.biome_id,
 			true,
-			wall_buffer,
 		)
 		alcove_radius_x := alcove_radius
 		alcove_radius_y := alcove_radius * f32(0.54)
@@ -3500,7 +3453,6 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 			TERRAIN_CAVE_FIELD_CHAMBER_SALT ~ u64(satellite_index + 991),
 			node.biome_id,
 			true,
-			wall_buffer,
 		)
 		terrain_density_carve_cave_node_macro_cluster_field(
 			view,
@@ -3518,7 +3470,6 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 			bridge_radius,
 			TERRAIN_CAVE_FIELD_CHAMBER_SALT ~ u64(satellite_index + 1009),
 			node.biome_id,
-			wall_buffer,
 		)
 		when TERRAIN_GENERATION_PROFILE_PHASES {
 			terrain_generation_profile_stats.node_satellite_cluster += time.tick_since(
@@ -3540,7 +3491,6 @@ terrain_density_carve_cave_node_macro_satellite_apron_field :: proc(
 	dir_x, dir_z: f32,
 	noise_salt: u64,
 	satellite_index: u32,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	directional_radius_inv_sq :=
 		(dir_x * dir_x) / (radius_x * radius_x) + (dir_z * dir_z) / (radius_z * radius_z)
@@ -3863,7 +3813,6 @@ terrain_density_carve_cave_node_macro_satellite_apron_field :: proc(
 						z,
 						node.biome_id,
 						true,
-						wall_buffer,
 					)
 				}
 			}
@@ -3882,7 +3831,6 @@ terrain_density_carve_cave_node_macro_cluster_field :: proc(
 	pocket_radius, bridge_radius: f32,
 	noise_salt: u64,
 	biome_id: biomes.BiomeID,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	base_radius := math.max(pocket_radius, bridge_radius * f32(1.35))
 	along_radius := base_radius * TERRAIN_CAVE_NODE_MACRO_SATELLITE_CLUSTER_FIELD_RADIUS_SCALE
@@ -4246,7 +4194,6 @@ terrain_density_carve_cave_node_macro_cluster_field :: proc(
 						z,
 						biome_id,
 						true,
-						wall_buffer,
 					)
 				}
 			}
@@ -4262,7 +4209,6 @@ terrain_density_carve_cave_room :: proc(
 	center_x, center_y, center_z, radius_x, radius_y, radius_z: f32,
 	kind: biomes.CaveNetworkNodeKind,
 	biome_id: biomes.BiomeID,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	rx := math.max(f32(2), radius_x)
 	ry := math.max(f32(2), radius_y)
@@ -4307,7 +4253,6 @@ terrain_density_carve_cave_room :: proc(
 			TERRAIN_CAVE_ROOM_DETAIL_SALT,
 			biome_id,
 			true,
-			wall_buffer,
 		)
 		terrain_density_carve_cave_room_lobed_ellipsoid(
 			view,
@@ -4323,7 +4268,6 @@ terrain_density_carve_cave_room :: proc(
 			TERRAIN_CAVE_ROOM_DETAIL_SALT,
 			biome_id,
 			true,
-			wall_buffer,
 		)
 		terrain_density_carve_cave_room_lobed_ellipsoid(
 			view,
@@ -4339,7 +4283,6 @@ terrain_density_carve_cave_room :: proc(
 			TERRAIN_CAVE_DETAIL_SALT,
 			biome_id,
 			true,
-			wall_buffer,
 		)
 		return
 	case .Crystal_Geode_Network:
@@ -4357,7 +4300,6 @@ terrain_density_carve_cave_room :: proc(
 			TERRAIN_CAVE_PASSAGE_RIB_SALT,
 			biome_id,
 			true,
-			wall_buffer,
 		)
 		terrain_density_carve_rough_segment_shaped(
 			view,
@@ -4375,7 +4317,6 @@ terrain_density_carve_cave_room :: proc(
 			TERRAIN_CAVE_PASSAGE_RIB_SALT,
 			biome_id,
 			true,
-			wall_buffer,
 		)
 		return
 	case .Buried_Aquifer_Caves:
@@ -4393,7 +4334,6 @@ terrain_density_carve_cave_room :: proc(
 			TERRAIN_CAVE_FIELD_DETAIL_SALT,
 			biome_id,
 			true,
-			wall_buffer,
 		)
 		terrain_density_carve_cave_room_lobed_ellipsoid(
 			view,
@@ -4409,7 +4349,6 @@ terrain_density_carve_cave_room :: proc(
 			TERRAIN_CAVE_ROOM_DETAIL_SALT,
 			biome_id,
 			true,
-			wall_buffer,
 		)
 		terrain_density_carve_cave_room_lobed_ellipsoid(
 			view,
@@ -4425,7 +4364,6 @@ terrain_density_carve_cave_room :: proc(
 			TERRAIN_CAVE_PASSAGE_RIB_SALT,
 			biome_id,
 			true,
-			wall_buffer,
 		)
 		side_x := -offset_z
 		side_z := offset_x
@@ -4477,7 +4415,6 @@ terrain_density_carve_cave_room :: proc(
 			TERRAIN_CAVE_DETAIL_SALT,
 			biome_id,
 			true,
-			wall_buffer,
 		)
 		terrain_density_carve_rough_segment_shaped(
 			view,
@@ -4495,7 +4432,6 @@ terrain_density_carve_cave_room :: proc(
 			TERRAIN_CAVE_FIELD_DETAIL_SALT,
 			biome_id,
 			true,
-			wall_buffer,
 		)
 		terrain_density_carve_rough_segment_shaped(
 			view,
@@ -4513,7 +4449,6 @@ terrain_density_carve_cave_room :: proc(
 			TERRAIN_CAVE_ROOM_DETAIL_SALT,
 			biome_id,
 			true,
-			wall_buffer,
 		)
 		terrain_density_fill_water_ellipsoid(
 			view,
@@ -4543,7 +4478,6 @@ terrain_density_carve_cave_room :: proc(
 			TERRAIN_CAVE_ROUGHNESS_SALT,
 			biome_id,
 			true,
-			wall_buffer,
 		)
 		return
 	}
@@ -4561,7 +4495,6 @@ terrain_density_carve_cave_room :: proc(
 		TERRAIN_CAVE_ROUGHNESS_SALT,
 		biome_id,
 		true,
-		wall_buffer,
 	)
 }
 
@@ -4985,7 +4918,6 @@ terrain_density_carve_cave_room_lobed_ellipsoid :: proc(
 	noise_salt: u64,
 	biome_id: biomes.BiomeID,
 	directional_material_profile: bool = false,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	rx := math.max(f32(1), radius_x)
 	ry := math.max(f32(1), radius_y)
@@ -5211,7 +5143,6 @@ terrain_density_carve_cave_room_lobed_ellipsoid :: proc(
 						z,
 						biome_id,
 						directional_material_profile,
-						wall_buffer,
 					)
 				}
 			}
@@ -5494,7 +5425,6 @@ terrain_density_carve_cave_edge :: proc(
 	chunk_origin: world_async.BlockCoord,
 	columns: []TerrainBiomeColumn,
 	edge: biomes.CaveNetworkEdge,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 	core_segment_mask: u64 = max(u64),
 	carveable_row_mask: ^TerrainCarveableRowMask = nil,
 ) {
@@ -5559,7 +5489,6 @@ terrain_density_carve_cave_edge :: proc(
 				segment_salt,
 				biome_id,
 				false,
-				wall_buffer,
 				carveable_row_mask,
 			)
 		}
@@ -5573,9 +5502,6 @@ terrain_density_carve_cave_edge :: proc(
 	when TERRAIN_GENERATION_PROFILE_PHASES {
 		terrain_generation_profile_stats.edge_core += time.tick_since(edge_profile_start)
 		edge_profile_start = time.tick_now()
-	}
-	when TERRAIN_CAVE_FAST_SKELETON {
-		return
 	}
 
 	feature_radius := radius
@@ -5598,7 +5524,6 @@ terrain_density_carve_cave_edge :: proc(
 		columns,
 		edge,
 		feature_radius,
-		wall_buffer,
 	)
 	when TERRAIN_GENERATION_PROFILE_PHASES {
 		terrain_generation_profile_stats.edge_braids += time.tick_since(edge_profile_start)
@@ -5611,7 +5536,6 @@ terrain_density_carve_cave_edge :: proc(
 		columns,
 		edge,
 		feature_radius,
-		wall_buffer,
 	)
 	when TERRAIN_GENERATION_PROFILE_PHASES {
 		terrain_generation_profile_stats.edge_bypasses += time.tick_since(edge_profile_start)
@@ -5624,7 +5548,6 @@ terrain_density_carve_cave_edge :: proc(
 		columns,
 		edge,
 		feature_radius,
-		wall_buffer,
 	)
 	when TERRAIN_GENERATION_PROFILE_PHASES {
 		terrain_generation_profile_stats.edge_alcoves += time.tick_since(edge_profile_start)
@@ -5637,7 +5560,6 @@ terrain_density_carve_cave_edge :: proc(
 		columns,
 		edge,
 		feature_radius,
-		wall_buffer,
 	)
 	when TERRAIN_GENERATION_PROFILE_PHASES {
 		terrain_generation_profile_stats.edge_chamberlets += time.tick_since(edge_profile_start)
@@ -5650,7 +5572,6 @@ terrain_density_carve_cave_edge :: proc(
 		columns,
 		edge,
 		feature_radius,
-		wall_buffer,
 	)
 	terrain_density_carve_cave_edge_seam_bypasses(
 		view,
@@ -5659,7 +5580,6 @@ terrain_density_carve_cave_edge :: proc(
 		columns,
 		edge,
 		feature_radius,
-		wall_buffer,
 	)
 	terrain_density_carve_cave_edge_seam_crosscuts(
 		view,
@@ -5668,7 +5588,6 @@ terrain_density_carve_cave_edge :: proc(
 		columns,
 		edge,
 		feature_radius,
-		wall_buffer,
 	)
 	terrain_density_carve_cave_edge_seam_shoulders(
 		view,
@@ -5677,7 +5596,6 @@ terrain_density_carve_cave_edge :: proc(
 		columns,
 		edge,
 		feature_radius,
-		wall_buffer,
 	)
 	terrain_density_carve_cave_edge_seam_vertical_relief(
 		view,
@@ -5686,7 +5604,6 @@ terrain_density_carve_cave_edge :: proc(
 		columns,
 		edge,
 		feature_radius,
-		wall_buffer,
 	)
 	terrain_density_carve_cave_edge_seam_galleries(
 		view,
@@ -5695,7 +5612,6 @@ terrain_density_carve_cave_edge :: proc(
 		columns,
 		edge,
 		feature_radius,
-		wall_buffer,
 	)
 	when TERRAIN_GENERATION_PROFILE_PHASES {
 		terrain_generation_profile_stats.edge_seams += time.tick_since(edge_profile_start)
@@ -5994,7 +5910,6 @@ terrain_density_carve_cave_edge_braids :: proc(
 	columns: []TerrainBiomeColumn,
 	edge: biomes.CaveNetworkEdge,
 	route_radius: f32,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	if !terrain_density_cave_edge_braid_enabled(edge) {
 		return
@@ -6196,7 +6111,6 @@ terrain_density_carve_cave_edge_route_bypasses :: proc(
 	columns: []TerrainBiomeColumn,
 	edge: biomes.CaveNetworkEdge,
 	route_radius: f32,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	route_dx := edge.to_x - edge.from_x
 	route_dy := edge.to_y - edge.from_y
@@ -6540,7 +6454,6 @@ terrain_density_carve_cave_edge_alcoves :: proc(
 	columns: []TerrainBiomeColumn,
 	edge: biomes.CaveNetworkEdge,
 	route_radius: f32,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	for alcove_index := u32(0); alcove_index < TERRAIN_CAVE_EDGE_ALCOVE_COUNT; alcove_index += 1 {
 		hash := biomes.feature_grid_hash_combine(u64(edge.id), TERRAIN_CAVE_BRANCH_SALT)
@@ -6929,7 +6842,6 @@ terrain_density_carve_cave_edge_chamberlets :: proc(
 	columns: []TerrainBiomeColumn,
 	edge: biomes.CaveNetworkEdge,
 	route_radius: f32,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	positive_gallery_found := false
 	positive_gallery_x := f32(0)
@@ -7172,7 +7084,6 @@ terrain_density_carve_cave_edge_seam_bays :: proc(
 	columns: []TerrainBiomeColumn,
 	edge: biomes.CaveNetworkEdge,
 	route_radius: f32,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	if !edge.regional_seam_connection || edge.kind != .Canyon {
 		return
@@ -7341,7 +7252,6 @@ terrain_density_carve_cave_edge_seam_bypasses :: proc(
 	columns: []TerrainBiomeColumn,
 	edge: biomes.CaveNetworkEdge,
 	route_radius: f32,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	if !edge.regional_seam_connection || edge.kind != .Canyon {
 		return
@@ -7601,7 +7511,6 @@ terrain_density_carve_cave_edge_seam_crosscuts :: proc(
 	columns: []TerrainBiomeColumn,
 	edge: biomes.CaveNetworkEdge,
 	route_radius: f32,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	if !edge.regional_seam_connection || edge.kind != .Canyon {
 		return
@@ -7861,7 +7770,6 @@ terrain_density_carve_cave_edge_seam_shoulders :: proc(
 	columns: []TerrainBiomeColumn,
 	edge: biomes.CaveNetworkEdge,
 	route_radius: f32,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	if !edge.regional_seam_connection || edge.kind != .Canyon {
 		return
@@ -8062,7 +7970,6 @@ terrain_density_carve_cave_edge_seam_vertical_relief :: proc(
 	columns: []TerrainBiomeColumn,
 	edge: biomes.CaveNetworkEdge,
 	route_radius: f32,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	if !edge.regional_seam_connection || edge.kind != .Canyon {
 		return
@@ -8291,7 +8198,6 @@ terrain_density_carve_cave_edge_seam_galleries :: proc(
 	columns: []TerrainBiomeColumn,
 	edge: biomes.CaveNetworkEdge,
 	route_radius: f32,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	if !edge.regional_seam_connection || edge.kind != .Canyon {
 		return
@@ -8976,7 +8882,6 @@ terrain_density_carve_cave_entrance :: proc(
 	anchor: biomes.CaveAnchor,
 	node: biomes.CaveNetworkNode,
 	link_radius: f32,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	opening_radius := math.max(f32(4), anchor.influence_radius_blocks)
 	opening_y := opening_radius * 0.45
@@ -8993,7 +8898,6 @@ terrain_density_carve_cave_entrance :: proc(
 			anchor,
 			node,
 			opening_radius,
-			wall_buffer,
 		)
 		terrain_density_carve_cave_mouth_transition(
 			view,
@@ -9004,7 +8908,6 @@ terrain_density_carve_cave_entrance :: proc(
 			node,
 			opening_radius,
 			link_radius,
-			wall_buffer,
 		)
 		return
 	} else if anchor.kind == .Sinkhole || anchor.kind == .Vertical_Shaft {
@@ -9017,7 +8920,6 @@ terrain_density_carve_cave_entrance :: proc(
 			node,
 			opening_radius,
 			link_radius,
-			wall_buffer,
 		)
 	} else {
 		terrain_density_carve_rough_ellipsoid(
@@ -9034,7 +8936,6 @@ terrain_density_carve_cave_entrance :: proc(
 			TERRAIN_CAVE_DETAIL_SALT,
 			node.biome_id,
 			false,
-			wall_buffer,
 		)
 	}
 
@@ -9057,7 +8958,6 @@ terrain_density_carve_cave_entrance :: proc(
 		TERRAIN_CAVE_DETAIL_SALT,
 		node.biome_id,
 		false,
-		wall_buffer,
 	)
 	terrain_density_carve_rough_segment_shaped(
 		view,
@@ -9075,7 +8975,6 @@ terrain_density_carve_cave_entrance :: proc(
 		TERRAIN_CAVE_ROUGHNESS_SALT,
 		node.biome_id,
 		false,
-		wall_buffer,
 	)
 }
 
@@ -9456,7 +9355,6 @@ terrain_density_carve_cave_mouth_transition_staging :: proc(
 	node: biomes.CaveNetworkNode,
 	opening_radius, link_radius: f32,
 	plan: TerrainCaveMouthTransitionPlan,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	for staging_index := u32(0);
 	    staging_index < TERRAIN_CAVE_MOUTH_STAGING_NICHE_COUNT;
@@ -9606,7 +9504,6 @@ terrain_density_carve_cave_mouth_transition_staging :: proc(
 			TERRAIN_CAVE_BRANCH_SALT ~ u64(staging_index + 61),
 			biome_id,
 			false,
-			wall_buffer,
 		)
 		terrain_density_carve_cave_room_lobed_ellipsoid(
 			view,
@@ -9622,7 +9519,6 @@ terrain_density_carve_cave_mouth_transition_staging :: proc(
 			TERRAIN_CAVE_ROOM_DETAIL_SALT ~ u64(staging_index + 79),
 			biome_id,
 			true,
-			wall_buffer,
 		)
 	}
 }
@@ -9635,7 +9531,6 @@ terrain_density_carve_cave_mouth_transition :: proc(
 	anchor: biomes.CaveAnchor,
 	node: biomes.CaveNetworkNode,
 	opening_radius, link_radius: f32,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	plan := terrain_density_cave_mouth_transition_plan(anchor, node, opening_radius, link_radius)
 	scales := terrain_density_cave_mouth_transition_scales(plan.style)
@@ -9663,7 +9558,6 @@ terrain_density_carve_cave_mouth_transition :: proc(
 			TERRAIN_CAVE_ROOM_DETAIL_SALT,
 			node.biome_id,
 			true,
-			wall_buffer,
 		)
 	}
 
@@ -9688,7 +9582,6 @@ terrain_density_carve_cave_mouth_transition :: proc(
 		TERRAIN_CAVE_DETAIL_SALT,
 		node.biome_id,
 		false,
-		wall_buffer,
 	)
 
 	deep_shape := terrain_density_cave_entrance_link_shape(anchor.kind, false)
@@ -9711,7 +9604,6 @@ terrain_density_carve_cave_mouth_transition :: proc(
 		TERRAIN_CAVE_ROUGHNESS_SALT,
 		node.biome_id,
 		false,
-		wall_buffer,
 	)
 	terrain_density_carve_rough_segment_shaped(
 		view,
@@ -9729,7 +9621,6 @@ terrain_density_carve_cave_mouth_transition :: proc(
 		TERRAIN_CAVE_BRANCH_SALT,
 		node.biome_id,
 		false,
-		wall_buffer,
 	)
 	terrain_density_carve_cave_mouth_transition_staging(
 		view,
@@ -9741,7 +9632,6 @@ terrain_density_carve_cave_mouth_transition :: proc(
 		opening_radius,
 		link_radius,
 		plan,
-		wall_buffer,
 	)
 }
 
@@ -9753,7 +9643,6 @@ terrain_density_carve_cave_mouth :: proc(
 	anchor: biomes.CaveAnchor,
 	node: biomes.CaveNetworkNode,
 	opening_radius: f32,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	dir_x, dir_z := terrain_density_cave_entrance_planar_direction(anchor, node)
 	side_x := -dir_z
@@ -9929,7 +9818,6 @@ terrain_density_carve_cave_mouth :: proc(
 						z,
 						node.biome_id,
 						false,
-						wall_buffer,
 					)
 				}
 			}
@@ -10057,7 +9945,6 @@ terrain_density_carve_sinkhole_throat :: proc(
 	anchor: biomes.CaveAnchor,
 	node: biomes.CaveNetworkNode,
 	opening_radius, link_radius: f32,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	depth := math.max(opening_radius * 2.2, anchor.y - node.y)
 	dir_x, dir_z := terrain_density_cave_entrance_planar_direction(anchor, node)
@@ -10172,7 +10059,6 @@ terrain_density_carve_sinkhole_throat :: proc(
 						z,
 						node.biome_id,
 						false,
-						wall_buffer,
 					)
 				}
 			}
@@ -10209,7 +10095,6 @@ terrain_density_carve_rough_ellipsoid :: proc(
 	noise_salt: u64,
 	biome_id: biomes.BiomeID,
 	directional_material_profile: bool = false,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	rx := math.max(f32(1), radius_x)
 	ry := math.max(f32(1), radius_y)
@@ -10285,7 +10170,6 @@ terrain_density_carve_rough_ellipsoid :: proc(
 						z,
 						biome_id,
 						directional_material_profile,
-						wall_buffer,
 					)
 				}
 			}
@@ -10386,7 +10270,6 @@ terrain_density_carve_rough_segment_shaped :: proc(
 	noise_salt: u64,
 	biome_id: biomes.BiomeID,
 	directional_material_profile: bool = false,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 	carveable_row_mask: ^TerrainCarveableRowMask = nil,
 ) {
 	radius := math.max(f32(1), radius_blocks)
@@ -10434,7 +10317,6 @@ terrain_density_carve_rough_segment_shaped :: proc(
 			noise_salt,
 			biome_id,
 			directional_material_profile,
-			wall_buffer,
 		)
 		return
 	}
@@ -10799,7 +10681,6 @@ terrain_density_carve_rough_segment_shaped :: proc(
 								z,
 								biome_id,
 								directional_material_profile,
-								wall_buffer,
 							)
 					} else {
 						carved = terrain_density_carve_checked_local_block_with_material_result(
@@ -10812,7 +10693,6 @@ terrain_density_carve_rough_segment_shaped :: proc(
 							z,
 							biome_id,
 							directional_material_profile,
-							wall_buffer,
 						)
 					}
 					if carved && use_carveable_row_mask {
@@ -10905,7 +10785,6 @@ terrain_density_carve_rough_segment_shaped :: proc(
 								z,
 								biome_id,
 								directional_material_profile,
-								wall_buffer,
 							)
 					} else {
 						carved = terrain_density_carve_checked_local_block_with_material_result(
@@ -10918,7 +10797,6 @@ terrain_density_carve_rough_segment_shaped :: proc(
 							z,
 							biome_id,
 							directional_material_profile,
-							wall_buffer,
 						)
 					}
 					if carved && use_carveable_row_mask {
@@ -10976,7 +10854,6 @@ terrain_density_carve_rough_segment_shaped :: proc(
 								z,
 								biome_id,
 								directional_material_profile,
-								wall_buffer,
 							)
 					} else {
 						carved = terrain_density_carve_checked_local_block_with_material_result(
@@ -10989,7 +10866,6 @@ terrain_density_carve_rough_segment_shaped :: proc(
 							z,
 							biome_id,
 							directional_material_profile,
-							wall_buffer,
 						)
 					}
 					if carved && use_carveable_row_mask {
@@ -11009,7 +10885,6 @@ terrain_density_carve_checked_local_block_with_material :: proc(
 	local_x, local_y, local_z: i32,
 	biome_id: biomes.BiomeID,
 	directional_material_profile: bool = false,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) {
 	_ = terrain_density_carve_checked_local_block_with_material_result(
 		view,
@@ -11021,7 +10896,6 @@ terrain_density_carve_checked_local_block_with_material :: proc(
 		local_z,
 		biome_id,
 		directional_material_profile,
-		wall_buffer,
 	)
 }
 
@@ -11032,7 +10906,6 @@ terrain_density_carve_checked_local_block_with_material_full_vertical_support ::
 	local_x, local_y, local_z: i32,
 	biome_id: biomes.BiomeID,
 	directional_material_profile: bool = false,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) -> bool {
 	when TERRAIN_GENERATION_PROFILE_PHASES {
 		terrain_generation_profile_stats.carve_attempts += 1
@@ -11056,7 +10929,6 @@ terrain_density_carve_checked_local_block_with_material_full_vertical_support ::
 		local_z,
 		biome_id,
 		directional_material_profile,
-		wall_buffer,
 	)
 	return true
 }
@@ -11101,7 +10973,6 @@ terrain_density_carve_checked_local_block_with_material_result :: proc(
 	local_x, local_y, local_z: i32,
 	biome_id: biomes.BiomeID,
 	directional_material_profile: bool = false,
-	wall_buffer: ^TerrainCaveWallMaterialBuffer = nil,
 ) -> bool {
 	when TERRAIN_GENERATION_PROFILE_PHASES {
 		terrain_generation_profile_stats.carve_attempts += 1
@@ -11143,7 +11014,6 @@ terrain_density_carve_checked_local_block_with_material_result :: proc(
 		local_z,
 		biome_id,
 		directional_material_profile,
-		wall_buffer,
 	)
 	return true
 }
