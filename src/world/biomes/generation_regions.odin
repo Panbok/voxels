@@ -13,6 +13,7 @@ GenerationRegionCoord :: IVec3
 GenerationInfluenceMargins :: struct {
 	surface_biome_blocks:              i32,
 	subterranean_biome_blocks:         i32,
+	surface_morphology_blocks:         i32,
 	surface_decoration_blocks:         i32,
 	surface_water_feature_blocks:      i32,
 	subterranean_water_feature_blocks: i32,
@@ -39,6 +40,7 @@ GenerationRegionQuery :: struct {
 	influence_margins:                      GenerationInfluenceMargins,
 	surface_biome_owner_range:              FeatureGridOwnerRange2,
 	subterranean_biome_owner_range:         FeatureGridOwnerRange3,
+	surface_morphology_owner_range:         FeatureGridOwnerRange2,
 	surface_decoration_owner_range:         FeatureGridOwnerRange2,
 	surface_water_feature_owner_range:      FeatureGridOwnerRange2,
 	subterranean_water_feature_owner_range: FeatureGridOwnerRange3,
@@ -52,6 +54,7 @@ GenerationRegion :: struct {
 	influence_margins:                      GenerationInfluenceMargins,
 	surface_biome_owner_range:              FeatureGridOwnerRange2,
 	subterranean_biome_owner_range:         FeatureGridOwnerRange3,
+	surface_morphology_owner_range:         FeatureGridOwnerRange2,
 	surface_decoration_owner_range:         FeatureGridOwnerRange2,
 	surface_water_feature_owner_range:      FeatureGridOwnerRange2,
 	subterranean_water_feature_owner_range: FeatureGridOwnerRange3,
@@ -60,6 +63,8 @@ GenerationRegion :: struct {
 	surface_biome_cell_count:               u32,
 	subterranean_biome_cells:               [GENERATION_REGION_SUBTERRANEAN_BIOME_CELL_CAPACITY]GenerationRegionSubterraneanBiomeCell,
 	subterranean_biome_cell_count:          u32,
+	surface_morphology_features:            [GENERATION_REGION_SURFACE_MORPHOLOGY_FEATURE_CAPACITY]SurfaceMorphologyFeature,
+	surface_morphology_feature_count:       u32,
 	surface_decoration_features:            [GENERATION_REGION_SURFACE_DECORATION_FEATURE_CAPACITY]DecorationFeature,
 	surface_decoration_feature_count:       u32,
 	water_feature_nodes:                    [GENERATION_REGION_WATER_FEATURE_NODE_CAPACITY]WaterFeatureNode,
@@ -94,6 +99,7 @@ GENERATION_REGION_CAVE_NETWORK_MARGIN_BLOCKS :: CAVE_NETWORK_SAMPLE_MARGIN_BLOCK
 GENERATION_REGION_DEFAULT_INFLUENCE_MARGINS :: GenerationInfluenceMargins {
 	surface_biome_blocks              = GENERATION_REGION_SURFACE_BIOME_MARGIN_BLOCKS,
 	subterranean_biome_blocks         = GENERATION_REGION_SUBTERRANEAN_BIOME_MARGIN_BLOCKS,
+	surface_morphology_blocks         = SURFACE_MORPHOLOGY_INFLUENCE_MARGIN_BLOCKS,
 	surface_decoration_blocks         = DECORATION_SURFACE_INFLUENCE_MARGIN_BLOCKS,
 	surface_water_feature_blocks      = GENERATION_REGION_SURFACE_WATER_FEATURE_MARGIN_BLOCKS,
 	subterranean_water_feature_blocks = GENERATION_REGION_SUBTERRANEAN_WATER_FEATURE_MARGIN_BLOCKS,
@@ -184,6 +190,7 @@ generation_region_build_with_margins_into :: proc(
 	}
 	generation_region_surface_biome_cells_fill(region)
 	generation_region_subterranean_biome_cells_fill(region)
+	generation_region_surface_morphology_features_fill(region)
 	generation_region_surface_decorations_fill(region)
 	generation_region_water_features_fill(region)
 	generation_region_cave_networks_fill(region)
@@ -210,6 +217,7 @@ generation_region_build_for_terrain_fill_into :: proc(
 		influence_margins = GENERATION_REGION_DEFAULT_INFLUENCE_MARGINS,
 	}
 	generation_region_surface_biome_cells_fill(region)
+	generation_region_surface_morphology_features_fill(region)
 	generation_region_surface_decorations_fill(region)
 	generation_region_water_features_fill(region)
 	generation_region_cave_networks_fill(region)
@@ -220,6 +228,10 @@ generation_region_influence_margins_validate :: proc(margins: GenerationInfluenc
 	log.assert(
 		margins.subterranean_biome_blocks >= 0,
 		"subterranean biome margin must not be negative",
+	)
+	log.assert(
+		margins.surface_morphology_blocks >= 0,
+		"surface morphology margin must not be negative",
 	)
 	log.assert(
 		margins.surface_decoration_blocks >= 0,
@@ -310,6 +322,43 @@ generation_region_subterranean_biome_cells_fill :: proc(region: ^GenerationRegio
 		}
 	}
 	region.subterranean_biome_cell_count = count
+}
+
+generation_region_surface_morphology_features_fill :: proc(region: ^GenerationRegion) {
+	surface_bounds := generation_region_surface_bounds_from_bounds(region.bounds)
+	region.surface_morphology_owner_range = feature_grid_owner_range_from_block_bounds(
+		surface_bounds,
+		region.influence_margins.surface_morphology_blocks,
+		SURFACE_MORPHOLOGY_OWNER_GRID_CONFIG,
+	)
+	owner_count_required := feature_grid_owner_range_count(region.surface_morphology_owner_range)
+	log.assertf(
+		owner_count_required <= GENERATION_REGION_SURFACE_MORPHOLOGY_FEATURE_CAPACITY,
+		"Generation Region surface morphology capacity too small: required=%d capacity=%d",
+		owner_count_required,
+		GENERATION_REGION_SURFACE_MORPHOLOGY_FEATURE_CAPACITY,
+	)
+
+	count: u32
+	for z := region.surface_morphology_owner_range.min.z;
+	    z <= region.surface_morphology_owner_range.max.z;
+	    z += 1 {
+		for x := region.surface_morphology_owner_range.min.x;
+		    x <= region.surface_morphology_owner_range.max.x;
+		    x += 1 {
+			owner := FeatureGridCoord2 {
+				x = x,
+				z = z,
+			}
+			feature, found := surface_morphology_feature_from_owner(region.key, owner)
+			if !found {
+				continue
+			}
+			region.surface_morphology_features[count] = feature
+			count += 1
+		}
+	}
+	region.surface_morphology_feature_count = count
 }
 
 generation_region_surface_decorations_fill :: proc(region: ^GenerationRegion) {
@@ -1220,6 +1269,11 @@ generation_region_query_make :: proc(
 			influence_margins.surface_biome_blocks,
 			feature_grid_config_for(.Surface, .Biome),
 		),
+		surface_morphology_owner_range = feature_grid_owner_range_from_block_bounds(
+			surface_bounds,
+			influence_margins.surface_morphology_blocks,
+			SURFACE_MORPHOLOGY_OWNER_GRID_CONFIG,
+		),
 		subterranean_biome_owner_range = feature_grid_owner_range_from_block_bounds(
 			bounds,
 			influence_margins.subterranean_biome_blocks,
@@ -1270,6 +1324,13 @@ generation_region_query_validate :: proc(region: ^GenerationRegion, query: Gener
 			query.subterranean_biome_owner_range,
 		),
 		"Generation Region is missing subterranean biome owners for the query margin",
+	)
+	log.assert(
+		generation_region_owner_range_contains_range_2(
+			region.surface_morphology_owner_range,
+			query.surface_morphology_owner_range,
+		),
+		"Generation Region is missing surface morphology owners for the query margin",
 	)
 	log.assert(
 		generation_region_owner_range_contains_range_2(
@@ -1358,6 +1419,43 @@ generation_region_subterranean_biome_cells_write :: proc(
 		count += 1
 	}
 	log.assert(count == count_required, "subterranean biome query did not return every owner cell")
+	return count
+}
+
+generation_region_surface_morphology_features_write :: proc(
+	region: ^GenerationRegion,
+	query: GenerationRegionQuery,
+	features: []SurfaceMorphologyFeature,
+) -> u32 {
+	log.assert(
+		generation_region_bounds_contains_bounds(region.bounds, query.bounds),
+		"surface morphology feature query target bounds must be inside the Generation Region",
+	)
+	log.assert(
+		generation_region_owner_range_contains_range_2(
+			region.surface_morphology_owner_range,
+			query.surface_morphology_owner_range,
+		),
+		"Generation Region is missing surface morphology owners for the query margin",
+	)
+
+	count: u32
+	for i := u32(0); i < region.surface_morphology_feature_count; i += 1 {
+		feature := region.surface_morphology_features[i]
+		if !generation_region_owner_range_contains_owner_2(
+			query.surface_morphology_owner_range,
+			feature.owner,
+		) {
+			continue
+		}
+		log.assertf(
+			count < u32(len(features)),
+			"surface morphology feature query output too small: got=%d",
+			len(features),
+		)
+		features[count] = feature
+		count += 1
+	}
 	return count
 }
 

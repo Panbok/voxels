@@ -558,6 +558,8 @@ when TERRAIN_GENERATION_PROFILE_PHASES {
 		decoration_family_blocks:                    [biomes.DECORATION_FAMILY_COUNT]u64,
 		surface_morphology_chunks:                   u64,
 		surface_heightfield_chunks:                  u64,
+		surface_morphology_features:                 u64,
+		surface_morphology_feature_columns:          u64,
 	}
 
 	terrain_generation_profile_stats: TerrainGenerationProfileStats
@@ -597,12 +599,14 @@ when TERRAIN_GENERATION_PROFILE_PHASES {
 			time.duration_milliseconds(stats.network_anchors),
 		)
 		log.infof(
-			"TERRAIN_GENERATION_PROFILE_SURFACE_FILL phase=%s column_cache_ms=%.3f base_fill_ms=%.3f morphology_chunks=%d heightfield_chunks=%d",
+			"TERRAIN_GENERATION_PROFILE_SURFACE_FILL phase=%s column_cache_ms=%.3f base_fill_ms=%.3f morphology_chunks=%d heightfield_chunks=%d morphology_features=%d morphology_feature_columns=%d",
 			phase,
 			time.duration_milliseconds(stats.column_cache),
 			time.duration_milliseconds(stats.base_fill),
 			stats.surface_morphology_chunks,
 			stats.surface_heightfield_chunks,
+			stats.surface_morphology_features,
+			stats.surface_morphology_feature_columns,
 		)
 		log.infof(
 			"TERRAIN_GENERATION_PROFILE_NODE phase=%s node_rooms_ms=%.3f node_perimeter_ms=%.3f node_satellites_ms=%.3f node_portals_ms=%.3f",
@@ -2613,6 +2617,13 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 					world_z,
 					&profile_row_cache,
 				)
+				evaluation = terrain_surface_morphology_apply_feature_envelopes(
+					evaluation,
+					generation_region.surface_morphology_features[:],
+					generation_region.surface_morphology_feature_count,
+					world_x,
+					world_z,
+				)
 				column_targets[x + z * CHUNK_BLOCK_LENGTH] =
 					terrain_biome_column_from_profile_evaluation(key, evaluation, world_x, world_z)
 			}
@@ -2623,6 +2634,30 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 	chunk_bottom_world_y := origin.y
 	chunk_top_world_y := origin.y + CHUNK_BLOCK_LENGTH - 1
 	surface_morphology_enabled := chunk_top_world_y >= 0
+	surface_morphology_features: [biomes.GENERATION_REGION_SURFACE_MORPHOLOGY_FEATURE_CAPACITY]biomes.SurfaceMorphologyFeature
+	surface_morphology_feature_count: u32
+	if surface_morphology_enabled {
+		chunk_bounds := biomes.BlockBounds3 {
+				min = {x = origin.x, y = origin.y, z = origin.z},
+				max = {
+					x = origin.x + CHUNK_BLOCK_LENGTH,
+					y = origin.y + CHUNK_BLOCK_LENGTH,
+					z = origin.z + CHUNK_BLOCK_LENGTH,
+				},
+			}
+		query := biomes.generation_region_query_make_default(chunk_bounds)
+		surface_morphology_feature_count =
+			biomes.generation_region_surface_morphology_features_write(
+				&generation_region,
+				query,
+				surface_morphology_features[:],
+			)
+		when TERRAIN_GENERATION_PROFILE_PHASES {
+			terrain_generation_profile_stats.surface_morphology_features += u64(
+				surface_morphology_feature_count,
+			)
+		}
+	}
 	when TERRAIN_GENERATION_PROFILE_PHASES {
 		terrain_generation_profile_stats.column_cache += time.tick_since(
 			profile_column_cache_start,
@@ -2703,12 +2738,37 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 					}
 					continue
 				}
+
+				feature_plan := TerrainSurfaceMorphologyColumnFeaturePlan{}
 				if surface_morphology_enabled {
-					if !terrain_surface_density_column_may_intersect_chunk(
+					world_x := origin.x + i32(x)
+					world_z := origin.z + i32(z)
+					terrain_surface_morphology_column_feature_plan_write(
+						surface_morphology_features[:],
+						surface_morphology_feature_count,
+						world_x,
+						world_z,
+						&feature_plan,
+					)
+					when TERRAIN_GENERATION_PROFILE_PHASES {
+						if feature_plan.active {
+							terrain_generation_profile_stats.surface_morphology_feature_columns += 1
+						}
+					}
+					column_may_intersect := terrain_surface_density_column_may_intersect_chunk(
 						column,
 						chunk_bottom_world_y,
 						chunk_top_world_y,
-					) {
+					)
+					if feature_plan.active {
+						column_may_intersect =
+							column_may_intersect ||
+							(f32(chunk_bottom_world_y) <=
+										column.surface_height_blocks + feature_plan.band_above &&
+									f32(chunk_top_world_y) >=
+										column.surface_height_blocks - feature_plan.band_below)
+					}
+					if !column_may_intersect {
 						continue
 					}
 				} else {
@@ -2718,13 +2778,15 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 				}
 
 				if surface_morphology_enabled {
+					world_x := origin.x + i32(x)
+					world_z := origin.z + i32(z)
 					surface_shape := terrain_surface_morphology_column_shape_make(
 						key,
 						column,
-						origin.x + i32(x),
-						origin.z + i32(z),
+						world_x,
+						world_z,
 					)
-					if surface_shape.strength <= 0.001 {
+					if surface_shape.strength <= 0.001 && !feature_plan.active {
 						heightfield_top_y := math.min(
 							CHUNK_BLOCK_LENGTH - 1,
 							column.surface_height - origin.y,
@@ -2758,15 +2820,34 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 						}
 						continue
 					}
+
+					sample_above := surface_shape.band_above
+					if feature_plan.active {
+						sample_above = math.max(sample_above, feature_plan.band_above)
+					}
+					sample_below := f32(0)
+					if feature_plan.active {
+						sample_below = feature_plan.band_below
+					}
+					sample_min_world_y := i32(
+						math.floor_f32(column.surface_height_blocks - sample_below),
+					)
 					sample_max_world_y := i32(
-						math.floor_f32(column.surface_height_blocks + surface_shape.band_above),
+						math.floor_f32(column.surface_height_blocks + sample_above),
+					)
+					prefill_top_y := math.min(
+						CHUNK_BLOCK_LENGTH - 1,
+						sample_min_world_y - origin.y - 1,
 					)
 					heightfield_top_y := math.min(
 						CHUNK_BLOCK_LENGTH - 1,
 						column.surface_height - origin.y,
 					)
-					if heightfield_top_y >= 0 {
-						for y in 0 ..= heightfield_top_y {
+					if !feature_plan.active {
+						prefill_top_y = heightfield_top_y
+					}
+					if prefill_top_y >= 0 {
+						for y in 0 ..= prefill_top_y {
 							world_y := origin.y + i32(y)
 							blocks_below_surface := column.surface_height - world_y
 							material_id := terrain_biome_block_material_id(
@@ -2791,7 +2872,7 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 						}
 					}
 
-					sample_min_y := math.clamp(heightfield_top_y + 1, 0, CHUNK_BLOCK_LENGTH)
+					sample_min_y := math.clamp(prefill_top_y + 1, 0, CHUNK_BLOCK_LENGTH)
 					sample_max_y := math.clamp(
 						sample_max_world_y - origin.y,
 						-1,
@@ -2800,12 +2881,15 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 					if sample_min_y <= sample_max_y {
 						for y := sample_min_y; y <= sample_max_y; y += 1 {
 							world_y := origin.y + i32(y)
-							if terrain_surface_density_sample_from_shape(
-								   column,
-								   surface_shape,
-								   world_y,
-							   ) <
-							   0 {
+							density := terrain_surface_density_sample_with_feature_plan(
+								column,
+								surface_shape,
+								&feature_plan,
+								world_x,
+								world_y,
+								world_z,
+							)
+							if density < 0 {
 								continue
 							}
 
@@ -3009,6 +3093,12 @@ terrain_biome_column_sample_with_hydrology :: proc(
 		key,
 		surface_sample,
 		hydrology_sample,
+		world_x,
+		world_z,
+	)
+	evaluation = terrain_surface_morphology_apply_feature_envelopes_direct(
+		evaluation,
+		key,
 		world_x,
 		world_z,
 	)
