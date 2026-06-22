@@ -2408,9 +2408,7 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 			}
 
 			stats.active_column_count += 1
-			morphology_profile := biomes.surface_morphology_profile_for_biome(
-				column.dominant_biome_id,
-			)
+			morphology_profile := column.surface_morphology_profile
 			morphology_shape := terrain_surface_morphology_column_shape_make(
 				key,
 				column,
@@ -4574,7 +4572,7 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 				}
 
 				density := terrain_surface_base_density_sample(column, world_y)
-				profile := biomes.surface_morphology_profile_for_biome(column.dominant_biome_id)
+				profile := column.surface_morphology_profile
 				if terrain_surface_morphology_effective_strength(column, profile) > 0.001 ||
 				   feature_plan.active {
 					shape := terrain_surface_morphology_column_shape_make(
@@ -4755,7 +4753,7 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 				column := terrain_generation_benchmark_surface_capture_column_for_block(key, block)
 				base_density := terrain_surface_base_density_sample(column, block.y)
 				base_solid := base_density >= 0
-				profile := biomes.surface_morphology_profile_for_biome(column.dominant_biome_id)
+				profile := column.surface_morphology_profile
 				if column.water_fill_active {
 					block_y_f32 := f32(block.y)
 					if block_y_f32 <= column.water_level_blocks &&
@@ -4906,9 +4904,7 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 						if column.water_fill_active {
 							continue
 						}
-						profile := biomes.surface_morphology_profile_for_biome(
-							column.dominant_biome_id,
-						)
+						profile := column.surface_morphology_profile
 						score := column.surface_height_blocks + profile.strength * 12
 						#partial switch column.dominant_biome_id {
 						case .Basalt_Spire_Highlands, .Corrupted_Ash_Forest:

@@ -58,7 +58,7 @@ terrain_surface_density_column_may_intersect_chunk :: proc(
 	column: TerrainBiomeColumn,
 	chunk_bottom_world_y, chunk_top_world_y: i32,
 ) -> bool {
-	profile := biomes.surface_morphology_profile_for_biome(column.dominant_biome_id)
+	profile := column.surface_morphology_profile
 	strength := terrain_surface_morphology_effective_strength(column, profile)
 	lower_influence := terrain_surface_density_column_lower_influence_blocks(column)
 	upper_influence := f32(0)
@@ -88,7 +88,7 @@ terrain_surface_morphology_column_shape_make :: proc(
 	column: TerrainBiomeColumn,
 	world_x, world_z: i32,
 ) -> TerrainSurfaceMorphologyColumnShape {
-	profile := biomes.surface_morphology_profile_for_biome(column.dominant_biome_id)
+	profile := column.surface_morphology_profile
 	strength := terrain_surface_morphology_effective_strength(column, profile)
 	band_above := math.max(f32(0), profile.band_above_blocks)
 	band_below := math.max(f32(1), profile.band_below_blocks)
@@ -293,7 +293,7 @@ terrain_surface_morphology_effective_strength :: proc(
 }
 
 terrain_surface_morphology_cell_size :: proc(column: TerrainBiomeColumn) -> i32 {
-	profile := biomes.surface_morphology_profile_for_biome(column.dominant_biome_id)
+	profile := column.surface_morphology_profile
 	cell_size := i32(math.floor_f32(profile.cell_blocks + 0.5))
 	return math.clamp(cell_size, 8, 64)
 }

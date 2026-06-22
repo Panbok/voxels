@@ -190,6 +190,79 @@ when ODIN_DEBUG {
 			TERRAIN_SURFACE_HEIGHT_BOTTOM_LIMIT_BLOCKS,
 			"surface height bottom cushion should keep generated terrain above the hard lower support",
 		)
+
+		material_blend_evaluation := biomes.SurfaceBiomeProfileEvaluation {
+			cell_count = 2,
+			transition_strength = 1,
+			final_target = {biome_id = .Temperate_Hills},
+		}
+		material_blend_evaluation.targets[0] = {
+			biome_id = .Temperate_Hills,
+		}
+		material_blend_evaluation.targets[1] = {
+			biome_id = .Basalt_Spire_Highlands,
+		}
+		material_blend_evaluation.blend_weights[0] = 0.5
+		material_blend_evaluation.blend_weights[1] = 0.5
+
+		material_blend_grass_count: u32
+		material_blend_stone_count: u32
+		material_blend_isolated_count: u32
+		for z := i32(0); z < 64; z += 1 {
+			for x := i32(0); x < 64; x += 1 {
+				biome_id := terrain_biome_material_biome_pick(key, material_blend_evaluation, x, z)
+				if biome_id == .Temperate_Hills {
+					material_blend_grass_count += 1
+				} else if biome_id == .Basalt_Spire_Highlands {
+					material_blend_stone_count += 1
+				}
+			}
+		}
+		for z := i32(1); z < 63; z += 1 {
+			for x := i32(1); x < 63; x += 1 {
+				center := terrain_biome_material_biome_pick(key, material_blend_evaluation, x, z)
+				if center !=
+					   terrain_biome_material_biome_pick(
+						   key,
+						   material_blend_evaluation,
+						   x - 1,
+						   z,
+					   ) &&
+				   center !=
+					   terrain_biome_material_biome_pick(
+						   key,
+						   material_blend_evaluation,
+						   x + 1,
+						   z,
+					   ) &&
+				   center !=
+					   terrain_biome_material_biome_pick(
+						   key,
+						   material_blend_evaluation,
+						   x,
+						   z - 1,
+					   ) &&
+				   center !=
+					   terrain_biome_material_biome_pick(
+						   key,
+						   material_blend_evaluation,
+						   x,
+						   z + 1,
+					   ) {
+					material_blend_isolated_count += 1
+				}
+			}
+		}
+		log.assert(
+			material_blend_grass_count > 0 && material_blend_stone_count > 0,
+			"surface material blending should include both weighted biome materials",
+		)
+		log.assertf(
+			material_blend_isolated_count == 0,
+			"surface material blending should avoid isolated single-column material noise, got %d",
+			material_blend_isolated_count,
+		)
+
 		tunnel_passage_shape := terrain_density_cave_passage_shape(.Tunnel)
 		generic_segment_shape := terrain_density_cave_segment_shape_default()
 		canyon_passage_shape := terrain_density_cave_passage_shape(.Canyon)
@@ -2554,6 +2627,64 @@ when ODIN_DEBUG {
 		log.assert(
 			view.blocks.occupancy[sealed_cave_index] == .Empty,
 			"surface water volume fill should not flood sealed underground cave pockets",
+		)
+
+		chunk_voxel_view_fill_empty(&view)
+		for z in 0 ..< CHUNK_BLOCK_LENGTH {
+			for x in 0 ..< CHUNK_BLOCK_LENGTH {
+				test_columns[x + z * CHUNK_BLOCK_LENGTH] = {}
+				for y in 0 ..< CHUNK_BLOCK_LENGTH {
+					index = chunk_block_index(u32(x), u32(y), u32(z))
+					view.blocks.occupancy[index] = .Solid
+					view.blocks.material_id[index] = world_async.BlockMaterialID(
+						TERRAIN_STONE_MAT_ID,
+					)
+				}
+			}
+		}
+		undercut_water_x := i32(11)
+		undercut_water_z := i32(11)
+		undercut_column_index := undercut_water_x + undercut_water_z * CHUNK_BLOCK_LENGTH
+		undercut_surface_y := i32(CHUNK_BLOCK_LENGTH - 8)
+		undercut_water_level_y := i32(CHUNK_BLOCK_LENGTH - 2)
+		test_columns[undercut_column_index] = {
+			surface_height_blocks = f32(undercut_surface_y),
+			water_fill_active     = true,
+			water_level_blocks    = f32(undercut_water_level_y),
+		}
+		for y := i32(0); y <= undercut_water_level_y; y += 1 {
+			index = chunk_block_index(u32(undercut_water_x), u32(y), u32(undercut_water_z))
+			view.blocks.occupancy[index] = .Empty
+			view.blocks.material_id[index] = world_async.BlockMaterialID(0)
+		}
+		terrain_water_volume_fill(&view, world_async.BlockCoord{}, test_columns[:])
+		undercut_surface_water_index := chunk_block_index(
+			u32(undercut_water_x),
+			u32(undercut_water_level_y),
+			u32(undercut_water_z),
+		)
+		undercut_gate_y := terrain_water_volume_surface_gate_world_y(
+			test_columns[undercut_column_index],
+		)
+		log.assert(
+			undercut_gate_y > 0,
+			"undercut water contract expects the surface gate to fall inside the test chunk",
+		)
+		undercut_deep_index := chunk_block_index(
+			u32(undercut_water_x),
+			u32(undercut_gate_y - 1),
+			u32(undercut_water_z),
+		)
+		log.assert(
+			terrain_material_palette_index(
+				view.blocks.material_id[undercut_surface_water_index],
+			) ==
+			TERRAIN_WATER_MAT_ID,
+			"surface water volume fill should still fill the surface-adjacent open band",
+		)
+		log.assert(
+			view.blocks.occupancy[undercut_deep_index] == .Empty,
+			"surface water volume fill should not flood exposed cavities below the surface band",
 		)
 		debug_terrain_generation_quality_contract_checks_run(heightfield_key)
 

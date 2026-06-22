@@ -1410,10 +1410,12 @@ TERRAIN_MATERIAL_FACE_VARIANT_COUNT :: 32
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == 8)
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == world_async.TERRAIN_MATERIAL_PALETTE_COUNT)
 #assert(TERRAIN_MATERIAL_FACE_VARIANT_COUNT == 32)
-TERRAIN_GENERATOR_VERSION :: #config(TERRAIN_GENERATOR_VERSION, u32(9))
+TERRAIN_GENERATOR_VERSION :: #config(TERRAIN_GENERATOR_VERSION, u32(11))
 TERRAIN_GRASS_CAP_BLOCK_DEPTH :: 4
 TERRAIN_DIRT_LAYER_BLOCK_DEPTH :: 4
 TERRAIN_SURFACE_MATERIAL_BLEND_SALT :: u64(0x475c91d2e03af86b)
+TERRAIN_SURFACE_MATERIAL_BLEND_CELL_BLOCKS :: 48
+TERRAIN_SURFACE_MATERIAL_BLEND_NOISE_AMPLITUDE :: f32(0.24)
 TERRAIN_SHORE_MATERIAL_BLEND_SALT :: u64(0xa65f9d2c8b7140e3)
 TERRAIN_SURFACE_MORPHOLOGY_WARP_X_SALT :: u64(0x5c8ec1a76d4932bf)
 TERRAIN_SURFACE_MORPHOLOGY_WARP_Y_SALT :: u64(0xaef37d148b6c5091)
@@ -1426,14 +1428,18 @@ TERRAIN_SURFACE_MORPHOLOGY_SHELF_SALT :: u64(0x164fd73a8c9e250b)
 TERRAIN_SHORE_MATERIAL_DITHER_AMPLITUDE :: f32(0.25)
 TERRAIN_SHORE_CAP_THIN_BAND_FRACTION :: f32(0.56)
 TERRAIN_LOCAL_WATER_FILL_INFLUENCE_MIN :: f32(0.30)
-TERRAIN_WATER_VOLUME_SURFACE_ADJACENT_DEPTH_BLOCKS :: i32(CHUNK_BLOCK_LENGTH)
+TERRAIN_WATER_VOLUME_SURFACE_ADJACENT_DEPTH_BLOCKS :: i32(24)
 #assert(TERRAIN_SHORE_MATERIAL_DITHER_AMPLITUDE >= 0)
 #assert(TERRAIN_SHORE_MATERIAL_DITHER_AMPLITUDE <= 0.35)
 #assert(TERRAIN_SHORE_CAP_THIN_BAND_FRACTION > 0)
 #assert(TERRAIN_SHORE_CAP_THIN_BAND_FRACTION <= 1)
 #assert(TERRAIN_LOCAL_WATER_FILL_INFLUENCE_MIN > 0)
 #assert(TERRAIN_LOCAL_WATER_FILL_INFLUENCE_MIN < 0.35)
-#assert(TERRAIN_WATER_VOLUME_SURFACE_ADJACENT_DEPTH_BLOCKS >= CHUNK_BLOCK_LENGTH)
+#assert(TERRAIN_WATER_VOLUME_SURFACE_ADJACENT_DEPTH_BLOCKS > 0)
+#assert(TERRAIN_WATER_VOLUME_SURFACE_ADJACENT_DEPTH_BLOCKS <= CHUNK_BLOCK_LENGTH)
+#assert(TERRAIN_SURFACE_MATERIAL_BLEND_CELL_BLOCKS > 1)
+#assert(TERRAIN_SURFACE_MATERIAL_BLEND_NOISE_AMPLITUDE >= 0)
+#assert(TERRAIN_SURFACE_MATERIAL_BLEND_NOISE_AMPLITUDE <= 0.35)
 TERRAIN_CAVE_ROUGHNESS_SALT :: u64(0x96b17e2d4c5f803a)
 TERRAIN_CAVE_DETAIL_SALT :: u64(0x2f68a915c7d34e0b)
 TERRAIN_CAVE_FIELD_SPAGHETTI_A_SALT :: u64(0x5b8124f7c90e63da)
@@ -2472,6 +2478,7 @@ TerrainBiomeColumn :: struct {
 	surface_height_blocks:           f32,
 	surface_layer_depth:             i32,
 	dominant_biome_id:               biomes.BiomeID,
+	surface_morphology_profile:      biomes.SurfaceMorphologyProfile,
 	surface_material_id:             world_async.BlockMaterialID,
 	subsurface_material_id:          world_async.BlockMaterialID,
 	hydrology_debug_material_active: bool,
@@ -3164,6 +3171,7 @@ terrain_biome_column_from_profile_evaluation :: proc(
 		surface_height_blocks = surface_height_blocks,
 		surface_layer_depth = surface_layer_depth,
 		dominant_biome_id = target.biome_id,
+		surface_morphology_profile = target.surface_morphology_profile,
 		surface_material_id = surface_material_id,
 		subsurface_material_id = subsurface_material_id,
 		hydrology_debug_material_active = local_water_fill_active,
@@ -3211,19 +3219,55 @@ terrain_biome_material_biome_pick :: proc(
 		return evaluation.final_target.biome_id
 	}
 
-	h := biomes.feature_grid_key_hash(key)
-	h = biomes.feature_grid_hash_combine(h, TERRAIN_SURFACE_MATERIAL_BLEND_SALT)
-	h = biomes.feature_grid_hash_combine(h, biomes.feature_grid_hash_i32(world_x))
-	h = biomes.feature_grid_hash_combine(h, biomes.feature_grid_hash_i32(world_z))
-	roll := biomes.feature_grid_unit_f32(h, TERRAIN_SURFACE_MATERIAL_BLEND_SALT)
-	cumulative := f32(0)
+	blend_noise_scale :=
+		TERRAIN_SURFACE_MATERIAL_BLEND_NOISE_AMPLITUDE *
+		math.clamp(evaluation.transition_strength, f32(0), f32(1))
+	selected_biome_id := evaluation.final_target.biome_id
+	selected_score := f32(-2)
+
 	for i := u32(0); i < evaluation.cell_count; i += 1 {
-		cumulative += evaluation.blend_weights[i]
-		if roll <= cumulative {
-			return evaluation.targets[i].biome_id
+		biome_id := evaluation.targets[i].biome_id
+		already_scored := false
+		for j := u32(0); j < i; j += 1 {
+			if evaluation.targets[j].biome_id == biome_id {
+				already_scored = true
+				break
+			}
+		}
+		if already_scored {
+			continue
+		}
+
+		weight := f32(0)
+		for j := i; j < evaluation.cell_count; j += 1 {
+			if evaluation.targets[j].biome_id == biome_id {
+				weight += evaluation.blend_weights[j]
+			}
+		}
+		if weight <= 0.001 {
+			continue
+		}
+
+		material_salt := biomes.feature_grid_hash_combine(
+			TERRAIN_SURFACE_MATERIAL_BLEND_SALT,
+			u64(biome_id),
+		)
+		coherent_bias :=
+			biomes.regional_terrain_field_value_noise_2(
+				key,
+				world_x,
+				world_z,
+				TERRAIN_SURFACE_MATERIAL_BLEND_CELL_BLOCKS,
+				material_salt,
+			) *
+			blend_noise_scale
+		score := weight + coherent_bias
+		if score > selected_score {
+			selected_score = score
+			selected_biome_id = biome_id
 		}
 	}
-	return evaluation.final_target.biome_id
+	return selected_biome_id
 }
 
 terrain_shoreline_material_width :: proc(evaluation: biomes.SurfaceBiomeProfileEvaluation) -> f32 {

@@ -107,6 +107,7 @@ BiomeShapeTarget :: struct {
 	swamp_shallowness:                  f32,
 	seabed_roughness_blocks:            f32,
 	fantasy_affinity:                   f32,
+	surface_morphology_profile:         SurfaceMorphologyProfile,
 }
 
 SurfaceMorphologyProfile :: struct {
@@ -137,9 +138,9 @@ BiomeTransitionRuleKind :: enum u8 {
 	Generic_Smooth,
 	// Temperate_Marsh_Shelf creates a broad, shallow soft edge between ordinary hills and marsh.
 	Temperate_Marsh_Shelf,
-	// Basalt_Marsh_Cliff creates a hard volcanic-to-wetland boundary with stronger cliff shaping.
+	// Basalt_Marsh_Cliff keeps volcanic-wetland identity while blending the boundary smoothly.
 	Basalt_Marsh_Cliff,
-	// Corrupted_Border_Band creates a structured hostile boundary around corrupted terrain.
+	// Corrupted_Border_Band creates a soft hostile material/affinity boundary around corrupted terrain.
 	Corrupted_Border_Band,
 	// Fungal_Aquifer_Connector creates an open, water-friendly underground transition.
 	Fungal_Aquifer_Connector,
@@ -1292,6 +1293,7 @@ biome_shape_target_evaluate :: proc(
 		swamp_shallowness = regional_terrain_field_saturate(profile.swamp_shallowness),
 		seabed_roughness_blocks = math.max(f32(0), profile.seabed_roughness_blocks),
 		fantasy_affinity = fantasy_affinity,
+		surface_morphology_profile = surface_morphology_profile_for_biome(profile.biome_id),
 	}
 }
 
@@ -1525,6 +1527,26 @@ biome_shape_target_blend :: proc(
 		blended.swamp_shallowness += targets[i].swamp_shallowness * weight
 		blended.seabed_roughness_blocks += targets[i].seabed_roughness_blocks * weight
 		blended.fantasy_affinity += targets[i].fantasy_affinity * weight
+		blended.surface_morphology_profile.strength +=
+			targets[i].surface_morphology_profile.strength * weight
+		blended.surface_morphology_profile.band_above_blocks +=
+			targets[i].surface_morphology_profile.band_above_blocks * weight
+		blended.surface_morphology_profile.band_below_blocks +=
+			targets[i].surface_morphology_profile.band_below_blocks * weight
+		blended.surface_morphology_profile.warp_blocks +=
+			targets[i].surface_morphology_profile.warp_blocks * weight
+		blended.surface_morphology_profile.cell_blocks +=
+			targets[i].surface_morphology_profile.cell_blocks * weight
+		blended.surface_morphology_profile.shelf_strength +=
+			targets[i].surface_morphology_profile.shelf_strength * weight
+		blended.surface_morphology_profile.overhang_strength +=
+			targets[i].surface_morphology_profile.overhang_strength * weight
+		blended.surface_morphology_profile.spire_strength +=
+			targets[i].surface_morphology_profile.spire_strength * weight
+		blended.surface_morphology_profile.support_bias +=
+			targets[i].surface_morphology_profile.support_bias * weight
+		blended.surface_morphology_profile.heightfield_shape_strength +=
+			targets[i].surface_morphology_profile.heightfield_shape_strength * weight
 	}
 	return blended
 }
@@ -1587,34 +1609,34 @@ biome_transition_rule_for :: proc(
 	if biome_transition_pair_matches(a, b, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh) {
 		return {
 			kind = .Basalt_Marsh_Cliff,
-			style = .Hard,
-			band_width_blocks = 72,
-			dominant_bias = 0.45,
-			height_bias_blocks = 4,
-			cliff_bias_boost = 0.30,
-			terrace_strength_boost = 0.18,
+			style = .Soft,
+			band_width_blocks = 128,
+			dominant_bias = 0.00,
+			height_bias_blocks = 0,
+			cliff_bias_boost = 0.00,
+			terrace_strength_boost = 0.00,
 			cave_openness_boost = 0.00,
-			local_detail_amplitude_boost_blocks = 2,
-			fantasy_affinity_boost = 0.06,
-			shoreline_width_scale = 0.85,
-			underwater_depression_boost_blocks = 2,
+			local_detail_amplitude_boost_blocks = 0.75,
+			fantasy_affinity_boost = 0.04,
+			shoreline_width_scale = 1.05,
+			underwater_depression_boost_blocks = 1,
 		}
 	}
 
 	if biome_transition_pair_matches(a, b, .Corrupted_Ash_Forest, .Temperate_Hills) {
 		return {
 			kind = .Corrupted_Border_Band,
-			style = .Hard,
-			band_width_blocks = 104,
-			dominant_bias = 0.30,
-			height_bias_blocks = 1,
-			cliff_bias_boost = 0.12,
-			terrace_strength_boost = 0.08,
-			cave_openness_boost = 0.06,
-			local_detail_amplitude_boost_blocks = 1.5,
-			fantasy_affinity_boost = 0.20,
+			style = .Soft,
+			band_width_blocks = 128,
+			dominant_bias = 0.00,
+			height_bias_blocks = 0,
+			cliff_bias_boost = 0.00,
+			terrace_strength_boost = 0.00,
+			cave_openness_boost = 0.03,
+			local_detail_amplitude_boost_blocks = 0.75,
+			fantasy_affinity_boost = 0.12,
 			shoreline_width_scale = 1.00,
-			underwater_depression_boost_blocks = 1,
+			underwater_depression_boost_blocks = 0.5,
 		}
 	}
 
@@ -2287,7 +2309,7 @@ biome_shape_target_apply_surface_relief_values :: proc(
 		target.local_detail_amplitude_blocks * local_signal +
 		ridge_lift
 
-	morphology_profile := surface_morphology_profile_for_biome(target.biome_id)
+	morphology_profile := target.surface_morphology_profile
 	morphology_strength := math.clamp(morphology_profile.strength, f32(0), f32(1))
 	if morphology_strength > 0.18 {
 		morphology_peak := math.smoothstep(
@@ -2482,8 +2504,22 @@ when ODIN_DEBUG {
 		)
 
 		blend_targets := [BIOME_FIELD_NEAREST_CELL_COUNT]BiomeShapeTarget {
-			{biome_id = .Temperate_Hills, surface_height_blocks = 10, cliff_bias = 0.20},
-			{biome_id = .Wet_Lowland_Marsh, surface_height_blocks = 20, cliff_bias = 0.40},
+			{
+				biome_id = .Temperate_Hills,
+				surface_height_blocks = 10,
+				cliff_bias = 0.20,
+				surface_morphology_profile = surface_morphology_profile_for_biome(
+					.Temperate_Hills,
+				),
+			},
+			{
+				biome_id = .Wet_Lowland_Marsh,
+				surface_height_blocks = 20,
+				cliff_bias = 0.40,
+				surface_morphology_profile = surface_morphology_profile_for_biome(
+					.Wet_Lowland_Marsh,
+				),
+			},
 			{},
 		}
 		blend_weights := [BIOME_FIELD_NEAREST_CELL_COUNT]f32{0.25, 0.75, 0}
@@ -2500,15 +2536,88 @@ when ODIN_DEBUG {
 			blended.biome_id == .Temperate_Hills,
 			"blended shape target should retain dominant biome identity",
 		)
+		log.assert(
+			debug_f32_approx_equal(blended.surface_morphology_profile.strength, 0.40, 0.001),
+			"biome shape target should blend surface morphology strength",
+		)
+		{
+			relief_fields := RegionalTerrainFields {
+				erosion = 0.25,
+			}
+			relief_blend_targets := [BIOME_FIELD_NEAREST_CELL_COUNT]BiomeShapeTarget {
+				{
+					biome_id = .Temperate_Hills,
+					surface_height_blocks = 72,
+					relief_amplitude_blocks = 18,
+					ruggedness_response = 0.65,
+					cliff_bias = 0.35,
+					local_detail_amplitude_blocks = 4,
+					fantasy_affinity = 0.25,
+					surface_morphology_profile = surface_morphology_profile_for_biome(
+						.Temperate_Hills,
+					),
+				},
+				{
+					biome_id = .Basalt_Spire_Highlands,
+					surface_height_blocks = 72,
+					relief_amplitude_blocks = 18,
+					ruggedness_response = 0.65,
+					cliff_bias = 0.35,
+					local_detail_amplitude_blocks = 4,
+					fantasy_affinity = 0.25,
+					surface_morphology_profile = surface_morphology_profile_for_biome(
+						.Basalt_Spire_Highlands,
+					),
+				},
+				{},
+			}
+			relief_blend_weights := [BIOME_FIELD_NEAREST_CELL_COUNT]f32{0.5, 0.5, 0}
+			temperate_relief_target := biome_shape_target_blend(
+				relief_blend_targets[:],
+				relief_blend_weights[:],
+				2,
+			)
+			renamed_relief_target := temperate_relief_target
+			renamed_relief_target.biome_id = .Basalt_Spire_Highlands
+			temperate_relief := biome_shape_target_apply_surface_relief_values(
+				temperate_relief_target,
+				relief_fields,
+				0.45,
+				0.25,
+				0.15,
+				0.78,
+			)
+			renamed_relief := biome_shape_target_apply_surface_relief_values(
+				renamed_relief_target,
+				relief_fields,
+				0.45,
+				0.25,
+				0.15,
+				0.78,
+			)
+			relief_height_delta := math.abs(
+				temperate_relief.surface_height_blocks - renamed_relief.surface_height_blocks,
+			)
+			log.assertf(
+				relief_height_delta <= 0.001,
+				"surface relief should not snap on retained biome identity, delta=%.2f",
+				relief_height_delta,
+			)
+		}
 
 		soft_rule := biome_transition_rule_for(
 			.Temperate_Hills,
 			.Wet_Lowland_Marsh,
 			SURFACE_BIOME_BLEND_BAND_BLOCKS,
 		)
-		hard_rule := biome_transition_rule_for(
+		basalt_marsh_rule := biome_transition_rule_for(
 			.Basalt_Spire_Highlands,
 			.Wet_Lowland_Marsh,
+			SURFACE_BIOME_BLEND_BAND_BLOCKS,
+		)
+		corrupted_temperate_rule := biome_transition_rule_for(
+			.Corrupted_Ash_Forest,
+			.Temperate_Hills,
 			SURFACE_BIOME_BLEND_BAND_BLOCKS,
 		)
 		log.assert(
@@ -2516,8 +2625,13 @@ when ODIN_DEBUG {
 			"temperate-marsh transition should use a soft shelf rule",
 		)
 		log.assert(
-			hard_rule.style == .Hard && hard_rule.kind == .Basalt_Marsh_Cliff,
-			"basalt-marsh transition should use a hard cliff rule",
+			basalt_marsh_rule.style == .Soft && basalt_marsh_rule.kind == .Basalt_Marsh_Cliff,
+			"basalt-marsh transition should use a soft blended rule",
+		)
+		log.assert(
+			corrupted_temperate_rule.style == .Soft &&
+			corrupted_temperate_rule.kind == .Corrupted_Border_Band,
+			"corrupted-temperate transition should use a soft blended rule",
 		)
 
 		boundary_distances := [BIOME_FIELD_NEAREST_CELL_COUNT]f32{10, 10, 220}
@@ -2530,32 +2644,33 @@ when ODIN_DEBUG {
 			1,
 			soft_weights[:],
 		)
-		hard_weights: [BIOME_FIELD_NEAREST_CELL_COUNT]f32
+		basalt_marsh_weights: [BIOME_FIELD_NEAREST_CELL_COUNT]f32
 		biome_transition_blend_weights_write(
 			boundary_distances[:],
 			BIOME_FIELD_NEAREST_CELL_COUNT,
 			SURFACE_BIOME_JUNCTION_BAND_BLOCKS,
-			hard_rule,
+			basalt_marsh_rule,
 			1,
-			hard_weights[:],
+			basalt_marsh_weights[:],
 		)
 		log.assert(
-			hard_weights[0] > soft_weights[0],
-			"hard transition should bias blend weights toward the dominant cell",
+			debug_f32_approx_equal(basalt_marsh_weights[0], soft_weights[0], 0.001) &&
+			debug_f32_approx_equal(basalt_marsh_weights[1], soft_weights[1], 0.001),
+			"soft surface transitions should not bias blend weights toward one cell",
 		)
 
-		hard_applied := biome_transition_rule_apply(
+		basalt_marsh_applied := biome_transition_rule_apply(
 			blended,
 			basalt_target,
 			marsh_target,
-			hard_rule,
+			basalt_marsh_rule,
 			1,
 			2,
 		)
 		log.assert(
-			hard_applied.cliff_bias > blended.cliff_bias &&
-			hard_applied.terrace_strength > blended.terrace_strength,
-			"hard transition should strengthen cliff and terrace shape parameters",
+			basalt_marsh_applied.cliff_bias <= blended.cliff_bias + 0.001 &&
+			basalt_marsh_applied.terrace_strength <= blended.terrace_strength + 0.001,
+			"soft surface transitions should not add cliff or terrace walls",
 		)
 
 		shore_target := temperate_target
