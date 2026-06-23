@@ -216,7 +216,7 @@ SUBTERRANEAN_MACRO_GRID_CONFIG :: FeatureGridConfig {
 SUBTERRANEAN_BIOME_GRID_CONFIG :: FeatureGridConfig {
 	domain           = .Subterranean,
 	level            = .Biome,
-	cell_size_blocks = 384,
+	cell_size_blocks = 768,
 	jitter_fraction  = 0.80,
 }
 SUBTERRANEAN_MICRO_GRID_CONFIG :: FeatureGridConfig {
@@ -729,13 +729,13 @@ biome_id_is_subterranean :: proc(biome_id: BiomeID) -> bool {
 
 surface_macro_zone_from_feature_id :: proc(feature_id: FeatureID) -> SurfaceMacroZone {
 	roll := feature_grid_unit_f32(u64(feature_id), SURFACE_MACRO_ZONE_SALT)
-	if roll < 0.45 {
+	if roll < 0.68 {
 		return .Temperate
 	}
-	if roll < 0.65 {
+	if roll < 0.78 {
 		return .Wetland
 	}
-	if roll < 0.85 {
+	if roll < 0.90 {
 		return .Volcanic
 	}
 	return .Corrupted
@@ -758,39 +758,39 @@ surface_biome_identity_from_macro_roll :: proc(
 ) -> BiomeID {
 	switch macro_zone {
 	case .Temperate:
-		if roll < 0.38 {
-			return .Old_Growth_Forest
-		}
-		if roll < 0.66 {
-			return .Temperate_Hills
-		}
-		if roll < 0.78 {
-			return .Wet_Lowland_Marsh
-		}
-		if roll < 0.86 {
-			return .Basalt_Spire_Highlands
-		}
-		if roll < 0.91 {
-			return .Emberglass_Badlands
-		}
-		if roll < 0.96 {
-			return .Corrupted_Fen
-		}
-		return .Corrupted_Ash_Forest
-	case .Wetland:
-		if roll < 0.42 {
-			return .Wet_Lowland_Marsh
-		}
-		if roll < 0.57 {
-			return .Corrupted_Fen
-		}
-		if roll < 0.73 {
+		if roll < 0.50 {
 			return .Old_Growth_Forest
 		}
 		if roll < 0.84 {
 			return .Temperate_Hills
 		}
+		if roll < 0.89 {
+			return .Wet_Lowland_Marsh
+		}
 		if roll < 0.93 {
+			return .Basalt_Spire_Highlands
+		}
+		if roll < 0.96 {
+			return .Emberglass_Badlands
+		}
+		if roll < 0.98 {
+			return .Corrupted_Fen
+		}
+		return .Corrupted_Ash_Forest
+	case .Wetland:
+		if roll < 0.28 {
+			return .Wet_Lowland_Marsh
+		}
+		if roll < 0.36 {
+			return .Corrupted_Fen
+		}
+		if roll < 0.70 {
+			return .Old_Growth_Forest
+		}
+		if roll < 0.92 {
+			return .Temperate_Hills
+		}
+		if roll < 0.96 {
 			return .Corrupted_Ash_Forest
 		}
 		if roll < 0.98 {
@@ -798,19 +798,19 @@ surface_biome_identity_from_macro_roll :: proc(
 		}
 		return .Emberglass_Badlands
 	case .Volcanic:
-		if roll < 0.42 {
+		if roll < 0.34 {
 			return .Basalt_Spire_Highlands
 		}
-		if roll < 0.64 {
+		if roll < 0.52 {
 			return .Emberglass_Badlands
 		}
-		if roll < 0.76 {
+		if roll < 0.60 {
 			return .Corrupted_Ash_Forest
 		}
-		if roll < 0.86 {
+		if roll < 0.80 {
 			return .Temperate_Hills
 		}
-		if roll < 0.92 {
+		if roll < 0.94 {
 			return .Old_Growth_Forest
 		}
 		if roll < 0.97 {
@@ -818,22 +818,22 @@ surface_biome_identity_from_macro_roll :: proc(
 		}
 		return .Wet_Lowland_Marsh
 	case .Corrupted:
-		if roll < 0.38 {
+		if roll < 0.30 {
 			return .Corrupted_Ash_Forest
 		}
-		if roll < 0.60 {
+		if roll < 0.42 {
 			return .Corrupted_Fen
 		}
-		if roll < 0.70 {
+		if roll < 0.52 {
 			return .Emberglass_Badlands
 		}
-		if roll < 0.80 {
+		if roll < 0.60 {
 			return .Basalt_Spire_Highlands
 		}
-		if roll < 0.88 {
+		if roll < 0.80 {
 			return .Old_Growth_Forest
 		}
-		if roll < 0.96 {
+		if roll < 0.88 {
 			return .Wet_Lowland_Marsh
 		}
 		return .Temperate_Hills

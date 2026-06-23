@@ -115,17 +115,17 @@ DecorationTreeShape :: struct {
 DECORATION_SURFACE_GRID_CONFIG :: FeatureGridConfig {
 	domain           = .Surface,
 	level            = .Micro,
-	cell_size_blocks = 48,
+	cell_size_blocks = 96,
 	jitter_fraction  = 0.70,
 }
 
-DECORATION_SURFACE_INFLUENCE_MARGIN_BLOCKS :: 48
+DECORATION_SURFACE_INFLUENCE_MARGIN_BLOCKS :: 96
 DECORATION_FAMILY_COUNT :: 16
 DECORATION_SURFACE_SLOT_COUNT_MAX :: u8(3)
 DECORATION_TREE_SHAPE_VARIANT_COUNT :: u8(6)
 DECORATION_TREE_SHAPE_SEGMENT_CAPACITY :: 18
 DECORATION_TREE_SHAPE_CROWN_CAPACITY :: 10
-DECORATION_SURFACE_PATCH_CELL_SIZE_BLOCKS :: i32(192)
+DECORATION_SURFACE_PATCH_CELL_SIZE_BLOCKS :: i32(256)
 DECORATION_SURFACE_FEATURE_SALT :: u64(0x91a7c5d3e42f68b0)
 DECORATION_SURFACE_ROLL_SALT :: u64(0x67c8b4319ad205ef)
 DECORATION_SURFACE_FAMILY_ROLL_SALT :: u64(0x92d7b6814c3ef05a)
@@ -314,11 +314,11 @@ decoration_surface_placement_profile_for_biome :: proc(
 	case .Temperate_Hills:
 		return {
 				family_id = .Baseline_Tree,
-				chance = 0.90,
-				sparse_chance = 0.46,
-				grove_chance = 0.98,
+				chance = 0.34,
+				sparse_chance = 0.10,
+				grove_chance = 0.66,
 				slot_count = 3,
-				max_stand_count = 15,
+				max_stand_count = 7,
 				stand_radius_blocks = 19,
 				wet_root_allowed = false,
 				min_root_water_clearance_blocks = 7,
@@ -327,11 +327,11 @@ decoration_surface_placement_profile_for_biome :: proc(
 	case .Old_Growth_Forest:
 		return {
 				family_id = .Baseline_Tree,
-				chance = 0.96,
-				sparse_chance = 0.62,
-				grove_chance = 1.00,
+				chance = 0.46,
+				sparse_chance = 0.16,
+				grove_chance = 0.78,
 				slot_count = 3,
-				max_stand_count = 24,
+				max_stand_count = 12,
 				stand_radius_blocks = 26,
 				wet_root_allowed = false,
 				min_root_water_clearance_blocks = 7,
@@ -340,11 +340,11 @@ decoration_surface_placement_profile_for_biome :: proc(
 	case .Wet_Lowland_Marsh:
 		return {
 				family_id = .Baseline_Tree,
-				chance = 0.68,
-				sparse_chance = 0.34,
-				grove_chance = 0.92,
+				chance = 0.26,
+				sparse_chance = 0.08,
+				grove_chance = 0.52,
 				slot_count = 3,
-				max_stand_count = 10,
+				max_stand_count = 5,
 				stand_radius_blocks = 17,
 				wet_root_allowed = true,
 				min_root_water_clearance_blocks = 8,
@@ -353,11 +353,11 @@ decoration_surface_placement_profile_for_biome :: proc(
 	case .Corrupted_Ash_Forest:
 		return {
 				family_id = .Dead_Ash_Tree,
-				chance = 0.76,
-				sparse_chance = 0.38,
-				grove_chance = 0.96,
+				chance = 0.28,
+				sparse_chance = 0.08,
+				grove_chance = 0.58,
 				slot_count = 3,
-				max_stand_count = 11,
+				max_stand_count = 5,
 				stand_radius_blocks = 18,
 				wet_root_allowed = false,
 				min_root_water_clearance_blocks = 7,
@@ -366,11 +366,11 @@ decoration_surface_placement_profile_for_biome :: proc(
 	case .Corrupted_Fen:
 		return {
 				family_id = .Dead_Ash_Tree,
-				chance = 0.84,
-				sparse_chance = 0.46,
-				grove_chance = 0.98,
+				chance = 0.30,
+				sparse_chance = 0.10,
+				grove_chance = 0.60,
 				slot_count = 3,
-				max_stand_count = 12,
+				max_stand_count = 6,
 				stand_radius_blocks = 19,
 				wet_root_allowed = true,
 				min_root_water_clearance_blocks = 8,
@@ -379,11 +379,11 @@ decoration_surface_placement_profile_for_biome :: proc(
 	case .Basalt_Spire_Highlands:
 		return {
 				family_id = .Stone_Tree,
-				chance = 0.70,
-				sparse_chance = 0.34,
-				grove_chance = 0.88,
+				chance = 0.22,
+				sparse_chance = 0.06,
+				grove_chance = 0.44,
 				slot_count = 3,
-				max_stand_count = 6,
+				max_stand_count = 3,
 				stand_radius_blocks = 14,
 				wet_root_allowed = false,
 				min_root_water_clearance_blocks = 10,
@@ -392,11 +392,11 @@ decoration_surface_placement_profile_for_biome :: proc(
 	case .Emberglass_Badlands:
 		return {
 				family_id = .Stone_Tree,
-				chance = 0.72,
-				sparse_chance = 0.36,
-				grove_chance = 0.90,
+				chance = 0.20,
+				sparse_chance = 0.05,
+				grove_chance = 0.42,
 				slot_count = 3,
-				max_stand_count = 6,
+				max_stand_count = 3,
 				stand_radius_blocks = 14,
 				wet_root_allowed = false,
 				min_root_water_clearance_blocks = 12,
@@ -791,82 +791,82 @@ decoration_surface_family_select :: proc(
 
 	switch biome_id {
 	case .Temperate_Hills:
-		if density_class == .Grove && roll < 0.100 {
+		if density_class == .Grove && roll < 0.025 {
 			return .Ruin_Hamlet
 		}
-		if roll >= 0.100 && roll < 0.200 {
+		if roll >= 0.025 && roll < 0.050 {
 			return .Watchtower_Ruin
 		}
-		if roll >= 0.200 && roll < 0.280 {
+		if roll >= 0.050 && roll < 0.075 {
 			return .Ruin_Pillar_Set
 		}
 	case .Old_Growth_Forest:
-		if density_class == .Grove && roll < 0.085 {
+		if density_class == .Grove && roll < 0.020 {
 			return .Ruin_Hamlet
 		}
-		if roll >= 0.085 && roll < 0.170 {
+		if roll >= 0.020 && roll < 0.045 {
 			return .Watchtower_Ruin
 		}
-		if roll >= 0.170 && roll < 0.250 {
+		if roll >= 0.045 && roll < 0.070 {
 			return .Ruin_Pillar_Set
 		}
-		if roll < 0.32 {
+		if roll < 0.24 {
 			return .Root_Cluster
 		}
 	case .Wet_Lowland_Marsh:
-		if density_class == .Grove && roll < 0.070 {
+		if density_class == .Grove && roll < 0.018 {
 			return .Ruin_Hamlet
 		}
-		if roll >= 0.070 && roll < 0.135 {
+		if roll >= 0.018 && roll < 0.045 {
 			return .Ruin_Pillar_Set
 		}
-		if roll < 0.40 {
+		if roll < 0.28 {
 			return .Fern_Thicket
 		}
 	case .Corrupted_Ash_Forest:
-		if roll < 0.105 {
+		if roll < 0.035 {
 			return .Palisade_Fort
 		}
-		if roll < 0.220 {
+		if roll < 0.080 {
+			return .Ruin_Pillar_Set
+		}
+		if roll < 0.24 {
+			return .Ash_Bramble
+		}
+	case .Corrupted_Fen:
+		if roll < 0.028 {
+			return .Palisade_Fort
+		}
+		if roll < 0.070 {
 			return .Ruin_Pillar_Set
 		}
 		if roll < 0.36 {
 			return .Ash_Bramble
 		}
-	case .Corrupted_Fen:
-		if roll < 0.070 {
-			return .Palisade_Fort
-		}
-		if roll < 0.190 {
-			return .Ruin_Pillar_Set
-		}
-		if roll < 0.58 {
-			return .Ash_Bramble
-		}
 	case .Basalt_Spire_Highlands:
-		if roll < 0.150 {
+		if roll < 0.045 {
 			return .Palisade_Fort
 		}
-		if roll < 0.290 {
-			return .Ruin_Pillar_Set
-		}
-		if roll < 0.70 {
-			return .Basalt_Column_Cluster
-		}
-		if roll < 0.88 {
-			return .Crystal_Growth_Cluster
-		}
-	case .Emberglass_Badlands:
-		if roll < 0.145 {
-			return .Palisade_Fort
-		}
-		if roll < 0.285 {
+		if roll < 0.095 {
 			return .Ruin_Pillar_Set
 		}
 		if roll < 0.52 {
+			return .Basalt_Column_Cluster
+		}
+		if roll < 0.68 {
+			return .Crystal_Growth_Cluster
+		}
+	case .Emberglass_Badlands:
+		if roll < 0.040 {
+			return .Palisade_Fort
+		}
+		if roll < 0.090 {
+			return .Ruin_Pillar_Set
+		}
+		if roll < 0.34 {
 			return .Lava_Vent
 		}
-		if roll < 0.88 {
+		if roll < 0.66 {
 			return .Basalt_Column_Cluster
 		}
 	case .Fungal_Vaults, .Crystal_Geode_Network, .Buried_Aquifer_Caves:

@@ -146,7 +146,7 @@ CaveNetworkDebugSurfaceSample :: struct {
 CAVE_NETWORK_GRID_CONFIG :: FeatureGridConfig {
 	domain           = .Subterranean,
 	level            = .Micro,
-	cell_size_blocks = 384,
+	cell_size_blocks = 768,
 	jitter_fraction  = 0.72,
 }
 
@@ -173,7 +173,7 @@ CAVE_NETWORK_SURFACE_CLEARANCE_BLOCKS :: f32(12)
 CAVE_NETWORK_SURFACE_MIN_DEPTH_BLOCKS :: f32(72)
 CAVE_NETWORK_SURFACE_MAX_DEPTH_BLOCKS :: f32(152)
 CAVE_NETWORK_SURFACE_OWNER_RADIUS_SCALE :: f32(0.45)
-CAVE_NETWORK_SURFACE_ANCHOR_EMIT_ROLL_MAX :: f32(0.42)
+CAVE_NETWORK_SURFACE_ANCHOR_EMIT_ROLL_MAX :: f32(0.30)
 CAVE_NETWORK_SURFACE_CAVE_MOUTH_ROLL_MAX :: f32(0.68)
 CAVE_NETWORK_SURFACE_MOUTH_OFFSET_MIN_SCALE :: f32(0.36)
 CAVE_NETWORK_SURFACE_MOUTH_OFFSET_MAX_SCALE :: f32(0.78)
@@ -408,13 +408,16 @@ cave_network_hydrology_context_from_owner :: proc(
 		nearest_distance_blocks = BIOME_FIELD_NO_DISTANCE,
 		water_level_blocks      = f32(block_y),
 	}
-	hydrology_layer_subterranean_sample_accumulate_node(
-		&sample,
-		water_feature_subterranean_node_from_owner(key, owner),
-		block_x,
-		block_y,
-		block_z,
-	)
+	node := water_feature_subterranean_node_from_owner(key, owner)
+	if water_feature_subterranean_node_should_emit(node) {
+		hydrology_layer_subterranean_sample_accumulate_node(
+			&sample,
+			node,
+			block_x,
+			block_y,
+			block_z,
+		)
+	}
 	return sample
 }
 
@@ -990,7 +993,7 @@ when ODIN_DEBUG {
 			"water-influenced Cave Network connectors should remain river junctions",
 		)
 		log.assert(
-			CAVE_NETWORK_SURFACE_ANCHOR_EMIT_ROLL_MAX >= 0.40 &&
+			CAVE_NETWORK_SURFACE_ANCHOR_EMIT_ROLL_MAX >= 0.20 &&
 			CAVE_NETWORK_SURFACE_ANCHOR_EMIT_ROLL_MAX < CAVE_NETWORK_SURFACE_CAVE_MOUTH_ROLL_MAX,
 			"surface Cave Network anchors should stay sparse while Cave Mouth bias is tuned separately",
 		)

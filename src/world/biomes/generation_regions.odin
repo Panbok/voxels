@@ -87,10 +87,11 @@ GenerationRegion :: struct {
 
 GENERATION_REGION_BLOCK_LENGTH :: 512
 
-// Margins include one owning biome cell plus the first blend band so chunk queries can
-// sample nearest-cell and boundary data from a region without inventing edge-local features.
+// Margins include the neighbouring biome owner cells needed by nearest-cell sampling.
+// Surface sampling keeps the legacy blend-band margin; subterranean sampling uses a
+// full neighbouring owner shell after the coarser underground biome scale.
 GENERATION_REGION_SURFACE_BIOME_MARGIN_BLOCKS :: 608
-GENERATION_REGION_SUBTERRANEAN_BIOME_MARGIN_BLOCKS :: 456
+GENERATION_REGION_SUBTERRANEAN_BIOME_MARGIN_BLOCKS :: 768
 GENERATION_REGION_SURFACE_WATER_FEATURE_MARGIN_BLOCKS :: HYDROLOGY_SURFACE_SAMPLE_MARGIN_BLOCKS
 GENERATION_REGION_SUBTERRANEAN_WATER_FEATURE_MARGIN_BLOCKS ::
 	HYDROLOGY_SUBTERRANEAN_SAMPLE_MARGIN_BLOCKS
@@ -521,6 +522,9 @@ generation_region_water_features_fill :: proc(region: ^GenerationRegion) {
 				z = z,
 			}
 			node := water_feature_surface_node_from_owner(region.key, owner)
+			if !water_feature_surface_node_should_emit(region.key, node) {
+				continue
+			}
 			generation_region_water_feature_node_append(region, node)
 
 			x_neighbor := FeatureGridCoord2 {
@@ -565,6 +569,9 @@ generation_region_water_features_fill :: proc(region: ^GenerationRegion) {
 					z = z,
 				}
 				node := water_feature_subterranean_node_from_owner(region.key, owner)
+				if !water_feature_subterranean_node_should_emit(node) {
+					continue
+				}
 				generation_region_water_feature_node_append(region, node)
 
 				x_neighbor := FeatureGridCoord3 {
@@ -1999,7 +2006,7 @@ when ODIN_DEBUG {
 			"origin region surface biome sparse cell count mismatch",
 		)
 		log.assert(
-			origin_region.subterranean_biome_cell_count == 125,
+			origin_region.subterranean_biome_cell_count == 27,
 			"origin region subterranean biome sparse cell count mismatch",
 		)
 		log.assert(
@@ -2069,7 +2076,7 @@ when ODIN_DEBUG {
 			query,
 			subterranean_cells[:],
 		)
-		log.assert(subterranean_cell_count == 64, "chunk subterranean biome query count mismatch")
+		log.assert(subterranean_cell_count == 27, "chunk subterranean biome query count mismatch")
 
 		surface_decorations: [GENERATION_REGION_SURFACE_DECORATION_FEATURE_CAPACITY]DecorationFeature
 		_ = generation_region_surface_decoration_features_write(

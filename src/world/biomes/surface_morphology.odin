@@ -74,7 +74,7 @@ SurfaceMorphologyFeature :: struct {
 SURFACE_MORPHOLOGY_OWNER_GRID_CONFIG :: FeatureGridConfig {
 	domain           = .Surface,
 	level            = .Micro,
-	cell_size_blocks = 192,
+	cell_size_blocks = 384,
 	jitter_fraction  = 0.72,
 }
 
@@ -262,7 +262,7 @@ surface_morphology_feature_from_owner :: proc(
 		return
 	}
 
-	chance := regional_terrain_field_lerp(f32(0.18), f32(0.72), basalt_weight)
+	chance := regional_terrain_field_lerp(f32(0.08), f32(0.34), basalt_weight)
 	roll := feature_grid_unit_f32(u64(point.id), SURFACE_MORPHOLOGY_ROLL_SALT)
 	if roll > chance {
 		return
@@ -272,9 +272,9 @@ surface_morphology_feature_from_owner :: proc(
 	height_roll := feature_grid_unit_f32(u64(point.id), SURFACE_MORPHOLOGY_HEIGHT_SALT)
 	shelf_roll := feature_grid_unit_f32(u64(point.id), SURFACE_MORPHOLOGY_SHELF_SALT)
 	arch_roll := feature_grid_unit_f32(u64(point.id), SURFACE_MORPHOLOGY_ARCH_SALT)
-	radius := regional_terrain_field_lerp(f32(78), f32(136), radius_roll)
+	radius := regional_terrain_field_lerp(f32(58), f32(108), radius_roll)
 	height :=
-		regional_terrain_field_lerp(f32(26), f32(58), height_roll) *
+		regional_terrain_field_lerp(f32(20), f32(46), height_roll) *
 		regional_terrain_field_lerp(f32(0.86), f32(1.16), basalt_weight)
 	template_roll := feature_grid_unit_f32(u64(point.id), SURFACE_MORPHOLOGY_TEMPLATE_SALT)
 	template_variant := u8(
@@ -285,9 +285,9 @@ surface_morphology_feature_from_owner :: proc(
 	}
 
 	spire_roll := feature_grid_unit_f32(u64(point.id), SURFACE_MORPHOLOGY_SPIRE_COUNT_SALT)
-	spire_count := u8(3 + math.floor_f32(spire_roll * 4))
-	if spire_count > 6 {
-		spire_count = 6
+	spire_count := u8(2 + math.floor_f32(spire_roll * 3))
+	if spire_count > 4 {
+		spire_count = 4
 	}
 
 	arch_strength := f32(0)
@@ -305,7 +305,7 @@ surface_morphology_feature_from_owner :: proc(
 		biome_id                = .Basalt_Spire_Highlands,
 		biome_weight            = basalt_weight,
 		radius_blocks           = radius,
-		influence_radius_blocks = radius + 28,
+		influence_radius_blocks = radius + 20,
 		height_blocks           = height,
 		cut_depth_blocks        = regional_terrain_field_lerp(f32(7), f32(15), arch_strength),
 		envelope_lift_blocks    = height * regional_terrain_field_lerp(
@@ -313,7 +313,7 @@ surface_morphology_feature_from_owner :: proc(
 			f32(0.46),
 			basalt_weight,
 		),
-		envelope_cut_blocks     = regional_terrain_field_lerp(f32(5), f32(13), height_roll),
+		envelope_cut_blocks     = regional_terrain_field_lerp(f32(4), f32(10), height_roll),
 		rotation_radians        = feature_grid_unit_f32(
 			u64(point.id),
 			SURFACE_MORPHOLOGY_ROTATION_SALT,

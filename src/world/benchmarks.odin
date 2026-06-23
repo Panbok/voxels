@@ -945,6 +945,9 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 						z = i32(z),
 					}
 					node := biomes.water_feature_surface_node_from_owner(key, owner)
+					if !biomes.water_feature_surface_node_should_emit(key, node) {
+						continue
+					}
 					if want_lake && node.kind != .Surface_Lake {
 						continue
 					}

@@ -116,14 +116,14 @@ HydrologyLayerSubterraneanSample :: struct {
 HYDROLOGY_SURFACE_GRAPH_GRID_CONFIG :: FeatureGridConfig {
 	domain           = .Surface,
 	level            = .Micro,
-	cell_size_blocks = 512,
+	cell_size_blocks = 768,
 	jitter_fraction  = 0.70,
 }
 
 HYDROLOGY_SUBTERRANEAN_GRAPH_GRID_CONFIG :: FeatureGridConfig {
 	domain           = .Subterranean,
 	level            = .Micro,
-	cell_size_blocks = 512,
+	cell_size_blocks = 768,
 	jitter_fraction  = 0.65,
 }
 
@@ -132,6 +132,7 @@ HYDROLOGY_SUBTERRANEAN_DOMAIN_SALT :: u64(0xb471c9e3206df85a)
 HYDROLOGY_NODE_KIND_SALT :: u64(0x6f1d2c3b4a596877)
 HYDROLOGY_SEGMENT_ID_SALT :: u64(0xa5159f2edc0b4763)
 HYDROLOGY_SEGMENT_EXISTENCE_SALT :: u64(0xe284bf615d0c7a39)
+HYDROLOGY_NODE_ACCEPTANCE_SALT :: u64(0x94c2a6db35815d0c)
 HYDROLOGY_SEGMENT_BEND_X_SALT :: u64(0x7d3a519c842ef06b)
 HYDROLOGY_SEGMENT_BEND_Y_SALT :: u64(0x1c9f62b85e37a4d0)
 HYDROLOGY_SEGMENT_BEND_Z_SALT :: u64(0xbd47e19305ac628f)
@@ -143,8 +144,8 @@ HYDROLOGY_LEVEL_SALT :: u64(0x40f3b91e2c756a8d)
 HYDROLOGY_RADIUS_SALT :: u64(0x15d0c7a39e284bf6)
 HYDROLOGY_DEPTH_SALT :: u64(0x7ae39b15c602f4d8)
 
-HYDROLOGY_SURFACE_SAMPLE_MARGIN_BLOCKS :: 256
-HYDROLOGY_SUBTERRANEAN_SAMPLE_MARGIN_BLOCKS :: 256
+HYDROLOGY_SURFACE_SAMPLE_MARGIN_BLOCKS :: 128
+HYDROLOGY_SUBTERRANEAN_SAMPLE_MARGIN_BLOCKS :: 192
 HYDROLOGY_SURFACE_BANK_FALLOFF_BLOCKS :: f32(24)
 HYDROLOGY_SUBTERRANEAN_FALLOFF_BLOCKS :: f32(36)
 
@@ -193,16 +194,16 @@ water_feature_surface_node_from_owner :: proc(
 	radius_roll := feature_grid_unit_f32(hash, HYDROLOGY_RADIUS_SALT)
 	depth_roll := feature_grid_unit_f32(hash, HYDROLOGY_DEPTH_SALT)
 
-	radius := regional_terrain_field_lerp(34, 82, radius_roll)
-	depression := regional_terrain_field_lerp(2.5, 7.0, depth_roll)
-	channel_width := regional_terrain_field_lerp(14, 32, radius_roll)
+	radius := regional_terrain_field_lerp(22, 54, radius_roll)
+	depression := regional_terrain_field_lerp(1.5, 4.5, depth_roll)
+	channel_width := regional_terrain_field_lerp(10, 22, radius_roll)
 	if kind == .Surface_River {
-		radius = channel_width * 0.65
-		depression = regional_terrain_field_lerp(1.5, 4.5, depth_roll)
+		radius = channel_width * 0.60
+		depression = regional_terrain_field_lerp(1.0, 3.0, depth_roll)
 	}
 	if macro_zone == .Wetland {
-		radius *= 1.25
-		depression *= 0.75
+		radius *= 1.12
+		depression *= 0.70
 	}
 
 	return {
@@ -289,6 +290,10 @@ water_feature_surface_segment_from_owners :: proc(
 ) {
 	from_node := water_feature_surface_node_from_owner(key, owner)
 	to_node := water_feature_surface_node_from_owner(key, neighbor_owner)
+	if !water_feature_surface_node_should_emit(key, from_node) ||
+	   !water_feature_surface_node_should_emit(key, to_node) {
+		return
+	}
 	segment = water_feature_segment_from_nodes(
 		key,
 		from_node,
@@ -309,9 +314,98 @@ water_feature_subterranean_segment_from_owners :: proc(
 ) {
 	from_node := water_feature_subterranean_node_from_owner(key, owner)
 	to_node := water_feature_subterranean_node_from_owner(key, neighbor_owner)
+	if !water_feature_subterranean_node_should_emit(from_node) ||
+	   !water_feature_subterranean_node_should_emit(to_node) {
+		return
+	}
 	segment = water_feature_segment_from_nodes(key, from_node, to_node, .Underground_River, owner)
 	exists = water_feature_subterranean_segment_should_exist(segment, from_node, to_node)
 	return
+}
+
+water_feature_surface_node_should_emit :: proc(
+	key: FeatureGridKey,
+	node: WaterFeatureNode,
+) -> bool {
+	if !water_feature_kind_is_surface(node.kind) || node.kind == .Sea {
+		return false
+	}
+	block_x := i32(math.floor_f32(node.x))
+	block_z := i32(math.floor_f32(node.z))
+	surface_height_blocks := water_feature_surface_dry_height_estimate(key, block_x, block_z)
+	if surface_height_blocks < SEA_LEVEL_BLOCKS + 6 {
+		return false
+	}
+	roll := feature_grid_unit_f32(u64(node.id), HYDROLOGY_NODE_ACCEPTANCE_SALT)
+	chance: f32
+	switch node.source_biome_id {
+	case .Wet_Lowland_Marsh:
+		chance = 0.18
+	case .Corrupted_Fen:
+		chance = 0.12
+	case .Temperate_Hills, .Old_Growth_Forest:
+		chance = 0.08
+	case .Corrupted_Ash_Forest:
+		chance = 0.06
+	case .Basalt_Spire_Highlands, .Emberglass_Badlands:
+		chance = 0.05
+	case .Fungal_Vaults, .Crystal_Geode_Network, .Buried_Aquifer_Caves:
+		chance = 0.04
+	}
+	if node.kind == .Surface_River {
+		chance += 0.02
+	}
+	if surface_height_blocks > SEA_LEVEL_BLOCKS + 64 {
+		chance *= 0.35
+	}
+	return roll < math.clamp(chance, f32(0.02), f32(0.26))
+}
+
+water_feature_surface_dry_height_estimate :: proc(
+	key: FeatureGridKey,
+	block_x, block_z: i32,
+) -> f32 {
+	sample := surface_biome_field_sample(key, block_x, block_z)
+	if sample.cell_count == 0 {
+		return SEA_LEVEL_BLOCKS + 8
+	}
+	fields := regional_terrain_fields_sample(key, block_x, 0, block_z)
+	biome_id := sample.cells[sample.dominant_index].biome_id
+	target := biome_shape_target_evaluate(biome_profile_for(biome_id), fields)
+	return target.surface_height_blocks
+}
+
+water_feature_subterranean_node_should_emit :: proc(node: WaterFeatureNode) -> bool {
+	if !water_feature_kind_is_subterranean(node.kind) {
+		return false
+	}
+	roll := feature_grid_unit_f32(u64(node.id), HYDROLOGY_NODE_ACCEPTANCE_SALT)
+	chance: f32
+	switch node.source_biome_id {
+	case .Buried_Aquifer_Caves:
+		chance = 0.24
+	case .Fungal_Vaults:
+		chance = 0.14
+	case .Crystal_Geode_Network:
+		chance = 0.12
+	case .Temperate_Hills,
+	     .Old_Growth_Forest,
+	     .Basalt_Spire_Highlands,
+	     .Emberglass_Badlands,
+	     .Wet_Lowland_Marsh,
+	     .Corrupted_Ash_Forest,
+	     .Corrupted_Fen:
+		chance = 0.08
+	}
+	#partial switch node.kind {
+	case .Aquifer:
+		chance += 0.06
+	case .Underground_River:
+		chance += 0.02
+	case .Flooded_Region:
+		chance -= 0.04
+	}
+	return roll < math.clamp(chance, f32(0.04), f32(0.34))
 }
 
 water_feature_node_anchor :: proc(node: WaterFeatureNode) -> WaterFeatureAnchor {
@@ -554,21 +648,21 @@ water_feature_surface_segment_should_exist :: proc(
 		return false
 	}
 	roll := feature_grid_unit_f32(u64(segment.id), HYDROLOGY_SEGMENT_EXISTENCE_SALT)
-	chance := f32(0.18)
+	chance := f32(0.10)
 	if from_node.kind == .Surface_River || to_node.kind == .Surface_River {
-		chance += 0.24
+		chance += 0.16
 	}
 	if from_node.kind == .Surface_Lake && to_node.kind == .Surface_Lake {
 		chance -= 0.08
 	}
 	level_delta := math.abs(from_node.water_level_blocks - to_node.water_level_blocks)
 	if level_delta < 4 {
-		chance += 0.12
-	}
-	if from_node.influence_radius_blocks > 70 || to_node.influence_radius_blocks > 70 {
 		chance += 0.08
 	}
-	return roll < math.clamp(chance, f32(0.06), f32(0.62))
+	if from_node.influence_radius_blocks > 50 || to_node.influence_radius_blocks > 50 {
+		chance += 0.04
+	}
+	return roll < math.clamp(chance, f32(0.04), f32(0.38))
 }
 
 water_feature_subterranean_segment_should_exist :: proc(
@@ -579,18 +673,18 @@ water_feature_subterranean_segment_should_exist :: proc(
 	   water_feature_source_water_group(to_node.source_biome_id) {
 		return false
 	}
-	if from_node.kind == .Flooded_Region || to_node.kind == .Flooded_Region {
-		return true
-	}
 	roll := feature_grid_unit_f32(u64(segment.id), HYDROLOGY_SEGMENT_EXISTENCE_SALT)
-	chance := f32(0.46)
+	chance := f32(0.28)
 	if from_node.kind == .Underground_River || to_node.kind == .Underground_River {
-		chance += 0.16
+		chance += 0.10
 	}
 	if from_node.kind == .Aquifer && to_node.kind == .Aquifer {
 		chance -= 0.12
 	}
-	return roll < math.clamp(chance, f32(0.18), f32(0.82))
+	if from_node.kind == .Flooded_Region || to_node.kind == .Flooded_Region {
+		chance += 0.12
+	}
+	return roll < math.clamp(chance, f32(0.08), f32(0.54))
 }
 
 water_feature_id_from_owner :: proc {
@@ -670,6 +764,9 @@ hydrology_layer_surface_sample :: proc(
 				z = z,
 			}
 			node := water_feature_surface_node_from_owner(key, owner)
+			if !water_feature_surface_node_should_emit(key, node) {
+				continue
+			}
 			hydrology_layer_surface_sample_accumulate_node(&sample, node, block_x, block_z)
 			hydrology_layer_surface_sample_accumulate_anchor(
 				&sample,
@@ -746,6 +843,9 @@ hydrology_layer_subterranean_sample :: proc(
 					z = z,
 				}
 				node := water_feature_subterranean_node_from_owner(key, owner)
+				if !water_feature_subterranean_node_should_emit(node) {
+					continue
+				}
 				hydrology_layer_subterranean_sample_accumulate_node(
 					&sample,
 					node,

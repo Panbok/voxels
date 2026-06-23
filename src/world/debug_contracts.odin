@@ -14,8 +14,8 @@ import biomes "world:biomes"
 when ODIN_DEBUG {
 
 	DEBUG_TERRAIN_QUALITY_GRID_STEPS :: 17
-	DEBUG_TERRAIN_QUALITY_GRID_STEP_BLOCKS :: 64
-	DEBUG_TERRAIN_QUALITY_GRID_MIN_BLOCK :: -512
+	DEBUG_TERRAIN_QUALITY_GRID_STEP_BLOCKS :: 128
+	DEBUG_TERRAIN_QUALITY_GRID_MIN_BLOCK :: -1024
 
 	debug_terrain_generation_quality_contract_checks_run :: proc(key: biomes.FeatureGridKey) {
 		log.assert(
