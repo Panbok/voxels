@@ -74,6 +74,9 @@ TERRAIN_DECORATION_TREE_MEMBER_VARIANT_SALT :: u64(0xc5197ba48ed6032f)
 TERRAIN_DECORATION_TREE_MEMBER_ROTATION_SALT :: u64(0x70f3a51bc84d2e69)
 TERRAIN_DECORATION_TREE_MEMBER_MATERIAL_SALT :: u64(0xad25c8e73b96140f)
 TERRAIN_DECORATION_TREE_CROWN_ACCENT_SALT :: u64(0x6e97310fb4c825da)
+TERRAIN_DECORATION_TREE_ROOT_SEARCH_RADIUS_BLOCKS :: i32(6)
+TERRAIN_DECORATION_TREE_ROOT_CORE_RADIUS_BLOCKS :: i32(1)
+TERRAIN_DECORATION_TREE_ROOT_SLOPE_TOLERANCE_BLOCKS :: i32(3)
 TERRAIN_DECORATION_TREE_SEGMENT_SHELL_RADIUS_BLOCKS :: i32(1)
 TERRAIN_DECORATION_TREE_BRANCH_SHELL_TAPER_PERCENT :: i32(80)
 TERRAIN_DECORATION_TREE_TRUNK_SHELL_TAPER_PERCENT :: i32(70)
@@ -481,6 +484,123 @@ terrain_decoration_surface_root_find :: proc(
 		terrain_decoration_block_mark_debug(view, local_x, base_y, local_z)
 	}
 	found = true
+	return
+}
+
+terrain_decoration_tree_root_search_may_enter_chunk :: proc(local_x, local_z: i32) -> bool {
+	search_radius := TERRAIN_DECORATION_TREE_ROOT_SEARCH_RADIUS_BLOCKS
+	return(
+		local_x >= -search_radius &&
+		local_z >= -search_radius &&
+		local_x < CHUNK_BLOCK_LENGTH + search_radius &&
+		local_z < CHUNK_BLOCK_LENGTH + search_radius \
+	)
+}
+
+terrain_decoration_tree_root_candidate_find :: proc(
+	view: ^world_async.ChunkVoxelView,
+	feature: biomes.DecorationFeature,
+	chunk_origin_y: i32,
+	local_x, local_z: i32,
+	columns: []TerrainBiomeColumn,
+) -> (
+	base_y: i32,
+	found: bool,
+) {
+	if !terrain_decoration_local_xz_inside(
+		local_x,
+		local_z,
+		TERRAIN_DECORATION_SURFACE_EDGE_MARGIN_BLOCKS,
+	) {
+		return
+	}
+
+	column := columns[local_x + local_z * CHUNK_BLOCK_LENGTH]
+	base_y = column.surface_height - chunk_origin_y
+	if base_y < 0 || base_y >= CHUNK_BLOCK_LOCAL_MAX {
+		return
+	}
+	index := chunk_block_index(u32(local_x), u32(base_y), u32(local_z))
+	if view.blocks.occupancy[index] != .Solid {
+		return
+	}
+	if !terrain_decoration_surface_root_supports(feature, column, view.blocks.material_id[index]) {
+		return
+	}
+
+	for dz := -TERRAIN_DECORATION_TREE_ROOT_CORE_RADIUS_BLOCKS;
+	    dz <= TERRAIN_DECORATION_TREE_ROOT_CORE_RADIUS_BLOCKS;
+	    dz += 1 {
+		for dx := -TERRAIN_DECORATION_TREE_ROOT_CORE_RADIUS_BLOCKS;
+		    dx <= TERRAIN_DECORATION_TREE_ROOT_CORE_RADIUS_BLOCKS;
+		    dx += 1 {
+			if !terrain_decoration_surface_structure_sample_suitable(
+				view,
+				feature,
+				chunk_origin_y,
+				local_x + dx,
+				local_z + dz,
+				base_y,
+				columns,
+				TERRAIN_DECORATION_TREE_ROOT_SLOPE_TOLERANCE_BLOCKS,
+			) {
+				return
+			}
+		}
+	}
+
+	found = true
+	return
+}
+
+terrain_decoration_tree_root_find :: proc(
+	view: ^world_async.ChunkVoxelView,
+	feature: biomes.DecorationFeature,
+	chunk_origin_y: i32,
+	root_local_x, root_local_z: i32,
+	columns: []TerrainBiomeColumn,
+) -> (
+	local_x: i32,
+	base_y: i32,
+	local_z: i32,
+	found: bool,
+) {
+	if !terrain_decoration_tree_root_search_may_enter_chunk(root_local_x, root_local_z) {
+		return
+	}
+
+	search_radius := TERRAIN_DECORATION_TREE_ROOT_SEARCH_RADIUS_BLOCKS
+	for ring := i32(0); ring <= search_radius; ring += 1 {
+		for dz := -ring; dz <= ring; dz += 1 {
+			for dx := -ring; dx <= ring; dx += 1 {
+				if ring != 0 && math.abs(dx) != ring && math.abs(dz) != ring {
+					continue
+				}
+				candidate_x := root_local_x + dx
+				candidate_z := root_local_z + dz
+				candidate_base_y, candidate_found := terrain_decoration_tree_root_candidate_find(
+					view,
+					feature,
+					chunk_origin_y,
+					candidate_x,
+					candidate_z,
+					columns,
+				)
+				if candidate_found {
+					when TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
+						terrain_decoration_block_mark_debug(
+							view,
+							candidate_x,
+							candidate_base_y,
+							candidate_z,
+						)
+					}
+					return candidate_x, candidate_base_y, candidate_z, true
+				}
+			}
+		}
+	}
+
 	return
 }
 
@@ -1088,11 +1208,15 @@ terrain_decoration_tree_stand_apply :: proc(
 	}
 
 	for member_index := u8(0); member_index < stand_count; member_index += 1 {
-		result.tree_instances_attempted += 1
 		offset_x, offset_z := terrain_decoration_tree_member_offset(feature, member_index)
 		local_x := root_x + offset_x - chunk_origin.x
 		local_z := root_z + offset_z - chunk_origin.z
-		base_y, root_found := terrain_decoration_surface_root_find(
+		if !terrain_decoration_tree_root_search_may_enter_chunk(local_x, local_z) {
+			continue
+		}
+		result.tree_instances_attempted += 1
+
+		base_x, base_y, base_z, root_found := terrain_decoration_tree_root_find(
 			view,
 			feature,
 			chunk_origin.y,
@@ -1115,9 +1239,9 @@ terrain_decoration_tree_stand_apply :: proc(
 			shape_variant,
 			rotation,
 			material_variant,
-			local_x,
+			base_x,
 			base_y,
-			local_z,
+			base_z,
 		)
 		if written == 0 {
 			result.tree_shape_rejected += 1
@@ -1392,7 +1516,16 @@ terrain_decoration_tree_apply :: proc(
 		base_y,
 		local_z,
 	) {
-		return 0
+		return terrain_decoration_tree_compact_apply(
+			view,
+			shape,
+			family_id,
+			biome_id,
+			material_variant,
+			local_x,
+			base_y,
+			local_z,
+		)
 	}
 
 	materials := terrain_decoration_tree_materials_for(family_id, biome_id, material_variant)
@@ -1406,6 +1539,111 @@ terrain_decoration_tree_apply :: proc(
 		local_z,
 		materials,
 	)
+}
+
+terrain_decoration_tree_compact_apply :: proc(
+	view: ^world_async.ChunkVoxelView,
+	shape: biomes.DecorationTreeShape,
+	family_id: biomes.DecorationFamilyID,
+	biome_id: biomes.BiomeID,
+	material_variant: u8,
+	local_x, base_y, local_z: i32,
+) -> u32 {
+	available_height := CHUNK_BLOCK_LOCAL_MAX - base_y
+	if available_height < 6 {
+		return 0
+	}
+
+	trunk_height := math.min(i32(shape.height_blocks), i32(7))
+	trunk_height = math.min(trunk_height, available_height - 3)
+	if trunk_height < 4 {
+		return 0
+	}
+	crown_radius := i32(2)
+	if trunk_height >= 6 {
+		crown_radius = 3
+	}
+	crown_y := trunk_height + 1
+	crown := biomes.DecorationTreeCrown {
+		center = {x = 0, y = crown_y, z = 0},
+		radius_xz = u8(crown_radius),
+		radius_y = 1,
+	}
+
+	for y := i32(1); y <= trunk_height; y += 1 {
+		if !terrain_decoration_tree_offset_can_place(
+			view,
+			{x = 0, y = y, z = 0},
+			local_x,
+			base_y,
+			local_z,
+		) {
+			return 0
+		}
+	}
+	for dz := -crown_radius; dz <= crown_radius; dz += 1 {
+		for dx := -crown_radius; dx <= crown_radius; dx += 1 {
+			for dy := -i32(crown.radius_y); dy <= i32(crown.radius_y); dy += 1 {
+				if !terrain_decoration_tree_crown_contains(dx, dy, dz, crown) {
+					continue
+				}
+				if !terrain_decoration_tree_offset_can_place(
+					view,
+					{x = dx, y = crown_y + dy, z = dz},
+					local_x,
+					base_y,
+					local_z,
+				) {
+					return 0
+				}
+			}
+		}
+	}
+
+	materials := terrain_decoration_tree_materials_for(family_id, biome_id, material_variant)
+	written: u32
+	for y := i32(1); y <= trunk_height; y += 1 {
+		if terrain_decoration_tree_offset_write(
+			view,
+			{x = 0, y = y, z = 0},
+			local_x,
+			base_y,
+			local_z,
+			materials.trunk,
+		) {
+			written += 1
+		}
+	}
+	for dz := -crown_radius; dz <= crown_radius; dz += 1 {
+		for dx := -crown_radius; dx <= crown_radius; dx += 1 {
+			for dy := -i32(crown.radius_y); dy <= i32(crown.radius_y); dy += 1 {
+				if !terrain_decoration_tree_crown_contains(dx, dy, dz, crown) {
+					continue
+				}
+				offset := biomes.IVec3 {
+					x = dx,
+					y = crown_y + dy,
+					z = dz,
+				}
+				material := terrain_decoration_tree_crown_material(
+					materials,
+					material_variant,
+					offset,
+				)
+				if terrain_decoration_tree_offset_write(
+					view,
+					offset,
+					local_x,
+					base_y,
+					local_z,
+					material,
+				) {
+					written += 1
+				}
+			}
+		}
+	}
+	return written
 }
 
 terrain_decoration_tree_shape_can_place :: proc(

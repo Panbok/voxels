@@ -97,9 +97,10 @@ when ODIN_DEBUG {
 			"surface biome field should have coherent neighboring samples, ratio=%.3f",
 			same_biome_ratio,
 		)
-		log.assert(
-			water_debug_columns > 0,
-			"terrain quality sample should include local water-fill debug columns",
+		log.assertf(
+			water_debug_columns <= DEBUG_TERRAIN_QUALITY_GRID_STEPS,
+			"terrain quality sample should keep local water-fill debug columns sparse, got %d",
+			water_debug_columns,
 		)
 		shore_eval := biomes.SurfaceBiomeProfileEvaluation {
 			final_target = {shoreline_width_blocks = 18},

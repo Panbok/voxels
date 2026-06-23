@@ -29,20 +29,22 @@ TerrainSurfaceMorphologyColumnFeatureBounds :: struct {
 }
 
 TerrainSurfaceMorphologyFeatureColumnBands :: struct {
-	active:     bool,
-	influence:  f32,
-	radial:     f32,
-	band_above: f32,
-	band_below: f32,
+	active:                 bool,
+	influence:              f32,
+	radial:                 f32,
+	band_above:             f32,
+	band_below:             f32,
+	subtractive_band_below: f32,
 }
 
 TerrainSurfaceMorphologyColumnFeaturePlan :: struct {
-	active:     bool,
-	count:      u32,
-	band_above: f32,
-	band_below: f32,
-	features:   [biomes.GENERATION_REGION_SURFACE_MORPHOLOGY_FEATURE_CAPACITY]biomes.SurfaceMorphologyFeature,
-	bands:      [biomes.GENERATION_REGION_SURFACE_MORPHOLOGY_FEATURE_CAPACITY]TerrainSurfaceMorphologyFeatureColumnBands,
+	active:                 bool,
+	count:                  u32,
+	band_above:             f32,
+	band_below:             f32,
+	subtractive_band_below: f32,
+	features:               [biomes.GENERATION_REGION_SURFACE_MORPHOLOGY_FEATURE_CAPACITY]biomes.SurfaceMorphologyFeature,
+	bands:                  [biomes.GENERATION_REGION_SURFACE_MORPHOLOGY_FEATURE_CAPACITY]TerrainSurfaceMorphologyFeatureColumnBands,
 }
 
 terrain_surface_base_density_sample :: proc(column: TerrainBiomeColumn, world_y: i32) -> f32 {
@@ -460,6 +462,10 @@ terrain_surface_morphology_column_feature_plan_write :: proc(
 		plan.count += 1
 		plan.band_above = math.max(plan.band_above, bands.band_above)
 		plan.band_below = math.max(plan.band_below, bands.band_below)
+		plan.subtractive_band_below = math.max(
+			plan.subtractive_band_below,
+			bands.subtractive_band_below,
+		)
 	}
 }
 
@@ -520,6 +526,10 @@ terrain_surface_morphology_feature_column_bands :: proc(
 			)
 			bands.band_below = math.max(
 				bands.band_below,
+				feature.cut_depth_blocks * arch_lateral + 2,
+			)
+			bands.subtractive_band_below = math.max(
+				bands.subtractive_band_below,
 				feature.cut_depth_blocks * arch_lateral + 2,
 			)
 		}

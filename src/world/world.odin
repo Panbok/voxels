@@ -2915,7 +2915,8 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 							(f32(chunk_bottom_world_y) <=
 										column.surface_height_blocks + feature_plan.band_above &&
 									f32(chunk_top_world_y) >=
-										column.surface_height_blocks - feature_plan.band_below)
+										column.surface_height_blocks -
+											feature_plan.subtractive_band_below)
 					}
 					if !column_may_intersect {
 						continue
@@ -2976,7 +2977,7 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 					}
 					sample_below := f32(0)
 					if feature_plan.active {
-						sample_below = feature_plan.band_below
+						sample_below = feature_plan.subtractive_band_below
 					}
 					sample_min_world_y := i32(
 						math.floor_f32(column.surface_height_blocks - sample_below),
@@ -3359,6 +3360,185 @@ terrain_water_separator_sample_can_conflict :: proc(sample: TerrainWaterSeparato
 	return sample.flooded || sample.conflict_active
 }
 
+terrain_water_separator_padding_needs_any :: proc(
+	needs: TerrainWaterSeparatorPaddingNeeds,
+) -> bool {
+	return needs.left || needs.right || needs.top || needs.bottom
+}
+
+terrain_water_separator_region_materials_uniform :: proc(
+	region: ^biomes.GenerationRegion,
+	chunk_origin: world_async.BlockCoord,
+	pad: i32,
+	water_material_id: world_async.BlockMaterialID,
+) -> bool {
+	bounds := biomes.BlockBounds2 {
+		min = {x = chunk_origin.x - pad, z = chunk_origin.z - pad},
+		max = {
+			x = chunk_origin.x + CHUNK_BLOCK_LENGTH + pad,
+			z = chunk_origin.z + CHUNK_BLOCK_LENGTH + pad,
+		},
+	}
+
+	surface_config := biomes.feature_grid_config_for(.Surface, .Biome)
+	surface_owner_range := biomes.feature_grid_owner_range_from_block_bounds(
+		bounds,
+		region.influence_margins.surface_biome_blocks,
+		surface_config,
+	)
+	if !biomes.generation_region_owner_range_contains_range_2(
+		region.surface_biome_owner_range,
+		surface_owner_range,
+	) {
+		return false
+	}
+	surface_cell_found := false
+	for i := u32(0); i < region.surface_biome_cell_count; i += 1 {
+		cell := region.surface_biome_cells[i]
+		if !biomes.generation_region_owner_range_contains_owner_2(
+			surface_owner_range,
+			cell.feature.owner,
+		) {
+			continue
+		}
+		surface_cell_found = true
+		if terrain_surface_water_material_id_for_biome(cell.biome_id) != water_material_id {
+			return false
+		}
+	}
+	if !surface_cell_found {
+		return false
+	}
+
+	water_config := biomes.HYDROLOGY_SURFACE_GRAPH_GRID_CONFIG
+	water_owner_range := biomes.feature_grid_owner_range_from_block_bounds(
+		bounds,
+		biomes.HYDROLOGY_SURFACE_SAMPLE_MARGIN_BLOCKS,
+		water_config,
+	)
+	if !biomes.generation_region_owner_range_contains_range_2(
+		region.surface_water_feature_owner_range,
+		water_owner_range,
+	) {
+		return false
+	}
+	for i := u32(0); i < region.water_feature_node_count; i += 1 {
+		node := region.water_feature_nodes[i]
+		if !biomes.water_feature_kind_is_surface(node.kind) ||
+		   !biomes.generation_region_owner_range_contains_owner_2(
+				   water_owner_range,
+				   {x = node.owner.x, z = node.owner.z},
+			   ) {
+			continue
+		}
+		if terrain_surface_water_material_id_for_biome(node.source_biome_id) != water_material_id {
+			return false
+		}
+	}
+	for i := u32(0); i < region.water_feature_segment_count; i += 1 {
+		segment := region.water_feature_segments[i]
+		if !biomes.water_feature_kind_is_surface(segment.kind) ||
+		   !biomes.generation_region_owner_range_contains_owner_2(
+				   water_owner_range,
+				   {x = segment.owner.x, z = segment.owner.z},
+			   ) {
+			continue
+		}
+		if terrain_surface_water_material_id_for_biome(segment.source_biome_id) !=
+		   water_material_id {
+			return false
+		}
+	}
+	return true
+}
+
+terrain_water_separator_samples_need_apply :: proc(
+	key: biomes.FeatureGridKey,
+	region: ^biomes.GenerationRegion,
+	chunk_origin: world_async.BlockCoord,
+	samples: []TerrainWaterSeparatorSample,
+	radius, pad, grid_length: i32,
+) -> bool {
+	water_material_id: world_async.BlockMaterialID
+	water_material_found := false
+	for sample in samples {
+		if sample.conflict_active {
+			return true
+		}
+		if !sample.flooded {
+			continue
+		}
+		if !water_material_found {
+			water_material_id = sample.water_material_id
+			water_material_found = true
+			continue
+		}
+		if sample.water_material_id != water_material_id {
+			return true
+		}
+	}
+
+	if !water_material_found {
+		return false
+	}
+
+	padding_needs := terrain_water_separator_padding_needs_from_samples(samples, radius)
+	if !terrain_water_separator_padding_needs_any(padding_needs) {
+		return false
+	}
+	if terrain_water_separator_region_materials_uniform(
+		region,
+		chunk_origin,
+		pad,
+		water_material_id,
+	) {
+		return false
+	}
+
+	for pz := i32(0); pz < grid_length; pz += 1 {
+		world_z := chunk_origin.z + pz - pad
+		profile_row_cache := biomes.surface_biome_profile_row_cache_make(key, world_z)
+		for px := i32(0); px < grid_length; px += 1 {
+			local_x := px - pad
+			local_z := pz - pad
+			if local_x >= 0 &&
+			   local_z >= 0 &&
+			   local_x < CHUNK_BLOCK_LENGTH &&
+			   local_z < CHUNK_BLOCK_LENGTH {
+				continue
+			}
+			padding_needed :=
+				(local_x < 0 && padding_needs.left) ||
+				(local_x >= CHUNK_BLOCK_LENGTH && padding_needs.right) ||
+				(local_z < 0 && padding_needs.top) ||
+				(local_z >= CHUNK_BLOCK_LENGTH && padding_needs.bottom)
+			if !padding_needed {
+				continue
+			}
+			world_x := chunk_origin.x + px - pad
+			column, hydrology_sample := terrain_water_separator_column_sample(
+				key,
+				region,
+				world_x,
+				world_z,
+				&profile_row_cache,
+			)
+			sample := terrain_water_separator_sample_from_column_and_hydrology(
+				column,
+				hydrology_sample,
+			)
+			if sample.conflict_active {
+				return true
+			}
+			if sample.flooded && sample.water_material_id != water_material_id {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 terrain_water_separator_padding_needs_from_samples :: proc(
 	samples: []TerrainWaterSeparatorSample,
 	radius: i32,
@@ -3445,10 +3625,21 @@ terrain_surface_water_separators_apply :: proc(
 		"terrain water separator sample count mismatch: %d",
 		len(column_samples),
 	)
-
 	pad := i32(TERRAIN_WATER_SEPARATOR_PADDING_BLOCKS)
 	radius := i32(TERRAIN_WATER_SEPARATOR_RADIUS_BLOCKS)
 	grid_length := i32(TERRAIN_WATER_SEPARATOR_GRID_LENGTH)
+	if !terrain_water_separator_samples_need_apply(
+		key,
+		region,
+		chunk_origin,
+		column_samples,
+		radius,
+		pad,
+		grid_length,
+	) {
+		return
+	}
+
 	padding_needs := terrain_water_separator_padding_needs_from_samples(column_samples, radius)
 	padded_samples: [TERRAIN_WATER_SEPARATOR_GRID_COUNT]TerrainWaterSeparatorSample
 	seeds: [TERRAIN_WATER_SEPARATOR_GRID_COUNT]TerrainWaterSeparatorSeed

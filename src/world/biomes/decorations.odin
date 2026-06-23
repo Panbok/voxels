@@ -314,12 +314,12 @@ decoration_surface_placement_profile_for_biome :: proc(
 	case .Temperate_Hills:
 		return {
 				family_id = .Baseline_Tree,
-				chance = 0.34,
-				sparse_chance = 0.10,
-				grove_chance = 0.66,
+				chance = 0.48,
+				sparse_chance = 0.18,
+				grove_chance = 0.78,
 				slot_count = 3,
-				max_stand_count = 7,
-				stand_radius_blocks = 19,
+				max_stand_count = 10,
+				stand_radius_blocks = 22,
 				wet_root_allowed = false,
 				min_root_water_clearance_blocks = 7,
 			},
@@ -327,12 +327,12 @@ decoration_surface_placement_profile_for_biome :: proc(
 	case .Old_Growth_Forest:
 		return {
 				family_id = .Baseline_Tree,
-				chance = 0.46,
-				sparse_chance = 0.16,
-				grove_chance = 0.78,
+				chance = 0.64,
+				sparse_chance = 0.26,
+				grove_chance = 0.92,
 				slot_count = 3,
-				max_stand_count = 12,
-				stand_radius_blocks = 26,
+				max_stand_count = 16,
+				stand_radius_blocks = 32,
 				wet_root_allowed = false,
 				min_root_water_clearance_blocks = 7,
 			},
@@ -340,12 +340,12 @@ decoration_surface_placement_profile_for_biome :: proc(
 	case .Wet_Lowland_Marsh:
 		return {
 				family_id = .Baseline_Tree,
-				chance = 0.26,
-				sparse_chance = 0.08,
-				grove_chance = 0.52,
+				chance = 0.34,
+				sparse_chance = 0.12,
+				grove_chance = 0.62,
 				slot_count = 3,
-				max_stand_count = 5,
-				stand_radius_blocks = 17,
+				max_stand_count = 7,
+				stand_radius_blocks = 19,
 				wet_root_allowed = true,
 				min_root_water_clearance_blocks = 8,
 			},
@@ -592,11 +592,11 @@ decoration_surface_patch_strength_for_point :: proc(
 	bias: f32
 	switch biome_id {
 	case .Temperate_Hills:
-		bias = 0.08
+		bias = 0.16
 	case .Old_Growth_Forest:
-		bias = 0.18
+		bias = 0.30
 	case .Wet_Lowland_Marsh:
-		bias = -0.02
+		bias = 0.04
 	case .Corrupted_Ash_Forest:
 		bias = 0.04
 	case .Corrupted_Fen:
