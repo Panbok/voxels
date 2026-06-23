@@ -429,6 +429,8 @@ terrain_decoration_surface_feature_apply :: proc(
 			feature.height_blocks,
 			feature.radius_blocks,
 			feature.material_variant,
+			feature.shape_variant,
+			feature.rotation_quarters,
 			local_x,
 			base_y,
 			local_z,
@@ -1356,6 +1358,8 @@ terrain_decoration_cave_node_apply :: proc(
 			height,
 			profile.radius_blocks,
 			biomes.decoration_material_variant_from_id(node.id),
+			biomes.decoration_tree_shape_variant_from_id(node.id, node.biome_id, family_id),
+			biomes.decoration_tree_rotation_from_id(node.id),
 			local_x,
 			base_y,
 			local_z,
@@ -1757,6 +1761,62 @@ terrain_decoration_shape_offset_rotate :: proc(
 	}
 }
 
+terrain_decoration_structure_offset_rotate :: proc(
+	dx, dz: i32,
+	rotation_quarters: u8,
+) -> (
+	rotated_dx: i32,
+	rotated_dz: i32,
+) {
+	rotated := terrain_decoration_shape_offset_rotate({x = dx, y = 0, z = dz}, rotation_quarters)
+	return rotated.x, rotated.z
+}
+
+terrain_decoration_grounded_column_write_rotated :: proc(
+	view: ^world_async.ChunkVoxelView,
+	ctx: TerrainDecorationStampContext,
+	local_x, base_y, local_z: i32,
+	dx, dz: i32,
+	rotation_quarters: u8,
+	height: i32,
+	max_delta: i32,
+	primary, cap: world_async.BlockMaterialID,
+) -> u32 {
+	rotated_dx, rotated_dz := terrain_decoration_structure_offset_rotate(dx, dz, rotation_quarters)
+	return terrain_decoration_grounded_column_write(
+		view,
+		ctx,
+		local_x + rotated_dx,
+		base_y,
+		local_z + rotated_dz,
+		height,
+		max_delta,
+		primary,
+		cap,
+	)
+}
+
+terrain_decoration_ground_cover_write_rotated :: proc(
+	view: ^world_async.ChunkVoxelView,
+	ctx: TerrainDecorationStampContext,
+	local_x, base_y, local_z: i32,
+	dx, dz: i32,
+	rotation_quarters: u8,
+	max_delta: i32,
+	material: world_async.BlockMaterialID,
+) -> u32 {
+	rotated_dx, rotated_dz := terrain_decoration_structure_offset_rotate(dx, dz, rotation_quarters)
+	return terrain_decoration_ground_cover_write(
+		view,
+		ctx,
+		local_x + rotated_dx,
+		base_y,
+		local_z + rotated_dz,
+		max_delta,
+		material,
+	)
+}
+
 terrain_decoration_tree_offset_can_place :: proc(
 	view: ^world_async.ChunkVoxelView,
 	offset: biomes.IVec3,
@@ -1912,7 +1972,7 @@ terrain_decoration_family_stamp_apply :: proc(
 	family_id: biomes.DecorationFamilyID,
 	biome_id: biomes.BiomeID,
 	id: biomes.FeatureID,
-	height_blocks, radius_blocks, material_variant: u8,
+	height_blocks, radius_blocks, material_variant, shape_variant, rotation_quarters: u8,
 	local_x, base_y, local_z: i32,
 	ctx: TerrainDecorationStampContext,
 ) -> u32 {
@@ -1951,6 +2011,8 @@ terrain_decoration_family_stamp_apply :: proc(
 			height_blocks,
 			radius_blocks,
 			material_variant,
+			shape_variant,
+			rotation_quarters,
 			local_x,
 			base_y,
 			local_z,
@@ -1964,6 +2026,8 @@ terrain_decoration_family_stamp_apply :: proc(
 			height_blocks,
 			radius_blocks,
 			material_variant,
+			shape_variant,
+			rotation_quarters,
 			local_x,
 			base_y,
 			local_z,
@@ -1977,6 +2041,8 @@ terrain_decoration_family_stamp_apply :: proc(
 			height_blocks,
 			radius_blocks,
 			material_variant,
+			shape_variant,
+			rotation_quarters,
 			local_x,
 			base_y,
 			local_z,
@@ -1990,6 +2056,8 @@ terrain_decoration_family_stamp_apply :: proc(
 			height_blocks,
 			radius_blocks,
 			material_variant,
+			shape_variant,
+			rotation_quarters,
 			local_x,
 			base_y,
 			local_z,
@@ -2003,6 +2071,8 @@ terrain_decoration_family_stamp_apply :: proc(
 			height_blocks,
 			radius_blocks,
 			material_variant,
+			shape_variant,
+			rotation_quarters,
 			local_x,
 			base_y,
 			local_z,
@@ -2433,7 +2503,7 @@ terrain_decoration_wfc_ruin_apply :: proc(
 	view: ^world_async.ChunkVoxelView,
 	biome_id: biomes.BiomeID,
 	id: biomes.FeatureID,
-	height_blocks, radius_blocks, material_variant: u8,
+	height_blocks, radius_blocks, material_variant, shape_variant, rotation_quarters: u8,
 	local_x, base_y, local_z: i32,
 	ctx: TerrainDecorationStampContext,
 ) -> u32 {
@@ -2557,6 +2627,89 @@ terrain_decoration_wfc_ruin_apply :: proc(
 		materials.primary,
 		materials.accent,
 	)
+
+	ruin_mode := shape_variant % 3
+	switch ruin_mode {
+	case 0:
+		for tower_index := i32(0); tower_index < 4; tower_index += 1 {
+			dx := radius - 2
+			if (tower_index & 1) == 0 {
+				dx = -radius + 2
+			}
+			dz := radius - 2
+			if tower_index < 2 {
+				dz = -radius + 2
+			}
+			written += terrain_decoration_grounded_column_write_rotated(
+				view,
+				ctx,
+				local_x,
+				base_y,
+				local_z,
+				dx,
+				dz,
+				rotation_quarters,
+				height + 3 - (tower_index % 2),
+				3,
+				materials.primary,
+				materials.secondary,
+			)
+		}
+	case 1:
+		for house_index := i32(0); house_index < 3; house_index += 1 {
+			dx := (house_index - 1) * 6
+			dz := i32(-4)
+			if house_index == 1 {
+				dz = 5
+			}
+			written += terrain_decoration_structure_room_apply(
+				view,
+				ctx,
+				id,
+				materials,
+				local_x,
+				base_y,
+				local_z,
+				dx,
+				dz,
+				3,
+				2,
+				math.max(3, height - 3 - house_index),
+				1500 + u32(house_index) * 80,
+			)
+		}
+	case:
+		for row := i32(-3); row <= 3; row += 2 {
+			for step := i32(-radius + 3); step <= radius - 3; step += 1 {
+				written += terrain_decoration_ground_cover_write_rotated(
+					view,
+					ctx,
+					local_x,
+					base_y,
+					local_z,
+					step,
+					row,
+					rotation_quarters,
+					3,
+					materials.secondary,
+				)
+			}
+		}
+		written += terrain_decoration_grounded_column_write_rotated(
+			view,
+			ctx,
+			local_x,
+			base_y,
+			local_z,
+			radius - 3,
+			-radius + 3,
+			rotation_quarters,
+			height + 4,
+			3,
+			materials.primary,
+			materials.accent,
+		)
+	}
 	return written
 }
 
@@ -2921,11 +3074,12 @@ terrain_decoration_ruin_hamlet_apply :: proc(
 	view: ^world_async.ChunkVoxelView,
 	biome_id: biomes.BiomeID,
 	id: biomes.FeatureID,
-	height_blocks, radius_blocks, material_variant: u8,
+	height_blocks, radius_blocks, material_variant, shape_variant, rotation_quarters: u8,
 	local_x, base_y, local_z: i32,
 	ctx: TerrainDecorationStampContext,
 ) -> u32 {
 	_ = radius_blocks
+	_ = shape_variant
 	materials := terrain_decoration_stamp_materials_for(.Ruin_Hamlet, biome_id, material_variant)
 	wall_height := math.clamp(i32(height_blocks), 5, 6)
 	written: u32
@@ -3087,6 +3241,60 @@ terrain_decoration_ruin_hamlet_apply :: proc(
 		0,
 		-15,
 	)
+	for plaza_step := i32(-6); plaza_step <= 6; plaza_step += 1 {
+		written += terrain_decoration_ground_cover_write_rotated(
+			view,
+			ctx,
+			local_x,
+			base_y,
+			local_z,
+			plaza_step,
+			-2,
+			rotation_quarters,
+			2,
+			materials.secondary,
+		)
+		written += terrain_decoration_ground_cover_write_rotated(
+			view,
+			ctx,
+			local_x,
+			base_y,
+			local_z,
+			-6,
+			plaza_step,
+			rotation_quarters,
+			2,
+			materials.secondary,
+		)
+	}
+	written += terrain_decoration_grounded_column_write_rotated(
+		view,
+		ctx,
+		local_x,
+		base_y,
+		local_z,
+		0,
+		-1,
+		rotation_quarters,
+		wall_height + 8,
+		2,
+		materials.secondary,
+		materials.accent,
+	)
+	written += terrain_decoration_grounded_column_write_rotated(
+		view,
+		ctx,
+		local_x,
+		base_y,
+		local_z,
+		0,
+		-2,
+		rotation_quarters,
+		wall_height + 7,
+		2,
+		materials.secondary,
+		materials.accent,
+	)
 	return written
 }
 
@@ -3094,7 +3302,7 @@ terrain_decoration_watchtower_ruin_apply :: proc(
 	view: ^world_async.ChunkVoxelView,
 	biome_id: biomes.BiomeID,
 	id: biomes.FeatureID,
-	height_blocks, radius_blocks, material_variant: u8,
+	height_blocks, radius_blocks, material_variant, shape_variant, rotation_quarters: u8,
 	local_x, base_y, local_z: i32,
 	ctx: TerrainDecorationStampContext,
 ) -> u32 {
@@ -3105,6 +3313,7 @@ terrain_decoration_watchtower_ruin_apply :: proc(
 	)
 	_ = radius_blocks
 	_ = material_variant
+	_ = shape_variant
 	wall_height := math.clamp(i32(height_blocks), 5, 7)
 	written: u32
 
@@ -3181,6 +3390,70 @@ terrain_decoration_watchtower_ruin_apply :: proc(
 			materials.secondary,
 		)
 	}
+	windmill_x := i32(17)
+	windmill_z := i32(-13)
+	written += terrain_decoration_grounded_column_write_rotated(
+		view,
+		ctx,
+		local_x,
+		base_y,
+		local_z,
+		windmill_x,
+		windmill_z,
+		rotation_quarters,
+		wall_height + 7,
+		2,
+		materials.primary,
+		materials.secondary,
+	)
+	for arm := i32(-3); arm <= 3; arm += 1 {
+		rotated_dx, rotated_dz := terrain_decoration_structure_offset_rotate(
+			windmill_x + arm,
+			windmill_z,
+			rotation_quarters,
+		)
+		floor_y, found := terrain_decoration_stamp_floor_find(
+			view,
+			ctx,
+			local_x + rotated_dx,
+			base_y,
+			local_z + rotated_dz,
+			2,
+		)
+		if found &&
+		   terrain_decoration_block_try_write(
+			   view,
+			   local_x + rotated_dx,
+			   floor_y + wall_height + 5,
+			   local_z + rotated_dz,
+			   materials.accent,
+		   ) {
+			written += 1
+		}
+		rotated_dx, rotated_dz = terrain_decoration_structure_offset_rotate(
+			windmill_x,
+			windmill_z + arm,
+			rotation_quarters,
+		)
+		floor_y, found = terrain_decoration_stamp_floor_find(
+			view,
+			ctx,
+			local_x + rotated_dx,
+			base_y,
+			local_z + rotated_dz,
+			2,
+		)
+		if found &&
+		   terrain_decoration_block_try_write(
+			   view,
+			   local_x + rotated_dx,
+			   floor_y + wall_height + 5 + arm,
+			   local_z + rotated_dz,
+			   materials.accent,
+		   ) {
+			written += 1
+		}
+	}
 	return written
 }
 
@@ -3188,10 +3461,11 @@ terrain_decoration_palisade_fort_apply :: proc(
 	view: ^world_async.ChunkVoxelView,
 	biome_id: biomes.BiomeID,
 	id: biomes.FeatureID,
-	height_blocks, radius_blocks, material_variant: u8,
+	height_blocks, radius_blocks, material_variant, shape_variant, rotation_quarters: u8,
 	local_x, base_y, local_z: i32,
 	ctx: TerrainDecorationStampContext,
 ) -> u32 {
+	_ = shape_variant
 	materials := terrain_decoration_stamp_materials_for(.Palisade_Fort, biome_id, material_variant)
 	radius := math.clamp(i32(radius_blocks), 16, 20)
 	wall_height := math.clamp(i32(height_blocks), 7, 10)
@@ -3335,6 +3609,66 @@ terrain_decoration_palisade_fort_apply :: proc(
 		math.max(4, wall_height - 3),
 		1200,
 	)
+	keep_height := wall_height + 8
+	written += terrain_decoration_structure_room_apply(
+		view,
+		ctx,
+		id,
+		materials,
+		local_x,
+		base_y,
+		local_z,
+		0,
+		0,
+		4,
+		4,
+		keep_height,
+		1600,
+	)
+	for spike_index := i32(0); spike_index < 4; spike_index += 1 {
+		dx := i32(4)
+		if (spike_index & 1) == 0 {
+			dx = -4
+		}
+		dz := i32(4)
+		if spike_index < 2 {
+			dz = -4
+		}
+		spike_height := keep_height + 4
+		if biome_id == .Corrupted_Ash_Forest || biome_id == .Corrupted_Fen {
+			spike_height += 3 + spike_index
+		}
+		written += terrain_decoration_grounded_column_write_rotated(
+			view,
+			ctx,
+			local_x,
+			base_y,
+			local_z,
+			dx,
+			dz,
+			rotation_quarters,
+			spike_height,
+			3,
+			materials.primary,
+			materials.secondary,
+		)
+	}
+	if biome_id == .Corrupted_Ash_Forest || biome_id == .Corrupted_Fen {
+		for breach := i32(-radius + 6); breach <= -radius + 10; breach += 1 {
+			written += terrain_decoration_ground_cover_write_rotated(
+				view,
+				ctx,
+				local_x,
+				base_y,
+				local_z,
+				breach,
+				radius - 1,
+				rotation_quarters,
+				2,
+				materials.accent,
+			)
+		}
+	}
 	return written
 }
 
@@ -3342,10 +3676,12 @@ terrain_decoration_cave_ruin_hall_apply :: proc(
 	view: ^world_async.ChunkVoxelView,
 	biome_id: biomes.BiomeID,
 	id: biomes.FeatureID,
-	height_blocks, radius_blocks, material_variant: u8,
+	height_blocks, radius_blocks, material_variant, shape_variant, rotation_quarters: u8,
 	local_x, base_y, local_z: i32,
 	ctx: TerrainDecorationStampContext,
 ) -> u32 {
+	_ = shape_variant
+	_ = rotation_quarters
 	if ctx.surface {
 		return 0
 	}

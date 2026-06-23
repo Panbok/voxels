@@ -424,7 +424,7 @@ water_feature_subterranean_source_biome_id :: proc(macro_zone: SubterraneanMacro
 
 water_feature_source_water_group :: proc(biome_id: BiomeID) -> u8 {
 	switch biome_id {
-	case .Wet_Lowland_Marsh, .Old_Growth_Forest, .Fungal_Vaults, .Buried_Aquifer_Caves:
+	case .Wet_Lowland_Marsh, .Fungal_Vaults, .Buried_Aquifer_Caves:
 		return 1
 	case .Corrupted_Ash_Forest, .Corrupted_Fen:
 		return 2
@@ -432,7 +432,7 @@ water_feature_source_water_group :: proc(biome_id: BiomeID) -> u8 {
 		return 3
 	case .Crystal_Geode_Network:
 		return 4
-	case .Temperate_Hills:
+	case .Temperate_Hills, .Old_Growth_Forest:
 		return 0
 	}
 	return 0

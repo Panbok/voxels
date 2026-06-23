@@ -1486,6 +1486,18 @@ TERRAIN_SHORE_MATERIAL_DITHER_AMPLITUDE :: f32(0.25)
 TERRAIN_SHORE_CAP_THIN_BAND_FRACTION :: f32(0.56)
 TERRAIN_LOCAL_WATER_FILL_INFLUENCE_MIN :: f32(0.30)
 TERRAIN_WATER_VOLUME_SURFACE_ADJACENT_DEPTH_BLOCKS :: i32(24)
+TERRAIN_WATER_SEPARATOR_RADIUS_BLOCKS :: i32(12)
+TERRAIN_WATER_SEPARATOR_PADDING_BLOCKS :: TERRAIN_WATER_SEPARATOR_RADIUS_BLOCKS + 1
+TERRAIN_WATER_SEPARATOR_GRID_LENGTH ::
+	CHUNK_BLOCK_LENGTH + TERRAIN_WATER_SEPARATOR_PADDING_BLOCKS * 2
+TERRAIN_WATER_SEPARATOR_GRID_COUNT ::
+	TERRAIN_WATER_SEPARATOR_GRID_LENGTH * TERRAIN_WATER_SEPARATOR_GRID_LENGTH
+TERRAIN_WATER_SEPARATOR_MIN_RISE_BLOCKS :: f32(2.5)
+TERRAIN_WATER_SEPARATOR_RISE_VARIATION_BLOCKS :: f32(5.5)
+TERRAIN_WATER_SEPARATOR_WIDTH_NOISE_SALT :: u64(0x95c4f2a6db13708e)
+TERRAIN_WATER_SEPARATOR_HEIGHT_NOISE_SALT :: u64(0x3da97b8e451c6f20)
+TERRAIN_WATER_SEPARATOR_NOISE_CELL_BLOCKS :: 23
+TERRAIN_WATER_SEPARATOR_CONFLICT_INFLUENCE_MIN :: f32(0.30)
 #assert(TERRAIN_SHORE_MATERIAL_DITHER_AMPLITUDE >= 0)
 #assert(TERRAIN_SHORE_MATERIAL_DITHER_AMPLITUDE <= 0.35)
 #assert(TERRAIN_SHORE_CAP_THIN_BAND_FRACTION > 0)
@@ -1494,6 +1506,11 @@ TERRAIN_WATER_VOLUME_SURFACE_ADJACENT_DEPTH_BLOCKS :: i32(24)
 #assert(TERRAIN_LOCAL_WATER_FILL_INFLUENCE_MIN < 0.35)
 #assert(TERRAIN_WATER_VOLUME_SURFACE_ADJACENT_DEPTH_BLOCKS > 0)
 #assert(TERRAIN_WATER_VOLUME_SURFACE_ADJACENT_DEPTH_BLOCKS <= CHUNK_BLOCK_LENGTH)
+#assert(TERRAIN_WATER_SEPARATOR_RADIUS_BLOCKS >= 4)
+#assert(TERRAIN_WATER_SEPARATOR_RADIUS_BLOCKS <= 12)
+#assert(TERRAIN_WATER_SEPARATOR_GRID_LENGTH > CHUNK_BLOCK_LENGTH)
+#assert(TERRAIN_WATER_SEPARATOR_CONFLICT_INFLUENCE_MIN > 0)
+#assert(TERRAIN_WATER_SEPARATOR_CONFLICT_INFLUENCE_MIN < 1)
 #assert(TERRAIN_SURFACE_MATERIAL_BLEND_CELL_BLOCKS > 1)
 #assert(TERRAIN_SURFACE_MATERIAL_BLEND_NOISE_AMPLITUDE >= 0)
 #assert(TERRAIN_SURFACE_MATERIAL_BLEND_NOISE_AMPLITUDE <= 0.35)
@@ -2574,6 +2591,22 @@ TerrainBiomeColumn :: struct {
 	water_fill_active:               bool,
 }
 
+TerrainWaterSeparatorSeed :: struct {
+	active:             bool,
+	water_level_blocks: f32,
+}
+
+TerrainWaterSeparatorSample :: struct {
+	flooded:            bool,
+	conflict_active:    bool,
+	water_material_id:  world_async.BlockMaterialID,
+	water_level_blocks: f32,
+}
+
+TerrainWaterSeparatorPaddingNeeds :: struct {
+	left, right, top, bottom: bool,
+}
+
 //////////////////////////////////////
 // Terrain Methods
 /////////////////////////////////////
@@ -2689,6 +2722,8 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 
 	column_targets: [CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH]TerrainBiomeColumn
 	if !terrain_generation_column_cache_try_read(column_targets[:], key, chunk) {
+		water_separator_samples: [CHUNK_BLOCK_LENGTH *
+		CHUNK_BLOCK_LENGTH]TerrainWaterSeparatorSample
 		for z in 0 ..< CHUNK_BLOCK_LENGTH {
 			world_z := origin.z + i32(z)
 			profile_row_cache := biomes.surface_biome_profile_row_cache_make(key, world_z)
@@ -2719,10 +2754,28 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 					world_x,
 					world_z,
 				)
-				column_targets[x + z * CHUNK_BLOCK_LENGTH] =
-					terrain_biome_column_from_profile_evaluation(key, evaluation, world_x, world_z)
+				column_index := x + z * CHUNK_BLOCK_LENGTH
+				column := terrain_biome_column_from_profile_evaluation(
+					key,
+					evaluation,
+					world_x,
+					world_z,
+				)
+				column_targets[column_index] = column
+				water_separator_samples[column_index] =
+					terrain_water_separator_sample_from_column_and_hydrology(
+						column,
+						evaluation.hydrology_sample,
+					)
 			}
 		}
+		terrain_surface_water_separators_apply(
+			key,
+			&generation_region,
+			origin,
+			column_targets[:],
+			water_separator_samples[:],
+		)
 		terrain_generation_column_cache_store(column_targets[:], key, chunk)
 	}
 	terrain_decoration_surface_structure_pads_apply(&generation_region, origin, column_targets[:])
@@ -3164,6 +3217,407 @@ terrain_density_surface_is_solid :: proc(column: TerrainBiomeColumn, world_y: i3
 	return column.surface_height_blocks - f32(world_y) >= 0
 }
 
+terrain_generation_region_contains_block_xz :: proc(
+	region: ^biomes.GenerationRegion,
+	world_x, world_z: i32,
+) -> bool {
+	return(
+		world_x >= region.bounds.min.x &&
+		world_x < region.bounds.max.x &&
+		world_z >= region.bounds.min.z &&
+		world_z < region.bounds.max.z \
+	)
+}
+
+terrain_water_separator_column_sample :: proc(
+	key: biomes.FeatureGridKey,
+	region: ^biomes.GenerationRegion,
+	world_x, world_z: i32,
+	row_cache: ^biomes.SurfaceBiomeProfileRowCache = nil,
+) -> (
+	TerrainBiomeColumn,
+	biomes.HydrologyLayerSurfaceSample,
+) {
+	if terrain_generation_region_contains_block_xz(region, world_x, world_z) {
+		surface_sample := biomes.surface_biome_field_sample_from_region(region, world_x, world_z)
+		hydrology_sample := biomes.hydrology_layer_surface_sample_from_region(
+			region,
+			world_x,
+			world_z,
+		)
+		evaluation := biomes.surface_biome_profile_evaluate_with_hydrology(
+			key,
+			surface_sample,
+			hydrology_sample,
+			world_x,
+			world_z,
+			row_cache,
+		)
+		evaluation = terrain_surface_morphology_apply_feature_envelopes(
+			evaluation,
+			region.surface_morphology_features[:],
+			region.surface_morphology_feature_count,
+			world_x,
+			world_z,
+		)
+		return terrain_biome_column_from_profile_evaluation(key, evaluation, world_x, world_z),
+			hydrology_sample
+	}
+
+	surface_sample := biomes.surface_biome_field_sample(key, world_x, world_z)
+	hydrology_sample := biomes.hydrology_layer_surface_sample(key, world_x, world_z)
+	evaluation := biomes.surface_biome_profile_evaluate_with_hydrology(
+		key,
+		surface_sample,
+		hydrology_sample,
+		world_x,
+		world_z,
+		row_cache,
+	)
+	evaluation = terrain_surface_morphology_apply_feature_envelopes_direct(
+		evaluation,
+		key,
+		world_x,
+		world_z,
+	)
+	return terrain_biome_column_from_profile_evaluation(key, evaluation, world_x, world_z),
+		hydrology_sample
+}
+
+terrain_water_separator_sample_from_column :: proc(
+	column: TerrainBiomeColumn,
+) -> TerrainWaterSeparatorSample {
+	sample := TerrainWaterSeparatorSample {
+		water_level_blocks = column.water_level_blocks,
+	}
+	if !terrain_water_column_is_flooded(column) {
+		return sample
+	}
+	sample.flooded = true
+	sample.water_material_id = terrain_water_material_id_for_biome(column.water_biome_id, false)
+	return sample
+}
+
+terrain_surface_water_material_id_for_biome :: proc(
+	biome_id: biomes.BiomeID,
+) -> world_async.BlockMaterialID {
+	return terrain_water_material_id_for_biome(biome_id, false)
+}
+
+terrain_surface_water_source_allowed_for_biome :: proc(
+	biome_id, water_biome_id: biomes.BiomeID,
+) -> bool {
+	return(
+		terrain_surface_water_material_id_for_biome(biome_id) ==
+		terrain_surface_water_material_id_for_biome(water_biome_id) \
+	)
+}
+
+terrain_water_separator_sample_apply_hydrology :: proc(
+	sample: ^TerrainWaterSeparatorSample,
+	column: TerrainBiomeColumn,
+	hydrology_sample: biomes.HydrologyLayerSurfaceSample,
+) {
+	water_influence := math.max(
+		hydrology_sample.basin_influence,
+		hydrology_sample.channel_influence,
+	)
+	if water_influence > 0 {
+		sample.water_level_blocks = math.max(
+			sample.water_level_blocks,
+			hydrology_sample.water_level_blocks,
+		)
+	}
+	water_crosses_restricted_biome :=
+		water_influence > TERRAIN_LOCAL_WATER_FILL_INFLUENCE_MIN &&
+		column.surface_height_blocks < hydrology_sample.water_level_blocks &&
+		!terrain_surface_water_source_allowed_for_biome(
+				column.dominant_biome_id,
+				hydrology_sample.water_biome_id,
+			)
+	if hydrology_sample.water_material_conflict_influence >=
+		   TERRAIN_WATER_SEPARATOR_CONFLICT_INFLUENCE_MIN ||
+	   water_crosses_restricted_biome {
+		sample.conflict_active = true
+	}
+}
+
+terrain_water_separator_sample_from_column_and_hydrology :: proc(
+	column: TerrainBiomeColumn,
+	hydrology_sample: biomes.HydrologyLayerSurfaceSample,
+) -> TerrainWaterSeparatorSample {
+	sample := terrain_water_separator_sample_from_column(column)
+	terrain_water_separator_sample_apply_hydrology(&sample, column, hydrology_sample)
+	return sample
+}
+
+terrain_water_separator_samples_conflict :: proc(a, b: TerrainWaterSeparatorSample) -> bool {
+	return a.flooded && b.flooded && a.water_material_id != b.water_material_id
+}
+
+terrain_water_separator_sample_can_conflict :: proc(sample: TerrainWaterSeparatorSample) -> bool {
+	return sample.flooded || sample.conflict_active
+}
+
+terrain_water_separator_padding_needs_from_samples :: proc(
+	samples: []TerrainWaterSeparatorSample,
+	radius: i32,
+) -> TerrainWaterSeparatorPaddingNeeds {
+	log.assertf(
+		len(samples) == CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH,
+		"terrain water separator sample count mismatch: %d",
+		len(samples),
+	)
+	needs := TerrainWaterSeparatorPaddingNeeds{}
+	for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+		for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+			sample := samples[x + z * CHUNK_BLOCK_LENGTH]
+			if !terrain_water_separator_sample_can_conflict(sample) {
+				continue
+			}
+			if x < radius {
+				needs.left = true
+			}
+			if x >= CHUNK_BLOCK_LENGTH - radius {
+				needs.right = true
+			}
+			if z < radius {
+				needs.top = true
+			}
+			if z >= CHUNK_BLOCK_LENGTH - radius {
+				needs.bottom = true
+			}
+		}
+	}
+	return needs
+}
+
+terrain_water_separator_noise_01 :: proc(
+	key: biomes.FeatureGridKey,
+	world_x, world_z: i32,
+	cell_blocks: i32,
+	salt: u64,
+) -> f32 {
+	noise := biomes.regional_terrain_field_value_noise_2(key, world_x, world_z, cell_blocks, salt)
+	return math.clamp(noise * 0.5 + 0.5, f32(0), f32(1))
+}
+
+terrain_water_separator_column_materials_apply :: proc(
+	key: biomes.FeatureGridKey,
+	column: ^TerrainBiomeColumn,
+	world_x, world_z: i32,
+) {
+	material_biome_id := column.dominant_biome_id
+	column.surface_material_id = terrain_biome_surface_material_id(material_biome_id)
+	column.surface_material_id = terrain_material_apply_surface_color_variant(
+		key,
+		column.surface_material_id,
+		material_biome_id,
+		world_x,
+		world_z,
+		0,
+	)
+	column.subsurface_material_id = terrain_biome_subsurface_material_id(material_biome_id)
+	column.subsurface_material_id = terrain_material_apply_surface_color_variant(
+		key,
+		column.subsurface_material_id,
+		material_biome_id,
+		world_x,
+		world_z,
+		1,
+	)
+}
+
+terrain_surface_water_separators_apply :: proc(
+	key: biomes.FeatureGridKey,
+	region: ^biomes.GenerationRegion,
+	chunk_origin: world_async.BlockCoord,
+	columns: []TerrainBiomeColumn,
+	column_samples: []TerrainWaterSeparatorSample,
+) {
+	log.assertf(
+		len(columns) == CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH,
+		"terrain water separator column target count mismatch: %d",
+		len(columns),
+	)
+	log.assertf(
+		len(column_samples) == CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH,
+		"terrain water separator sample count mismatch: %d",
+		len(column_samples),
+	)
+
+	pad := i32(TERRAIN_WATER_SEPARATOR_PADDING_BLOCKS)
+	radius := i32(TERRAIN_WATER_SEPARATOR_RADIUS_BLOCKS)
+	grid_length := i32(TERRAIN_WATER_SEPARATOR_GRID_LENGTH)
+	padding_needs := terrain_water_separator_padding_needs_from_samples(column_samples, radius)
+	padded_samples: [TERRAIN_WATER_SEPARATOR_GRID_COUNT]TerrainWaterSeparatorSample
+	seeds: [TERRAIN_WATER_SEPARATOR_GRID_COUNT]TerrainWaterSeparatorSeed
+
+	for pz := i32(0); pz < grid_length; pz += 1 {
+		world_z := chunk_origin.z + pz - pad
+		profile_row_cache := biomes.surface_biome_profile_row_cache_make(key, world_z)
+		for px := i32(0); px < grid_length; px += 1 {
+			world_x := chunk_origin.x + px - pad
+			grid_index := px + pz * grid_length
+			local_x := px - pad
+			local_z := pz - pad
+			if local_x >= 0 &&
+			   local_z >= 0 &&
+			   local_x < CHUNK_BLOCK_LENGTH &&
+			   local_z < CHUNK_BLOCK_LENGTH {
+				padded_samples[grid_index] = column_samples[local_x + local_z * CHUNK_BLOCK_LENGTH]
+			} else {
+				padding_needed :=
+					(local_x < 0 && padding_needs.left) ||
+					(local_x >= CHUNK_BLOCK_LENGTH && padding_needs.right) ||
+					(local_z < 0 && padding_needs.top) ||
+					(local_z >= CHUNK_BLOCK_LENGTH && padding_needs.bottom)
+				if !padding_needed {
+					continue
+				}
+				column, hydrology_sample := terrain_water_separator_column_sample(
+					key,
+					region,
+					world_x,
+					world_z,
+					&profile_row_cache,
+				)
+				padded_samples[grid_index] =
+					terrain_water_separator_sample_from_column_and_hydrology(
+						column,
+						hydrology_sample,
+					)
+			}
+		}
+	}
+
+	for pz := i32(1); pz < grid_length - 1; pz += 1 {
+		for px := i32(1); px < grid_length - 1; px += 1 {
+			grid_index := px + pz * grid_length
+			sample := padded_samples[grid_index]
+			if sample.conflict_active {
+				seed := &seeds[grid_index]
+				seed.active = true
+				seed.water_level_blocks = math.max(
+					seed.water_level_blocks,
+					sample.water_level_blocks,
+				)
+			}
+			neighbor_offsets := [?]world_async.BlockCoord {
+				{x = 1, y = 0, z = 0},
+				{x = -1, y = 0, z = 0},
+				{x = 0, y = 0, z = 1},
+				{x = 0, y = 0, z = -1},
+			}
+			for offset in neighbor_offsets {
+				neighbor_index := px + offset.x + (pz + offset.z) * grid_length
+				neighbor := padded_samples[neighbor_index]
+				if !terrain_water_separator_samples_conflict(sample, neighbor) {
+					continue
+				}
+				seed := &seeds[grid_index]
+				seed.active = true
+				seed.water_level_blocks = math.max(
+					seed.water_level_blocks,
+					math.max(sample.water_level_blocks, neighbor.water_level_blocks),
+				)
+			}
+		}
+	}
+
+	for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+		world_z := chunk_origin.z + z
+		for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+			world_x := chunk_origin.x + x
+			column_index := x + z * CHUNK_BLOCK_LENGTH
+			column := &columns[column_index]
+			center_px := x + pad
+			center_pz := z + pad
+			nearest_distance := f32(radius + 1)
+			separator_water_level := f32(0)
+			found_separator := false
+
+			for dz := -radius; dz <= radius; dz += 1 {
+				for dx := -radius; dx <= radius; dx += 1 {
+					distance_sq := dx * dx + dz * dz
+					if distance_sq > radius * radius {
+						continue
+					}
+					seed_index := center_px + dx + (center_pz + dz) * grid_length
+					seed := seeds[seed_index]
+					if !seed.active {
+						continue
+					}
+					distance := math.sqrt_f32(f32(distance_sq))
+					if distance < nearest_distance {
+						nearest_distance = distance
+					}
+					separator_water_level = math.max(
+						separator_water_level,
+						seed.water_level_blocks,
+					)
+					found_separator = true
+				}
+			}
+
+			if !found_separator {
+				continue
+			}
+			separator_eligible :=
+				terrain_water_column_is_flooded(column^) ||
+				column_samples[column_index].conflict_active ||
+				column.surface_height_blocks < separator_water_level
+			if !separator_eligible {
+				continue
+			}
+
+			width_noise := terrain_water_separator_noise_01(
+				key,
+				world_x,
+				world_z,
+				TERRAIN_WATER_SEPARATOR_NOISE_CELL_BLOCKS,
+				TERRAIN_WATER_SEPARATOR_WIDTH_NOISE_SALT,
+			)
+			effective_radius := f32(radius - 2) + width_noise * 2.0
+			if nearest_distance > effective_radius {
+				continue
+			}
+			edge_start := math.max(f32(1), effective_radius - 3.0)
+			strength := f32(1.0) - math.smoothstep(edge_start, effective_radius, nearest_distance)
+			if strength <= 0 {
+				continue
+			}
+
+			height_noise := terrain_water_separator_noise_01(
+				key,
+				world_x,
+				world_z,
+				TERRAIN_WATER_SEPARATOR_NOISE_CELL_BLOCKS,
+				TERRAIN_WATER_SEPARATOR_HEIGHT_NOISE_SALT,
+			)
+			target_height :=
+				separator_water_level +
+				TERRAIN_WATER_SEPARATOR_MIN_RISE_BLOCKS +
+				TERRAIN_WATER_SEPARATOR_RISE_VARIATION_BLOCKS * height_noise
+
+			if column.surface_height_blocks < target_height {
+				column.surface_height_blocks = biomes.regional_terrain_field_lerp(
+					column.surface_height_blocks,
+					target_height,
+					strength,
+				)
+				column.surface_height = i32(math.floor_f32(column.surface_height_blocks))
+			}
+			column.surface_morphology_profile.strength *= 1.0 - strength * 0.35
+			if column.surface_height_blocks >= column.water_level_blocks {
+				column.water_fill_active = false
+				column.hydrology_debug_material_active = false
+			}
+			terrain_water_separator_column_materials_apply(key, column, world_x, world_z)
+		}
+	}
+}
+
 terrain_biome_column_sample :: proc(
 	key: biomes.FeatureGridKey,
 	surface_sample: biomes.SurfaceBiomeFieldSample,
@@ -3225,20 +3679,17 @@ terrain_biome_column_from_profile_evaluation :: proc(
 	water_source_conflict :=
 		evaluation.hydrology_sample.water_material_conflict_influence >= 0.35 &&
 		evaluation.hydrology_sample.water_material_conflict_influence >= water_influence * 0.58
-	local_water_source_group := biomes.water_feature_source_water_group(
+	local_water_allowed := terrain_surface_water_source_allowed_for_biome(
+		target.biome_id,
 		evaluation.hydrology_sample.water_biome_id,
 	)
-	local_water_collides_with_sea :=
-		sea_fill_active &&
-		local_water_source_group != 0 &&
-		local_water_level <= biomes.SEA_LEVEL_BLOCKS + 1.0
 	local_water_fill_active :=
 		water_influence > TERRAIN_LOCAL_WATER_FILL_INFLUENCE_MIN &&
 		water_surface_below_level &&
 		!water_source_conflict &&
-		!local_water_collides_with_sea
+		local_water_allowed
 	water_level := biomes.SEA_LEVEL_BLOCKS
-	water_biome_id := biomes.BiomeID.Temperate_Hills
+	water_biome_id := target.biome_id
 	if local_water_fill_active {
 		water_level = math.max(biomes.SEA_LEVEL_BLOCKS, local_water_level)
 		water_biome_id = evaluation.hydrology_sample.water_biome_id
@@ -3577,7 +4028,7 @@ terrain_water_material_id_for_biome :: proc(
 ) -> world_async.BlockMaterialID {
 	_ = subterranean
 	switch biome_id {
-	case .Wet_Lowland_Marsh, .Old_Growth_Forest, .Fungal_Vaults:
+	case .Wet_Lowland_Marsh, .Fungal_Vaults:
 		return terrain_block_material_id_from_biome_material(.Swamp_Water)
 	case .Corrupted_Ash_Forest, .Corrupted_Fen:
 		return terrain_block_material_id_from_biome_material(.Corrupted_Water)
@@ -3590,7 +4041,7 @@ terrain_water_material_id_for_biome :: proc(
 			world_async.BlockMaterialID(TERRAIN_WATER_MAT_ID),
 			2,
 		)
-	case .Temperate_Hills:
+	case .Temperate_Hills, .Old_Growth_Forest:
 		return world_async.BlockMaterialID(TERRAIN_WATER_MAT_ID)
 	}
 	return world_async.BlockMaterialID(TERRAIN_WATER_MAT_ID)

@@ -163,6 +163,122 @@ when ODIN_DEBUG {
 			shore_subsurface_material == world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID),
 			"shoreline material layering should expose sand/wet material under the beach cap",
 		)
+		log.assert(
+			terrain_water_material_id_for_biome(.Old_Growth_Forest, false) ==
+			terrain_water_material_id_for_biome(.Temperate_Hills, false),
+			"green forest terrain should use ordinary water, not swamp water",
+		)
+		restricted_water_eval := biomes.SurfaceBiomeProfileEvaluation {
+			final_target = {
+				biome_id = .Basalt_Spire_Highlands,
+				surface_height_blocks = biomes.SEA_LEVEL_BLOCKS + 4,
+				surface_layer_depth_blocks = 4,
+			},
+			hydrology_sample = {
+				water_level_blocks = biomes.SEA_LEVEL_BLOCKS + 12,
+				water_biome_id = .Temperate_Hills,
+				basin_influence = 1,
+			},
+		}
+		restricted_water_column := terrain_biome_column_from_profile_evaluation(
+			key,
+			restricted_water_eval,
+			0,
+			0,
+		)
+		log.assert(
+			!restricted_water_column.water_fill_active,
+			"normal water source should not flood basalt terrain",
+		)
+		restricted_sea_eval := restricted_water_eval
+		restricted_sea_eval.final_target.surface_height_blocks = biomes.SEA_LEVEL_BLOCKS - 4
+		restricted_sea_eval.hydrology_sample = {}
+		restricted_sea_column := terrain_biome_column_from_profile_evaluation(
+			key,
+			restricted_sea_eval,
+			0,
+			0,
+		)
+		log.assert(
+			terrain_water_material_id_for_biome(restricted_sea_column.water_biome_id, false) ==
+			terrain_water_material_id_for_biome(.Basalt_Spire_Highlands, false),
+			"below-sea basalt terrain should use lava water, not ordinary sea water",
+		)
+		separator_region_coord := biomes.generation_region_coord_from_block(0, 0, 0)
+		separator_region := terrain_generation_region_for_fill(key, separator_region_coord)
+		separator_columns: [CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH]TerrainBiomeColumn
+		separator_samples: [CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH]TerrainWaterSeparatorSample
+		for separator_z := i32(0); separator_z < CHUNK_BLOCK_LENGTH; separator_z += 1 {
+			for separator_x := i32(0); separator_x < CHUNK_BLOCK_LENGTH; separator_x += 1 {
+				separator_index := separator_x + separator_z * CHUNK_BLOCK_LENGTH
+				separator_column := &separator_columns[separator_index]
+				separator_sample := &separator_samples[separator_index]
+				separator_column.surface_height = 16
+				separator_column.surface_height_blocks = 16
+				separator_column.surface_layer_depth = 4
+				separator_column.water_level_blocks = 28
+				separator_sample.water_level_blocks = 28
+				separator_column.dominant_biome_id = .Temperate_Hills
+				separator_column.water_biome_id = .Temperate_Hills
+				separator_column.surface_material_id = world_async.BlockMaterialID(
+					TERRAIN_GRASS_MAT_ID,
+				)
+				separator_column.subsurface_material_id = world_async.BlockMaterialID(
+					TERRAIN_DIRT_MAT_ID,
+				)
+				if separator_x <= 23 {
+					separator_column.water_fill_active = true
+					separator_sample.flooded = true
+					separator_sample.water_material_id = terrain_water_material_id_for_biome(
+						.Temperate_Hills,
+						false,
+					)
+				} else if separator_x >= 40 {
+					separator_column.water_fill_active = true
+					separator_column.dominant_biome_id = .Corrupted_Fen
+					separator_column.water_biome_id = .Corrupted_Fen
+					separator_sample.flooded = true
+					separator_sample.water_material_id = terrain_water_material_id_for_biome(
+						.Corrupted_Fen,
+						false,
+					)
+				} else if separator_x >= 28 && separator_x <= 35 {
+					separator_sample.conflict_active = true
+				}
+			}
+		}
+		terrain_surface_water_separators_apply(
+			key,
+			&separator_region,
+			{},
+			separator_columns[:],
+			separator_samples[:],
+		)
+		separator_dry_band_columns: u32
+		for separator_x := i32(24); separator_x <= 39; separator_x += 1 {
+			column := separator_columns[separator_x + 32 * CHUNK_BLOCK_LENGTH]
+			if !column.water_fill_active &&
+			   column.surface_height_blocks > column.water_level_blocks {
+				separator_dry_band_columns += 1
+			}
+		}
+		left_source_column := separator_columns[12 + 32 * CHUNK_BLOCK_LENGTH]
+		right_source_column := separator_columns[51 + 32 * CHUNK_BLOCK_LENGTH]
+		log.assertf(
+			separator_dry_band_columns >= 8,
+			"incompatible water conflict gap should become a broad dry terrain band, got %d columns",
+			separator_dry_band_columns,
+		)
+		log.assert(
+			left_source_column.water_fill_active &&
+			left_source_column.water_biome_id == .Temperate_Hills,
+			"water separator should preserve ordinary water source interiors",
+		)
+		log.assert(
+			right_source_column.water_fill_active &&
+			right_source_column.water_biome_id == .Corrupted_Fen,
+			"water separator should preserve biome water source interiors",
+		)
 		upland_cap_depth := terrain_surface_layer_depth_apply_shoreline(
 			shore_eval,
 			TERRAIN_GRASS_CAP_BLOCK_DEPTH,
@@ -1537,6 +1653,113 @@ when ODIN_DEBUG {
 		log.assert(
 			dry_flat_result.blocks_written > 800,
 			"surface village should stamp a substantial multi-building cluster on a flat dry footprint",
+		)
+		village_high_landmark_blocks: u32
+		for y := i32(28); y < CHUNK_BLOCK_LENGTH; y += 1 {
+			for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+				for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+					index := chunk_block_index(u32(x), u32(y), u32(z))
+					if view.blocks.occupancy[index] == .Solid {
+						village_high_landmark_blocks += 1
+					}
+				}
+			}
+		}
+		log.assert(
+			village_high_landmark_blocks >= 3,
+			"surface village should include a high town landmark silhouette",
+		)
+
+		chunk_voxel_view_fill_empty(&view)
+		farm_feature := surface_feature
+		farm_feature.family_id = .Watchtower_Ruin
+		farm_feature.height_blocks = 8
+		farm_feature.radius_blocks = 20
+		for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+			for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+				surface_columns[x + z * CHUNK_BLOCK_LENGTH] = {
+					surface_height        = 16,
+					surface_height_blocks = 16,
+					dominant_biome_id     = .Temperate_Hills,
+					surface_material_id   = world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID),
+				}
+				index := chunk_block_index(u32(x), 16, u32(z))
+				view.blocks.occupancy[index] = .Solid
+				view.blocks.material_id[index] = world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID)
+			}
+		}
+		farm_result := terrain_decoration_surface_feature_apply(
+			&view,
+			decoration_contract_key,
+			farm_feature,
+			{},
+			surface_columns[:],
+		)
+		farm_crop_blocks: u32
+		farm_high_landmark_blocks: u32
+		for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+			for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+				index := chunk_block_index(u32(x), 17, u32(z))
+				palette := terrain_material_palette_index(view.blocks.material_id[index])
+				if view.blocks.occupancy[index] == .Solid &&
+				   (palette == TERRAIN_GRASS_MAT_ID || palette == TERRAIN_DIRT_MAT_ID) {
+					farm_crop_blocks += 1
+				}
+				for y := i32(29); y < CHUNK_BLOCK_LENGTH; y += 1 {
+					high_index := chunk_block_index(u32(x), u32(y), u32(z))
+					if view.blocks.occupancy[high_index] == .Solid {
+						farm_high_landmark_blocks += 1
+					}
+				}
+			}
+		}
+		log.assert(
+			farm_result.blocks_written > 300 &&
+			farm_crop_blocks >= 80 &&
+			farm_high_landmark_blocks >= 5,
+			"surface farm should read as field-first with a high windmill/silo landmark",
+		)
+
+		chunk_voxel_view_fill_empty(&view)
+		fort_feature := surface_feature
+		fort_feature.family_id = .Palisade_Fort
+		fort_feature.biome_id = .Basalt_Spire_Highlands
+		fort_feature.height_blocks = 10
+		fort_feature.radius_blocks = 18
+		for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+			for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+				surface_columns[x + z * CHUNK_BLOCK_LENGTH] = {
+					surface_height        = 16,
+					surface_height_blocks = 16,
+					dominant_biome_id     = .Basalt_Spire_Highlands,
+					surface_material_id   = world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID),
+				}
+				index := chunk_block_index(u32(x), 16, u32(z))
+				view.blocks.occupancy[index] = .Solid
+				view.blocks.material_id[index] = world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+			}
+		}
+		fort_result := terrain_decoration_surface_feature_apply(
+			&view,
+			decoration_contract_key,
+			fort_feature,
+			{},
+			surface_columns[:],
+		)
+		fort_high_keep_blocks: u32
+		for y := i32(34); y < CHUNK_BLOCK_LENGTH; y += 1 {
+			for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+				for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+					index := chunk_block_index(u32(x), u32(y), u32(z))
+					if view.blocks.occupancy[index] == .Solid {
+						fort_high_keep_blocks += 1
+					}
+				}
+			}
+		}
+		log.assert(
+			fort_result.blocks_written > 900 && fort_high_keep_blocks >= 8,
+			"surface fortress should include a high keep/tower silhouette",
 		)
 
 		chunk_voxel_view_fill_empty(&view)
