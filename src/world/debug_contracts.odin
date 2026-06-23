@@ -1759,8 +1759,444 @@ when ODIN_DEBUG {
 			}
 		}
 		log.assert(
-			fort_result.blocks_written > 900 && fort_high_keep_blocks >= 8,
-			"surface fortress should include a high keep/tower silhouette",
+			fort_result.blocks_written > 2600 && fort_high_keep_blocks >= 80,
+			"surface fortress should include a substantial complete keep/tower silhouette",
+		)
+		fort_keep_air_blocks: u32
+		fort_keep_door_air_blocks: u32
+		fort_wall_walk_blocks: u32
+		fort_wall_walk_clear_blocks: u32
+		fort_stair_landing_blocks: u32
+		fort_flush_road_blocks: u32
+		fort_keep_fixture_blocks: u32
+		fort_courtyard_fixture_blocks: u32
+		fort_keep_roof_blocks: u32
+		fort_keep_upper_shell_blocks: u32
+		fort_wall_stair_support_blocks: u32
+		fort_keep_stair_support_blocks: u32
+		fort_keep_stair_turn_blocks: u32
+		fort_keep_door_floor_air_blocks: u32
+		fort_keep_roof_stair_landing_blocks: u32
+		fort_upper_tower_floor_blocks: u32
+		fort_upper_tower_room_air_blocks: u32
+		fort_upper_tower_door_floor_blocks: u32
+		fort_upper_tower_door_air_blocks: u32
+		fort_wall_height := i32(13)
+		fort_keep_x := TERRAIN_DECORATION_FORTRESS_KEEP_HALF_X_BLOCKS
+		fort_keep_z := TERRAIN_DECORATION_FORTRESS_KEEP_HALF_Z_BLOCKS
+		fort_keep_roof_y := i32(16 + fort_wall_height + 6)
+		for z := 32 - fort_keep_z + 2; z <= 32 + fort_keep_z - 2; z += 1 {
+			for x := 32 - fort_keep_x + 2; x <= 32 + fort_keep_x - 2; x += 1 {
+				for y := i32(19); y <= i32(36); y += 1 {
+					index := chunk_block_index(u32(x), u32(y), u32(z))
+					if view.blocks.occupancy[index] == .Empty {
+						fort_keep_air_blocks += 1
+					}
+				}
+			}
+		}
+		for z := 32 - fort_keep_z + 2; z <= 32 + fort_keep_z - 2; z += 1 {
+			for x := 32 - fort_keep_x + 2; x <= 32 + fort_keep_x - 2; x += 1 {
+				for y := i32(18); y <= i32(20); y += 1 {
+					index := chunk_block_index(u32(x), u32(y), u32(z))
+					if view.blocks.occupancy[index] == .Solid {
+						fort_keep_fixture_blocks += 1
+					}
+				}
+			}
+		}
+		for z := 32 - fort_keep_z + 2; z <= 32 + fort_keep_z - 2; z += 1 {
+			for x := 32 - fort_keep_x + 2; x <= 32 + fort_keep_x - 2; x += 1 {
+				dx := x - 32
+				dz := z - 32
+				roof_index := chunk_block_index(u32(x), u32(fort_keep_roof_y), u32(z))
+				upper_shell_cell :=
+					math.abs(dx) <= 6 &&
+					math.abs(dz) <= 5 &&
+					(math.abs(dx) >= 5 || math.abs(dz) >= 4)
+				upper_tower_interior := math.abs(dx) <= 4 && math.abs(dz) <= 3
+				upper_tower_door := math.abs(dx) <= 2 && dz == -5
+				if view.blocks.occupancy[roof_index] == .Solid {
+					fort_keep_roof_blocks += 1
+				}
+				if upper_tower_interior {
+					if view.blocks.occupancy[roof_index] == .Solid {
+						fort_upper_tower_floor_blocks += 1
+					}
+					for y := fort_keep_roof_y + 1; y <= fort_keep_roof_y + 5; y += 1 {
+						air_index := chunk_block_index(u32(x), u32(y), u32(z))
+						if view.blocks.occupancy[air_index] == .Empty {
+							fort_upper_tower_room_air_blocks += 1
+						}
+					}
+				}
+				if upper_tower_door {
+					if view.blocks.occupancy[roof_index] == .Solid {
+						fort_upper_tower_door_floor_blocks += 1
+					}
+					for y := fort_keep_roof_y + 1; y <= fort_keep_roof_y + 5; y += 1 {
+						air_index := chunk_block_index(u32(x), u32(y), u32(z))
+						if view.blocks.occupancy[air_index] == .Empty {
+							fort_upper_tower_door_air_blocks += 1
+						}
+					}
+				}
+				if upper_shell_cell {
+					upper_index := chunk_block_index(
+						u32(x),
+						u32(16 + fort_wall_height + 12),
+						u32(z),
+					)
+					if view.blocks.occupancy[upper_index] == .Solid {
+						fort_keep_upper_shell_blocks += 1
+					}
+				}
+			}
+		}
+		for z := 32 - fort_keep_z - 1; z <= 32 - fort_keep_z + 1; z += 1 {
+			for x := i32(29); x <= i32(35); x += 1 {
+				floor_index := chunk_block_index(u32(x), 17, u32(z))
+				if view.blocks.occupancy[floor_index] == .Empty {
+					fort_keep_door_floor_air_blocks += 1
+				}
+				for y := i32(18); y <= i32(22); y += 1 {
+					index := chunk_block_index(u32(x), u32(y), u32(z))
+					if view.blocks.occupancy[index] == .Empty {
+						fort_keep_door_air_blocks += 1
+					}
+				}
+			}
+		}
+		for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+			for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+				dx := x - 32
+				dz := z - 32
+				if terrain_decoration_fortress_rampart_walk_cell(
+					dx,
+					dz,
+					TERRAIN_DECORATION_FORTRESS_WALL_RADIUS_BLOCKS,
+				) {
+					walk_index := chunk_block_index(u32(x), u32(16 + fort_wall_height + 1), u32(z))
+					if view.blocks.occupancy[walk_index] == .Solid {
+						fort_wall_walk_blocks += 1
+						clear_headroom := true
+						for clear_y := i32(16 + fort_wall_height + 2);
+						    clear_y <= i32(16 + fort_wall_height + 5);
+						    clear_y += 1 {
+							clear_index := chunk_block_index(u32(x), u32(clear_y), u32(z))
+							if view.blocks.occupancy[clear_index] != .Empty {
+								clear_headroom = false
+							}
+						}
+						if clear_headroom {
+							fort_wall_walk_clear_blocks += 1
+						}
+					}
+				}
+				stair_height, stair_found := terrain_decoration_fortress_wall_stair_height(
+					dx,
+					dz,
+					TERRAIN_DECORATION_FORTRESS_WALL_RADIUS_BLOCKS,
+					fort_wall_height,
+				)
+				if stair_found && stair_height == fort_wall_height + 1 {
+					stair_index := chunk_block_index(
+						u32(x),
+						u32(16 + fort_wall_height + 1),
+						u32(z),
+					)
+					stair_head_index := chunk_block_index(
+						u32(x),
+						u32(16 + fort_wall_height + 2),
+						u32(z),
+					)
+					if view.blocks.occupancy[stair_index] == .Solid &&
+					   view.blocks.occupancy[stair_head_index] == .Empty {
+						fort_stair_landing_blocks += 1
+					}
+				}
+				if stair_found {
+					stair_support_index := chunk_block_index(u32(x), 17, u32(z))
+					if view.blocks.occupancy[stair_support_index] == .Solid {
+						fort_wall_stair_support_blocks += 1
+					}
+				}
+				_, tower_found := terrain_decoration_fortress_tower_height(
+					dx,
+					dz,
+					TERRAIN_DECORATION_FORTRESS_WALL_RADIUS_BLOCKS,
+					fort_wall_height,
+				)
+				_, keep_found := terrain_decoration_fortress_keep_height(dx, dz, fort_wall_height)
+				keep_stair_height, keep_stair_roof_open, keep_stair_cell :=
+					terrain_decoration_fortress_keep_stair_height(
+						dx,
+						dz,
+						fort_keep_x,
+						fort_keep_z,
+						fort_wall_height + 6,
+					)
+				if keep_stair_cell {
+					keep_stair_support_index := chunk_block_index(u32(x), 17, u32(z))
+					if view.blocks.occupancy[keep_stair_support_index] == .Solid {
+						fort_keep_stair_support_blocks += 1
+					}
+					if !keep_stair_roof_open &&
+					   view.blocks.occupancy[keep_stair_support_index] == .Solid {
+						fort_keep_stair_turn_blocks += 1
+					}
+					keep_stair_roof_index := chunk_block_index(
+						u32(x),
+						u32(fort_keep_roof_y),
+						u32(z),
+					)
+					keep_stair_roof_head_index := chunk_block_index(
+						u32(x),
+						u32(fort_keep_roof_y + 1),
+						u32(z),
+					)
+					if keep_stair_height == fort_wall_height + 6 &&
+					   view.blocks.occupancy[keep_stair_roof_index] == .Solid &&
+					   view.blocks.occupancy[keep_stair_roof_head_index] == .Empty {
+						fort_keep_roof_stair_landing_blocks += 1
+					}
+				}
+				if terrain_decoration_fortress_road_cell(
+					   dx,
+					   dz,
+					   TERRAIN_DECORATION_FORTRESS_WALL_RADIUS_BLOCKS,
+				   ) &&
+				   !tower_found &&
+				   !keep_found &&
+				   !terrain_decoration_fortress_wall_cell(
+						   dx,
+						   dz,
+						   TERRAIN_DECORATION_FORTRESS_WALL_RADIUS_BLOCKS,
+					   ) {
+					road_index := chunk_block_index(u32(x), 16, u32(z))
+					road_above_index := chunk_block_index(u32(x), 17, u32(z))
+					road_palette := terrain_material_palette_index(
+						view.blocks.material_id[road_index],
+					)
+					if view.blocks.occupancy[road_index] == .Solid &&
+					   road_palette == TERRAIN_STONE_MAT_ID &&
+					   view.blocks.occupancy[road_above_index] == .Empty {
+						fort_flush_road_blocks += 1
+					}
+				}
+				courtyard_fixture_area :=
+					((dx >= -22 && dx <= -17 && dz >= 12 && dz <= 17) ||
+						(dx >= 15 && dx <= 24 && dz >= -23 && dz <= -18) ||
+						(dx >= -24 && dx <= -15 && dz >= -23 && dz <= -18))
+				if courtyard_fixture_area {
+					fixture_index := chunk_block_index(u32(x), 17, u32(z))
+					if view.blocks.occupancy[fixture_index] == .Solid {
+						fort_courtyard_fixture_blocks += 1
+					}
+				}
+			}
+		}
+		log.assertf(
+			fort_keep_air_blocks >= 600 &&
+			fort_keep_door_air_blocks >= 30 &&
+			fort_wall_walk_blocks >= 60 &&
+			fort_wall_walk_clear_blocks >= 60 &&
+			fort_stair_landing_blocks >= 12 &&
+			fort_flush_road_blocks >= 260 &&
+			fort_keep_fixture_blocks >= 18 &&
+			fort_courtyard_fixture_blocks >= 20 &&
+			fort_keep_roof_blocks >= 360 &&
+			fort_keep_upper_shell_blocks >= 50 &&
+			fort_wall_stair_support_blocks >= 180 &&
+			fort_keep_stair_support_blocks >= 50 &&
+			fort_keep_stair_turn_blocks >= 20 &&
+			fort_keep_door_floor_air_blocks >= 18 &&
+			fort_keep_roof_stair_landing_blocks >= 18 &&
+			fort_upper_tower_floor_blocks >= 50 &&
+			fort_upper_tower_room_air_blocks >= 250 &&
+			fort_upper_tower_door_floor_blocks >= 5 &&
+			fort_upper_tower_door_air_blocks >= 20,
+			"surface fortress should be traversable and deep: keep_air=%d keep_door_air=%d wall_walk=%d clear_walk=%d stair_landings=%d roads=%d keep_fixtures=%d courtyard_fixtures=%d roof=%d upper_shell=%d wall_stair_support=%d keep_stair_support=%d keep_stair_turn=%d keep_door_floor_air=%d roof_stair_landings=%d upper_floor=%d upper_air=%d upper_door_floor=%d upper_door_air=%d",
+			fort_keep_air_blocks,
+			fort_keep_door_air_blocks,
+			fort_wall_walk_blocks,
+			fort_wall_walk_clear_blocks,
+			fort_stair_landing_blocks,
+			fort_flush_road_blocks,
+			fort_keep_fixture_blocks,
+			fort_courtyard_fixture_blocks,
+			fort_keep_roof_blocks,
+			fort_keep_upper_shell_blocks,
+			fort_wall_stair_support_blocks,
+			fort_keep_stair_support_blocks,
+			fort_keep_stair_turn_blocks,
+			fort_keep_door_floor_air_blocks,
+			fort_keep_roof_stair_landing_blocks,
+			fort_upper_tower_floor_blocks,
+			fort_upper_tower_room_air_blocks,
+			fort_upper_tower_door_floor_blocks,
+			fort_upper_tower_door_air_blocks,
+		)
+
+		chunk_voxel_view_fill_empty(&view)
+		for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+			for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+				surface_columns[x + z * CHUNK_BLOCK_LENGTH] = {
+					surface_height        = 16,
+					surface_height_blocks = 16,
+					dominant_biome_id     = .Basalt_Spire_Highlands,
+					surface_material_id   = world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID),
+				}
+				index := chunk_block_index(u32(x), 16, u32(z))
+				view.blocks.occupancy[index] = .Solid
+				view.blocks.material_id[index] = world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+			}
+		}
+		_ = terrain_decoration_surface_feature_apply(
+			&view,
+			decoration_contract_key,
+			fort_feature,
+			{x = -32, y = 0, z = -32},
+			surface_columns[:],
+		)
+		fort_tower_air_blocks: u32
+		fort_tower_door_air_blocks: u32
+		fort_tower_fixture_blocks: u32
+		for z := i32(27); z <= i32(33); z += 1 {
+			for x := i32(27); x <= i32(33); x += 1 {
+				for y := i32(18); y <= i32(36); y += 1 {
+					index := chunk_block_index(u32(x), u32(y), u32(z))
+					if view.blocks.occupancy[index] == .Empty {
+						fort_tower_air_blocks += 1
+					}
+				}
+				for y := i32(18); y <= i32(24); y += 1 {
+					index := chunk_block_index(u32(x), u32(y), u32(z))
+					if view.blocks.occupancy[index] == .Solid {
+						fort_tower_fixture_blocks += 1
+					}
+				}
+			}
+		}
+		for z := i32(33); z <= i32(35); z += 1 {
+			for x := i32(33); x <= i32(35); x += 1 {
+				for y := i32(18); y <= i32(22); y += 1 {
+					index := chunk_block_index(u32(x), u32(y), u32(z))
+					if view.blocks.occupancy[index] == .Empty {
+						fort_tower_door_air_blocks += 1
+					}
+				}
+			}
+		}
+		log.assertf(
+			fort_tower_air_blocks >= 300 &&
+			fort_tower_door_air_blocks >= 20 &&
+			fort_tower_fixture_blocks >= 8,
+			"surface fortress towers should be hollow, enterable, and furnished: tower_air=%d tower_door_air=%d tower_fixtures=%d",
+			fort_tower_air_blocks,
+			fort_tower_door_air_blocks,
+			fort_tower_fixture_blocks,
+		)
+
+		chunk_voxel_view_fill_empty(&view)
+		fort_feature.x = 62
+		fort_feature.z = 32
+		for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+			for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+				surface_columns[x + z * CHUNK_BLOCK_LENGTH] = {
+					surface_height        = 16,
+					surface_height_blocks = 16,
+					dominant_biome_id     = .Basalt_Spire_Highlands,
+					surface_material_id   = world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID),
+				}
+				index := chunk_block_index(u32(x), 16, u32(z))
+				view.blocks.occupancy[index] = .Solid
+				view.blocks.material_id[index] = world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+			}
+		}
+		_ = terrain_decoration_surface_feature_apply(
+			&view,
+			decoration_contract_key,
+			fort_feature,
+			{},
+			surface_columns[:],
+		)
+		left_seam_blocks: u32
+		for y := i32(18); y < CHUNK_BLOCK_LENGTH; y += 1 {
+			for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+				index := chunk_block_index(CHUNK_BLOCK_LENGTH - 1, u32(y), u32(z))
+				if view.blocks.occupancy[index] == .Solid {
+					left_seam_blocks += 1
+				}
+			}
+		}
+
+		chunk_voxel_view_fill_empty(&view)
+		for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+			for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+				index := chunk_block_index(u32(x), 16, u32(z))
+				view.blocks.occupancy[index] = .Solid
+				view.blocks.material_id[index] = world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+			}
+		}
+		_ = terrain_decoration_surface_feature_apply(
+			&view,
+			decoration_contract_key,
+			fort_feature,
+			{x = CHUNK_BLOCK_LENGTH, y = 0, z = 0},
+			surface_columns[:],
+		)
+		right_seam_blocks: u32
+		for y := i32(18); y < CHUNK_BLOCK_LENGTH; y += 1 {
+			for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+				index := chunk_block_index(0, u32(y), u32(z))
+				if view.blocks.occupancy[index] == .Solid {
+					right_seam_blocks += 1
+				}
+			}
+		}
+		log.assertf(
+			left_seam_blocks > 0 && right_seam_blocks > 0,
+			"surface fortress should write intersecting slices on both sides of a chunk seam, left=%d right=%d",
+			left_seam_blocks,
+			right_seam_blocks,
+		)
+
+		chunk_voxel_view_fill_empty(&view)
+		fort_feature.x = 32
+		fort_feature.z = 32
+		for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+			for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+				surface_columns[x + z * CHUNK_BLOCK_LENGTH] = {
+					surface_height        = 52,
+					surface_height_blocks = 52,
+					dominant_biome_id     = .Basalt_Spire_Highlands,
+					surface_material_id   = world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID),
+				}
+			}
+		}
+		_ = terrain_decoration_surface_feature_apply(
+			&view,
+			decoration_contract_key,
+			fort_feature,
+			{x = 0, y = CHUNK_BLOCK_LENGTH, z = 0},
+			surface_columns[:],
+		)
+		vertical_seam_blocks: u32
+		for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+			for y := i32(0); y < CHUNK_BLOCK_LENGTH; y += 1 {
+				for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+					index := chunk_block_index(u32(x), u32(y), u32(z))
+					if view.blocks.occupancy[index] == .Solid {
+						vertical_seam_blocks += 1
+					}
+				}
+			}
+		}
+		log.assertf(
+			vertical_seam_blocks > 0,
+			"surface fortress should continue tall towers into the vertical chunk above, blocks=%d",
+			vertical_seam_blocks,
 		)
 
 		chunk_voxel_view_fill_empty(&view)

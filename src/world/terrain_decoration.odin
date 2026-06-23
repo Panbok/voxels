@@ -87,6 +87,14 @@ TERRAIN_DECORATION_STAMP_OFFSET_Z_SALT :: u64(0x41f6b9d82705eca3)
 TERRAIN_DECORATION_STAMP_DIRECTION_SALT :: u64(0xc7a536e1b94d208f)
 TERRAIN_DECORATION_SURFACE_STRUCTURE_RESERVATION_CAPACITY :: 128
 TERRAIN_DECORATION_STRUCTURE_PAD_FALLOFF_BLOCKS :: f32(10)
+TERRAIN_DECORATION_FORTRESS_WALL_RADIUS_BLOCKS :: i32(36)
+TERRAIN_DECORATION_FORTRESS_FOOTPRINT_RADIUS_BLOCKS :: i32(48)
+TERRAIN_DECORATION_FORTRESS_PAD_RADIUS_BLOCKS :: i32(52)
+TERRAIN_DECORATION_FORTRESS_WALL_THICKNESS_BLOCKS :: i32(4)
+TERRAIN_DECORATION_FORTRESS_GATE_HALF_WIDTH_BLOCKS :: i32(5)
+TERRAIN_DECORATION_FORTRESS_TOWER_RADIUS_BLOCKS :: i32(6)
+TERRAIN_DECORATION_FORTRESS_KEEP_HALF_X_BLOCKS :: i32(15)
+TERRAIN_DECORATION_FORTRESS_KEEP_HALF_Z_BLOCKS :: i32(14)
 
 //////////////////////////////////////
 // Terrain Decoration Methods
@@ -424,6 +432,20 @@ terrain_decoration_surface_feature_apply :: proc(
 		if !found {
 			return {}
 		}
+		if feature.family_id == .Palisade_Fort {
+			written := terrain_decoration_fortress_prefab_apply(
+				view,
+				key,
+				feature,
+				feature.height_blocks,
+				feature.radius_blocks,
+				feature.material_variant,
+				feature.rotation_quarters,
+				chunk_origin,
+				{surface = true, chunk_origin_y = chunk_origin.y, columns = columns},
+			)
+			return {blocks_written = written}
+		}
 		written := terrain_decoration_family_stamp_apply(
 			view,
 			feature.family_id,
@@ -709,6 +731,9 @@ terrain_decoration_surface_structure_family_allows_biome :: proc(
 		)
 	case .Palisade_Fort:
 		return(
+			biome_id == .Temperate_Hills ||
+			biome_id == .Old_Growth_Forest ||
+			biome_id == .Wet_Lowland_Marsh ||
 			biome_id == .Corrupted_Ash_Forest ||
 			biome_id == .Corrupted_Fen ||
 			biome_id == .Basalt_Spire_Highlands ||
@@ -782,7 +807,7 @@ terrain_decoration_surface_structure_pad_radius :: proc(
 	case .Watchtower_Ruin:
 		return 23
 	case .Palisade_Fort:
-		return 26
+		return TERRAIN_DECORATION_FORTRESS_PAD_RADIUS_BLOCKS
 	case .Ruin_Pillar_Set:
 		return 11
 	case .Baseline_Tree,
@@ -1051,7 +1076,7 @@ terrain_decoration_surface_structure_footprint_radius :: proc(
 	case .Ruin_Hamlet:
 		return math.max(i32(radius_blocks), 24)
 	case .Palisade_Fort:
-		return math.max(i32(radius_blocks), 24)
+		return math.max(i32(radius_blocks), TERRAIN_DECORATION_FORTRESS_FOOTPRINT_RADIUS_BLOCKS)
 	case .Watchtower_Ruin:
 		return math.max(i32(radius_blocks), 22)
 	case .Ruin_Pillar_Set:
@@ -1080,7 +1105,7 @@ terrain_decoration_surface_structure_flatness_tolerance :: proc(
 	case .Ruin_Hamlet:
 		return 1
 	case .Palisade_Fort:
-		return 1
+		return 3
 	case .Watchtower_Ruin:
 		return 1
 	case .Ruin_Pillar_Set:
@@ -2435,6 +2460,16 @@ terrain_decoration_stamp_materials_for :: proc(
 		materials.primary = terrain_block_material_id_from_biome_material(.Stone)
 		materials.secondary = terrain_block_material_id_from_biome_material(.Aquifer_Wall)
 		materials.accent = terrain_block_material_id_from_biome_material(.Forest_Litter)
+		if biome_id == .Temperate_Hills || biome_id == .Old_Growth_Forest {
+			materials.primary = terrain_block_material_id_from_biome_material(.Stone)
+			materials.secondary = terrain_block_material_id_from_biome_material(.Forest_Litter)
+			materials.accent = terrain_block_material_id_from_biome_material(.Moss)
+		}
+		if biome_id == .Wet_Lowland_Marsh {
+			materials.primary = terrain_block_material_id_from_biome_material(.Aquifer_Wall)
+			materials.secondary = terrain_block_material_id_from_biome_material(.Wet_Marsh)
+			materials.accent = terrain_block_material_id_from_biome_material(.Forest_Litter)
+		}
 		if biome_id == .Basalt_Spire_Highlands || biome_id == .Emberglass_Badlands {
 			materials.primary = terrain_block_material_id_from_biome_material(.Basalt)
 			materials.secondary = terrain_block_material_id_from_biome_material(.Stone)
@@ -3695,6 +3730,1537 @@ terrain_decoration_watchtower_ruin_apply :: proc(
 	return written
 }
 
+terrain_decoration_structure_offset_inverse_rotate :: proc(
+	dx, dz: i32,
+	rotation_quarters: u8,
+) -> (
+	rotated_dx: i32,
+	rotated_dz: i32,
+) {
+	return terrain_decoration_structure_offset_rotate(dx, dz, (4 - (rotation_quarters & 3)) & 3)
+}
+
+terrain_decoration_fortress_cell_hash :: proc(
+	id: biomes.FeatureID,
+	dx, dz: i32,
+	salt: u64,
+) -> u64 {
+	member := u32((dx + 128) + (dz + 128) * 257)
+	return terrain_decoration_stamp_hash(id, member, 0, salt)
+}
+
+terrain_decoration_fortress_cell_roll :: proc(
+	id: biomes.FeatureID,
+	dx, dz: i32,
+	salt: u64,
+) -> f32 {
+	return biomes.feature_grid_unit_f32(
+		terrain_decoration_fortress_cell_hash(id, dx, dz, salt),
+		salt,
+	)
+}
+
+terrain_decoration_fortress_sign :: proc(value: i32) -> i32 {
+	if value < 0 {
+		return -1
+	}
+	if value > 0 {
+		return 1
+	}
+	return 0
+}
+
+terrain_decoration_fortress_biome_is_green :: proc(biome_id: biomes.BiomeID) -> bool {
+	return biome_id == .Temperate_Hills || biome_id == .Old_Growth_Forest
+}
+
+terrain_decoration_fortress_biome_is_marsh :: proc(biome_id: biomes.BiomeID) -> bool {
+	return biome_id == .Wet_Lowland_Marsh
+}
+
+terrain_decoration_fortress_biome_is_corrupted :: proc(biome_id: biomes.BiomeID) -> bool {
+	return biome_id == .Corrupted_Ash_Forest || biome_id == .Corrupted_Fen
+}
+
+terrain_decoration_fortress_biome_is_stone :: proc(biome_id: biomes.BiomeID) -> bool {
+	return biome_id == .Basalt_Spire_Highlands || biome_id == .Emberglass_Badlands
+}
+
+terrain_decoration_surface_world_block_try_write :: proc(
+	view: ^world_async.ChunkVoxelView,
+	chunk_origin: world_async.BlockCoord,
+	world_x, world_y, world_z: i32,
+	material: world_async.BlockMaterialID,
+) -> bool {
+	local_x := world_x - chunk_origin.x
+	local_y := world_y - chunk_origin.y
+	local_z := world_z - chunk_origin.z
+	if !chunk_block_coord_is_inside(local_x, local_y, local_z) {
+		return false
+	}
+	return terrain_decoration_block_try_write(view, local_x, local_y, local_z, material)
+}
+
+terrain_decoration_surface_world_block_try_clear :: proc(
+	view: ^world_async.ChunkVoxelView,
+	chunk_origin: world_async.BlockCoord,
+	world_x, world_y, world_z: i32,
+) -> bool {
+	local_x := world_x - chunk_origin.x
+	local_y := world_y - chunk_origin.y
+	local_z := world_z - chunk_origin.z
+	if !chunk_block_coord_is_inside(local_x, local_y, local_z) {
+		return false
+	}
+	index := chunk_block_index(u32(local_x), u32(local_y), u32(local_z))
+	if view.blocks.occupancy[index] == .Empty {
+		return false
+	}
+	view.blocks.occupancy[index] = .Empty
+	view.blocks.material_id[index] = world_async.BlockMaterialID(0)
+	return true
+}
+
+terrain_decoration_surface_world_block_try_paint :: proc(
+	view: ^world_async.ChunkVoxelView,
+	chunk_origin: world_async.BlockCoord,
+	world_x, world_y, world_z: i32,
+	material: world_async.BlockMaterialID,
+) -> bool {
+	local_x := world_x - chunk_origin.x
+	local_y := world_y - chunk_origin.y
+	local_z := world_z - chunk_origin.z
+	if !chunk_block_coord_is_inside(local_x, local_y, local_z) {
+		return false
+	}
+	index := chunk_block_index(u32(local_x), u32(local_y), u32(local_z))
+	if view.blocks.occupancy[index] != .Solid {
+		return false
+	}
+	when TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
+		if view.blocks.material_id[index] == terrain_decoration_debug_material_id(material) {
+			return false
+		}
+		view.blocks.material_id[index] = terrain_decoration_debug_material_id(material)
+	}
+	when !TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
+		if view.blocks.material_id[index] == material {
+			return false
+		}
+		view.blocks.material_id[index] = material
+	}
+	return true
+}
+
+terrain_decoration_surface_world_column_base_y :: proc(
+	key: biomes.FeatureGridKey,
+	feature: biomes.DecorationFeature,
+	chunk_origin: world_async.BlockCoord,
+	ctx: TerrainDecorationStampContext,
+	world_x, world_z: i32,
+) -> (
+	base_world_y: i32,
+	found: bool,
+) {
+	column := terrain_decoration_surface_structure_reference_column(
+		key,
+		chunk_origin,
+		ctx.columns,
+		world_x,
+		world_z,
+	)
+	if terrain_decoration_surface_column_is_water_covered(column) {
+		return
+	}
+	if !terrain_decoration_surface_structure_family_allows_biome(
+		feature.family_id,
+		feature.biome_id,
+	) {
+		return
+	}
+	base_world_y = column.surface_height
+	found = true
+	return
+}
+
+terrain_decoration_surface_world_column_range_write :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	feature: biomes.DecorationFeature,
+	chunk_origin: world_async.BlockCoord,
+	ctx: TerrainDecorationStampContext,
+	world_x, world_z: i32,
+	y_offset, height: i32,
+	primary, cap: world_async.BlockMaterialID,
+) -> u32 {
+	if height <= 0 {
+		return 0
+	}
+	base_world_y, found := terrain_decoration_surface_world_column_base_y(
+		key,
+		feature,
+		chunk_origin,
+		ctx,
+		world_x,
+		world_z,
+	)
+	if !found {
+		return 0
+	}
+
+	written: u32
+	last_offset := y_offset + height - 1
+	for offset := y_offset; offset <= last_offset; offset += 1 {
+		material := primary
+		if offset == last_offset {
+			material = cap
+		}
+		if terrain_decoration_surface_world_block_try_write(
+			view,
+			chunk_origin,
+			world_x,
+			base_world_y + offset,
+			world_z,
+			material,
+		) {
+			written += 1
+		}
+	}
+	return written
+}
+
+terrain_decoration_surface_world_column_range_clear :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	feature: biomes.DecorationFeature,
+	chunk_origin: world_async.BlockCoord,
+	ctx: TerrainDecorationStampContext,
+	world_x, world_z: i32,
+	y_offset, height: i32,
+) -> u32 {
+	if height <= 0 {
+		return 0
+	}
+	base_world_y, found := terrain_decoration_surface_world_column_base_y(
+		key,
+		feature,
+		chunk_origin,
+		ctx,
+		world_x,
+		world_z,
+	)
+	if !found {
+		return 0
+	}
+
+	cleared: u32
+	last_offset := y_offset + height - 1
+	for offset := y_offset; offset <= last_offset; offset += 1 {
+		if terrain_decoration_surface_world_block_try_clear(
+			view,
+			chunk_origin,
+			world_x,
+			base_world_y + offset,
+			world_z,
+		) {
+			cleared += 1
+		}
+	}
+	return cleared
+}
+
+terrain_decoration_surface_world_column_range_paint :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	feature: biomes.DecorationFeature,
+	chunk_origin: world_async.BlockCoord,
+	ctx: TerrainDecorationStampContext,
+	world_x, world_z: i32,
+	y_offset, height: i32,
+	material: world_async.BlockMaterialID,
+) -> u32 {
+	if height <= 0 {
+		return 0
+	}
+	base_world_y, found := terrain_decoration_surface_world_column_base_y(
+		key,
+		feature,
+		chunk_origin,
+		ctx,
+		world_x,
+		world_z,
+	)
+	if !found {
+		return 0
+	}
+
+	painted: u32
+	last_offset := y_offset + height - 1
+	for offset := y_offset; offset <= last_offset; offset += 1 {
+		if terrain_decoration_surface_world_block_try_paint(
+			view,
+			chunk_origin,
+			world_x,
+			base_world_y + offset,
+			world_z,
+			material,
+		) {
+			painted += 1
+		}
+	}
+	return painted
+}
+
+terrain_decoration_surface_world_cover_write :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	feature: biomes.DecorationFeature,
+	chunk_origin: world_async.BlockCoord,
+	ctx: TerrainDecorationStampContext,
+	world_x, world_z: i32,
+	material: world_async.BlockMaterialID,
+) -> u32 {
+	return terrain_decoration_surface_world_column_range_write(
+		view,
+		key,
+		feature,
+		chunk_origin,
+		ctx,
+		world_x,
+		world_z,
+		1,
+		1,
+		material,
+		material,
+	)
+}
+
+terrain_decoration_fortress_outer_normal :: proc(dx, dz: i32) -> (normal_x, normal_z: i32) {
+	abs_x := math.abs(dx)
+	abs_z := math.abs(dz)
+	if abs_x >= abs_z {
+		return terrain_decoration_fortress_sign(dx), 0
+	}
+	return 0, terrain_decoration_fortress_sign(dz)
+}
+
+terrain_decoration_fortress_gate_opening :: proc(dx, dz, wall_radius: i32) -> bool {
+	return(
+		dz >= -wall_radius - 1 &&
+		dz <= -wall_radius + TERRAIN_DECORATION_FORTRESS_WALL_THICKNESS_BLOCKS &&
+		math.abs(dx) <= TERRAIN_DECORATION_FORTRESS_GATE_HALF_WIDTH_BLOCKS \
+	)
+}
+
+terrain_decoration_fortress_wall_cell :: proc(dx, dz, wall_radius: i32) -> bool {
+	abs_x := math.abs(dx)
+	abs_z := math.abs(dz)
+	outer := math.max(abs_x, abs_z)
+	return(
+		outer >= wall_radius - TERRAIN_DECORATION_FORTRESS_WALL_THICKNESS_BLOCKS &&
+		outer <= wall_radius &&
+		!terrain_decoration_fortress_gate_opening(dx, dz, wall_radius) \
+	)
+}
+
+terrain_decoration_fortress_tower_cell :: proc(
+	dx, dz, wall_radius: i32,
+) -> (
+	tower_index: int,
+	center_x, center_z, local_dx, local_dz, dist_sq: i32,
+	found: bool,
+) {
+	radius := TERRAIN_DECORATION_FORTRESS_TOWER_RADIUS_BLOCKS
+	radius_sq := radius * radius
+	centers := [?]biomes.IVec2 {
+		{x = -wall_radius + 2, z = -wall_radius + 2},
+		{x = wall_radius - 2, z = -wall_radius + 2},
+		{x = -wall_radius + 2, z = wall_radius - 2},
+		{x = wall_radius - 2, z = wall_radius - 2},
+		{x = -wall_radius, z = 0},
+		{x = wall_radius, z = 0},
+		{x = 0, z = wall_radius},
+		{x = -TERRAIN_DECORATION_FORTRESS_GATE_HALF_WIDTH_BLOCKS - 5, z = -wall_radius},
+		{x = TERRAIN_DECORATION_FORTRESS_GATE_HALF_WIDTH_BLOCKS + 5, z = -wall_radius},
+	}
+	for center, center_index in centers {
+		candidate_dx := dx - center.x
+		candidate_dz := dz - center.z
+		candidate_dist_sq := candidate_dx * candidate_dx + candidate_dz * candidate_dz
+		if candidate_dist_sq > radius_sq {
+			continue
+		}
+		tower_index = center_index
+		center_x = center.x
+		center_z = center.z
+		local_dx = candidate_dx
+		local_dz = candidate_dz
+		dist_sq = candidate_dist_sq
+		found = true
+		return
+	}
+	return
+}
+
+terrain_decoration_fortress_tower_height :: proc(
+	dx, dz, wall_radius, wall_height: i32,
+) -> (
+	height: i32,
+	found: bool,
+) {
+	radius := TERRAIN_DECORATION_FORTRESS_TOWER_RADIUS_BLOCKS
+	tower_index, _, _, local_dx, local_dz, dist_sq, tower_found :=
+		terrain_decoration_fortress_tower_cell(dx, dz, wall_radius)
+	if !tower_found {
+		return
+	}
+	height = wall_height + 8
+	if tower_index >= 7 {
+		height = wall_height + 6
+	}
+	if dist_sq >= (radius - 1) * (radius - 1) &&
+	   ((math.abs(local_dx) + math.abs(local_dz)) & 1) == 0 {
+		height += 2
+	}
+	found = true
+	return
+}
+
+terrain_decoration_fortress_keep_height :: proc(
+	dx, dz, wall_height: i32,
+) -> (
+	height: i32,
+	found: bool,
+) {
+	abs_x := math.abs(dx)
+	abs_z := math.abs(dz)
+	keep_x := TERRAIN_DECORATION_FORTRESS_KEEP_HALF_X_BLOCKS
+	keep_z := TERRAIN_DECORATION_FORTRESS_KEEP_HALF_Z_BLOCKS
+	if abs_x <= keep_x && abs_z <= keep_z {
+		perimeter := abs_x >= keep_x - 1 || abs_z >= keep_z - 1
+		corner := abs_x >= keep_x - 1 && abs_z >= keep_z - 1
+		buttress :=
+			(abs_x >= keep_x - 2 && (abs_z == 7 || abs_z == 2 || abs_z == 12)) ||
+			(abs_z >= keep_z - 2 && (abs_x == 8 || abs_x == 3 || abs_x == 13))
+		upper_tower_shell := abs_x <= 6 && abs_z <= 5 && (abs_x >= 5 || abs_z >= 4)
+		if perimeter {
+			height = wall_height + 9
+			if corner {
+				height += 4
+			}
+			found = true
+			return
+		}
+		if buttress {
+			height = wall_height + 11
+			found = true
+			return
+		}
+		if upper_tower_shell {
+			height = wall_height + 15
+			found = true
+			return
+		}
+	}
+	return
+}
+
+terrain_decoration_fortress_gatehouse_height :: proc(
+	dx, dz, wall_radius, wall_height: i32,
+) -> (
+	height: i32,
+	found: bool,
+) {
+	abs_x := math.abs(dx)
+	if dz >= -wall_radius - 4 &&
+	   dz <= -wall_radius + 7 &&
+	   abs_x >= TERRAIN_DECORATION_FORTRESS_GATE_HALF_WIDTH_BLOCKS + 1 &&
+	   abs_x <= TERRAIN_DECORATION_FORTRESS_GATE_HALF_WIDTH_BLOCKS + 8 {
+		height = wall_height + 4
+		if abs_x >= TERRAIN_DECORATION_FORTRESS_GATE_HALF_WIDTH_BLOCKS + 6 {
+			height += 3
+		}
+		found = true
+		return
+	}
+	return
+}
+
+terrain_decoration_fortress_keep_stair_height :: proc(
+	dx, dz, keep_x, keep_z, keep_roof_height: i32,
+) -> (
+	height: i32,
+	roof_open: bool,
+	found: bool,
+) {
+	side_x_min := keep_x - 4
+	side_x_max := keep_x - 2
+	side_z_min := -keep_z + 6
+	side_z_max := keep_z - 2
+	if dx >= side_x_min && dx <= side_x_max && dz >= side_z_min && dz <= side_z_max {
+		progress := dz - side_z_min
+		height = math.clamp(7 + progress, 7, keep_roof_height)
+		roof_open = true
+		found = true
+		return
+	}
+
+	turn_x_min := i32(2)
+	turn_x_max := keep_x - 2
+	turn_z_min := -keep_z + 4
+	turn_z_max := side_z_min
+	if dx >= turn_x_min && dx <= turn_x_max && dz >= turn_z_min && dz <= turn_z_max {
+		progress := dx - turn_x_min
+		height = math.clamp(2 + progress / 2, 2, 7)
+		found = true
+		return
+	}
+	return
+}
+
+terrain_decoration_fortress_ground_cell :: proc(dx, dz, wall_radius: i32) -> bool {
+	abs_x := math.abs(dx)
+	abs_z := math.abs(dz)
+	inside_wall := abs_x < wall_radius - 3 && abs_z < wall_radius - 3
+	if !inside_wall {
+		return(
+			abs_x <= TERRAIN_DECORATION_FORTRESS_GATE_HALF_WIDTH_BLOCKS + 1 &&
+			dz >= -wall_radius - 10 &&
+			dz <= -wall_radius + 8 \
+		)
+	}
+	return(
+		abs_x <= 3 ||
+		abs_z <= 3 ||
+		(abs_x <= 11 && abs_z <= 10) ||
+		(abs_x >= wall_radius - 7 && abs_z <= wall_radius - 7) ||
+		(abs_z >= wall_radius - 7 && abs_x <= wall_radius - 7) \
+	)
+}
+
+terrain_decoration_fortress_road_cell :: proc(dx, dz, wall_radius: i32) -> bool {
+	abs_x := math.abs(dx)
+	abs_z := math.abs(dz)
+	gate_axis :=
+		abs_x <= TERRAIN_DECORATION_FORTRESS_GATE_HALF_WIDTH_BLOCKS + 1 &&
+		dz >= -wall_radius - 10 &&
+		dz <= wall_radius - 8
+	cross_axis :=
+		(abs_x <= 3 && abs_z <= wall_radius - 8) || (abs_z <= 3 && abs_x <= wall_radius - 8)
+	keep_apron :=
+		abs_x <= TERRAIN_DECORATION_FORTRESS_KEEP_HALF_X_BLOCKS + 4 &&
+		abs_z <= TERRAIN_DECORATION_FORTRESS_KEEP_HALF_Z_BLOCKS + 4
+	inner_wall_loop :=
+		((abs_x >= wall_radius - 11 && abs_x <= wall_radius - 8 && abs_z <= wall_radius - 9) ||
+			(abs_z >= wall_radius - 11 && abs_z <= wall_radius - 8 && abs_x <= wall_radius - 9))
+	return gate_axis || cross_axis || keep_apron || inner_wall_loop
+}
+
+terrain_decoration_fortress_road_material :: proc(
+	biome_id: biomes.BiomeID,
+) -> world_async.BlockMaterialID {
+	if terrain_decoration_fortress_biome_is_stone(biome_id) {
+		return terrain_block_material_id_from_biome_material(.Basalt)
+	}
+	return terrain_block_material_id_from_biome_material(.Stone)
+}
+
+terrain_decoration_fortress_wall_height :: proc(
+	id: biomes.FeatureID,
+	dx, dz, wall_radius, wall_height: i32,
+	biome_id: biomes.BiomeID,
+) -> i32 {
+	if !terrain_decoration_fortress_wall_cell(dx, dz, wall_radius) {
+		return 0
+	}
+	height := wall_height
+	if ((math.abs(dx) + math.abs(dz)) & 3) == 0 {
+		height += 2
+	}
+	if terrain_decoration_fortress_biome_is_corrupted(biome_id) {
+		breach := dz >= wall_radius - 1 && dx >= -wall_radius + 9 && dx <= -wall_radius + 16
+		if breach {
+			roll := terrain_decoration_fortress_cell_roll(
+				id,
+				dx,
+				dz,
+				TERRAIN_DECORATION_STAMP_DIRECTION_SALT,
+			)
+			height = 2 + i32(math.floor_f32(roll * 5.0))
+		}
+	}
+	return height
+}
+
+terrain_decoration_fortress_rampart_walk_cell :: proc(dx, dz, wall_radius: i32) -> bool {
+	abs_x := math.abs(dx)
+	abs_z := math.abs(dz)
+	outer := math.max(abs_x, abs_z)
+	return(
+		outer >= wall_radius - TERRAIN_DECORATION_FORTRESS_WALL_THICKNESS_BLOCKS - 1 &&
+		outer <= wall_radius - 2 &&
+		!terrain_decoration_fortress_gate_opening(dx, dz, wall_radius) \
+	)
+}
+
+terrain_decoration_fortress_wall_stair_height :: proc(
+	dx, dz, wall_radius, wall_height: i32,
+) -> (
+	height: i32,
+	found: bool,
+) {
+	abs_x := math.abs(dx)
+	run_half := wall_height + 5
+	side_stair :=
+		abs_x >= wall_radius - 10 && abs_x <= wall_radius - 5 && dz >= -run_half && dz <= run_half
+	if side_stair {
+		progress := dz + run_half
+		if dx > 0 {
+			progress = run_half - dz
+		}
+		height = math.clamp(2 + progress / 2, 2, wall_height + 1)
+		found = true
+		return
+	}
+
+	abs_z := math.abs(dz)
+	back_stair :=
+		abs_z >= wall_radius - 10 && abs_z <= wall_radius - 5 && dx >= -run_half && dx <= run_half
+	if back_stair && dz > 0 {
+		progress := dx + run_half
+		height = math.clamp(2 + progress / 2, 2, wall_height + 1)
+		found = true
+		return
+	}
+	return
+}
+
+terrain_decoration_fortress_traversal_reserved_cell :: proc(
+	dx, dz, wall_radius, wall_height: i32,
+) -> bool {
+	if terrain_decoration_fortress_rampart_walk_cell(dx, dz, wall_radius) {
+		return true
+	}
+	_, stair_found := terrain_decoration_fortress_wall_stair_height(
+		dx,
+		dz,
+		wall_radius,
+		wall_height,
+	)
+	if stair_found {
+		return true
+	}
+	if terrain_decoration_fortress_road_cell(dx, dz, wall_radius) {
+		return true
+	}
+	return false
+}
+
+terrain_decoration_fortress_tower_interior_cell :: proc(local_dx, local_dz: i32) -> bool {
+	interior_radius := TERRAIN_DECORATION_FORTRESS_TOWER_RADIUS_BLOCKS - 2
+	return local_dx * local_dx + local_dz * local_dz <= interior_radius * interior_radius
+}
+
+terrain_decoration_fortress_tower_door_cell :: proc(
+	center_x, center_z, local_dx, local_dz: i32,
+) -> bool {
+	radius := TERRAIN_DECORATION_FORTRESS_TOWER_RADIUS_BLOCKS
+	inward_x := -terrain_decoration_fortress_sign(center_x)
+	inward_z := -terrain_decoration_fortress_sign(center_z)
+	if inward_x != 0 && inward_z != 0 {
+		return local_dx * inward_x >= radius - 2 && local_dz * inward_z >= radius - 2
+	}
+	dot := local_dx * inward_x + local_dz * inward_z
+	perp := math.abs(local_dx * inward_z - local_dz * inward_x)
+	return dot >= radius - 1 && perp <= 1
+}
+
+terrain_decoration_fortress_access_apply :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	feature: biomes.DecorationFeature,
+	chunk_origin: world_async.BlockCoord,
+	ctx: TerrainDecorationStampContext,
+	center_world_x, center_world_z: i32,
+	dx, dz, wall_radius, wall_height: i32,
+	rotation_quarters: u8,
+	materials: TerrainDecorationStampMaterials,
+) -> u32 {
+	written: u32
+	abs_x := math.abs(dx)
+	abs_z := math.abs(dz)
+	outer := math.max(abs_x, abs_z)
+	world_dx, world_dz := terrain_decoration_structure_offset_rotate(dx, dz, rotation_quarters)
+	world_x := center_world_x + world_dx
+	world_z := center_world_z + world_dz
+
+	wall_walk := terrain_decoration_fortress_rampart_walk_cell(dx, dz, wall_radius)
+	if wall_walk {
+		_ = terrain_decoration_surface_world_column_range_clear(
+			view,
+			key,
+			feature,
+			chunk_origin,
+			ctx,
+			world_x,
+			world_z,
+			wall_height + 1,
+			6,
+		)
+		written += terrain_decoration_surface_world_column_range_write(
+			view,
+			key,
+			feature,
+			chunk_origin,
+			ctx,
+			world_x,
+			world_z,
+			wall_height + 1,
+			1,
+			materials.primary,
+			materials.primary,
+		)
+	}
+
+	stair_height, stair_found := terrain_decoration_fortress_wall_stair_height(
+		dx,
+		dz,
+		wall_radius,
+		wall_height,
+	)
+	if stair_found {
+		_ = terrain_decoration_surface_world_column_range_clear(
+			view,
+			key,
+			feature,
+			chunk_origin,
+			ctx,
+			world_x,
+			world_z,
+			1,
+			wall_height + 8,
+		)
+		written += terrain_decoration_surface_world_column_range_write(
+			view,
+			key,
+			feature,
+			chunk_origin,
+			ctx,
+			world_x,
+			world_z,
+			1,
+			stair_height,
+			materials.primary,
+			materials.primary,
+		)
+	}
+
+	tower_index, tower_center_x, tower_center_z, tower_local_dx, tower_local_dz, _, tower_found :=
+		terrain_decoration_fortress_tower_cell(dx, dz, wall_radius)
+	if tower_found {
+		tower_height, _ := terrain_decoration_fortress_tower_height(
+			dx,
+			dz,
+			wall_radius,
+			wall_height,
+		)
+		if terrain_decoration_fortress_tower_interior_cell(tower_local_dx, tower_local_dz) {
+			_ = terrain_decoration_surface_world_column_range_clear(
+				view,
+				key,
+				feature,
+				chunk_origin,
+				ctx,
+				world_x,
+				world_z,
+				2,
+				math.max(0, tower_height - 3),
+			)
+			if math.abs(tower_local_dx) > 1 || math.abs(tower_local_dz) > 1 {
+				written += terrain_decoration_surface_world_column_range_write(
+					view,
+					key,
+					feature,
+					chunk_origin,
+					ctx,
+					world_x,
+					world_z,
+					wall_height + 1,
+					1,
+					materials.secondary,
+					materials.secondary,
+				)
+			}
+			for landing := i32(6); landing < tower_height - 2; landing += 6 {
+				if math.abs(tower_local_dx) > 1 || math.abs(tower_local_dz) > 1 {
+					written += terrain_decoration_surface_world_column_range_write(
+						view,
+						key,
+						feature,
+						chunk_origin,
+						ctx,
+						world_x,
+						world_z,
+						landing,
+						1,
+						materials.secondary,
+						materials.secondary,
+					)
+				}
+			}
+			tower_fixture :=
+				!terrain_decoration_fortress_tower_door_cell(
+					tower_center_x,
+					tower_center_z,
+					tower_local_dx,
+					tower_local_dz,
+				) &&
+				((math.abs(tower_local_dx) == 3 && math.abs(tower_local_dz) <= 1) ||
+						(math.abs(tower_local_dz) == 3 && math.abs(tower_local_dx) <= 1))
+			if tower_fixture {
+				written += terrain_decoration_surface_world_column_range_write(
+					view,
+					key,
+					feature,
+					chunk_origin,
+					ctx,
+					world_x,
+					world_z,
+					2,
+					1,
+					materials.accent,
+					materials.accent,
+				)
+			}
+			spiral_positions := [?]biomes.IVec2 {
+				{x = -2, z = -2},
+				{x = 0, z = -3},
+				{x = 2, z = -2},
+				{x = 3, z = 0},
+				{x = 2, z = 2},
+				{x = 0, z = 3},
+				{x = -2, z = 2},
+				{x = -3, z = 0},
+			}
+			for step := i32(2); step < tower_height - 2; step += 1 {
+				step_position := spiral_positions[int(step & 7)]
+				if tower_local_dx == step_position.x && tower_local_dz == step_position.z {
+					written += terrain_decoration_surface_world_column_range_write(
+						view,
+						key,
+						feature,
+						chunk_origin,
+						ctx,
+						world_x,
+						world_z,
+						step,
+						1,
+						materials.accent,
+						materials.accent,
+					)
+				}
+			}
+		}
+		if terrain_decoration_fortress_tower_door_cell(
+			tower_center_x,
+			tower_center_z,
+			tower_local_dx,
+			tower_local_dz,
+		) {
+			_ = terrain_decoration_surface_world_column_range_clear(
+				view,
+				key,
+				feature,
+				chunk_origin,
+				ctx,
+				world_x,
+				world_z,
+				2,
+				5,
+			)
+			_ = terrain_decoration_surface_world_column_range_clear(
+				view,
+				key,
+				feature,
+				chunk_origin,
+				ctx,
+				world_x,
+				world_z,
+				wall_height + 2,
+				5,
+			)
+		}
+		if tower_index >= 7 && math.abs(tower_local_dx) <= 1 && tower_local_dz >= 0 {
+			_ = terrain_decoration_surface_world_column_range_clear(
+				view,
+				key,
+				feature,
+				chunk_origin,
+				ctx,
+				world_x,
+				world_z,
+				2,
+				6,
+			)
+		}
+	}
+
+	_, keep_found := terrain_decoration_fortress_keep_height(dx, dz, wall_height)
+	keep_x := TERRAIN_DECORATION_FORTRESS_KEEP_HALF_X_BLOCKS
+	keep_z := TERRAIN_DECORATION_FORTRESS_KEEP_HALF_Z_BLOCKS
+	keep_bounds := abs_x <= keep_x && abs_z <= keep_z
+	keep_interior := abs_x <= keep_x - 2 && abs_z <= keep_z - 2
+	keep_door := abs_x <= 3 && dz >= -keep_z - 1 && dz <= -keep_z + 1
+	keep_upper_tower_shell := abs_x <= 6 && abs_z <= 5 && (abs_x >= 5 || abs_z >= 4)
+	keep_upper_tower_interior := abs_x <= 4 && abs_z <= 3
+	keep_roof_height := wall_height + 6
+	keep_stair_height, keep_stair_roof_open, keep_stair :=
+		terrain_decoration_fortress_keep_stair_height(dx, dz, keep_x, keep_z, keep_roof_height)
+	keep_support_column :=
+		keep_interior &&
+		!keep_stair &&
+		!keep_door &&
+		((abs_x == 0 && (abs_z == 8 || abs_z == 3)) || (abs_z == 0 && (abs_x == 9 || abs_x == 4)))
+
+	if keep_interior && !keep_upper_tower_shell && !keep_support_column {
+		_ = terrain_decoration_surface_world_column_range_clear(
+			view,
+			key,
+			feature,
+			chunk_origin,
+			ctx,
+			world_x,
+			world_z,
+			2,
+			keep_roof_height - 2,
+		)
+		if abs_x >= keep_x - 4 || abs_z >= keep_z - 4 {
+			written += terrain_decoration_surface_world_column_range_write(
+				view,
+				key,
+				feature,
+				chunk_origin,
+				ctx,
+				world_x,
+				world_z,
+				wall_height + 2,
+				1,
+				materials.accent,
+				materials.accent,
+			)
+		}
+	}
+	if keep_upper_tower_interior {
+		_ = terrain_decoration_surface_world_column_range_clear(
+			view,
+			key,
+			feature,
+			chunk_origin,
+			ctx,
+			world_x,
+			world_z,
+			keep_roof_height + 1,
+			wall_height + 13 - keep_roof_height,
+		)
+	}
+
+	if keep_door {
+		_ = terrain_decoration_surface_world_column_range_clear(
+			view,
+			key,
+			feature,
+			chunk_origin,
+			ctx,
+			world_x,
+			world_z,
+			1,
+			7,
+		)
+	}
+	keep_upper_tower_door := abs_x <= 2 && dz == -5
+	if keep_upper_tower_door {
+		_ = terrain_decoration_surface_world_column_range_clear(
+			view,
+			key,
+			feature,
+			chunk_origin,
+			ctx,
+			world_x,
+			world_z,
+			keep_roof_height + 1,
+			5,
+		)
+	}
+
+	keep_window :=
+		keep_found &&
+		((abs_x >= keep_x - 1 && (abs_z & 3) == 0) || (abs_z >= keep_z - 1 && (abs_x & 3) == 0))
+	if keep_window {
+		_ = terrain_decoration_surface_world_column_range_clear(
+			view,
+			key,
+			feature,
+			chunk_origin,
+			ctx,
+			world_x,
+			world_z,
+			wall_height,
+			3,
+		)
+	}
+
+	if keep_stair {
+		_ = terrain_decoration_surface_world_column_range_clear(
+			view,
+			key,
+			feature,
+			chunk_origin,
+			ctx,
+			world_x,
+			world_z,
+			1,
+			wall_height + 8,
+		)
+		written += terrain_decoration_surface_world_column_range_write(
+			view,
+			key,
+			feature,
+			chunk_origin,
+			ctx,
+			world_x,
+			world_z,
+			1,
+			keep_stair_height,
+			materials.primary,
+			materials.primary,
+		)
+	}
+	if keep_support_column {
+		written += terrain_decoration_surface_world_column_range_write(
+			view,
+			key,
+			feature,
+			chunk_origin,
+			ctx,
+			world_x,
+			world_z,
+			1,
+			keep_roof_height,
+			materials.primary,
+			materials.primary,
+		)
+	}
+
+	keep_roof_open := keep_stair_roof_open
+	keep_roof_cell := keep_interior && !keep_roof_open
+	if keep_roof_cell {
+		written += terrain_decoration_surface_world_column_range_write(
+			view,
+			key,
+			feature,
+			chunk_origin,
+			ctx,
+			world_x,
+			world_z,
+			keep_roof_height,
+			1,
+			materials.primary,
+			materials.primary,
+		)
+		roof_parapet := abs_x >= keep_x - 3 || abs_z >= keep_z - 3 || keep_upper_tower_shell
+		if roof_parapet && ((abs_x + abs_z) & 1) == 0 {
+			written += terrain_decoration_surface_world_column_range_write(
+				view,
+				key,
+				feature,
+				chunk_origin,
+				ctx,
+				world_x,
+				world_z,
+				keep_roof_height + 1,
+				1,
+				materials.accent,
+				materials.accent,
+			)
+		}
+	}
+
+	keep_fixture :=
+		keep_interior &&
+		!keep_stair &&
+		!keep_door &&
+		!keep_support_column &&
+		!keep_upper_tower_shell &&
+		(((abs_x == 6 || abs_x == 7) && abs_z <= 2) ||
+				(abs_x <= 2 && (abs_z == 4 || abs_z == 5)) ||
+				(abs_x >= keep_x - 4 && abs_z >= keep_z - 4 && ((abs_x + abs_z) & 1) == 0))
+	if keep_fixture {
+		fixture_height := i32(1)
+		if abs_x >= keep_x - 4 && abs_z >= keep_z - 4 {
+			fixture_height = 2
+		}
+		written += terrain_decoration_surface_world_column_range_write(
+			view,
+			key,
+			feature,
+			chunk_origin,
+			ctx,
+			world_x,
+			world_z,
+			2,
+			fixture_height,
+			materials.accent,
+			materials.secondary,
+		)
+	}
+
+	courtyard_fixture :=
+		!terrain_decoration_fortress_traversal_reserved_cell(dx, dz, wall_radius, wall_height) &&
+		!keep_bounds &&
+		!tower_found &&
+		outer < wall_radius - 8 &&
+		(((dx >= -22 &&
+						dx <= -17 &&
+						dz >= 12 &&
+						dz <= 17 &&
+						(math.abs(dx + 19) == 2 || math.abs(dz - 14) == 2)) ||
+					(dx >= 15 && dx <= 24 && dz >= -23 && dz <= -18 && ((dx + dz) & 3) == 0) ||
+					(dx >= -24 &&
+							dx <= -15 &&
+							dz >= -23 &&
+							dz <= -18 &&
+							(dz == -23 || dz == -18 || dx == -24 || dx == -15))))
+	if courtyard_fixture {
+		fixture_material := materials.accent
+		if dx >= -22 && dx <= -17 && dz >= 12 && dz <= 17 {
+			fixture_material = materials.primary
+		}
+		written += terrain_decoration_surface_world_column_range_write(
+			view,
+			key,
+			feature,
+			chunk_origin,
+			ctx,
+			world_x,
+			world_z,
+			1,
+			1,
+			fixture_material,
+			fixture_material,
+		)
+	}
+	return written
+}
+
+terrain_decoration_fortress_detail_material :: proc(
+	biome_id: biomes.BiomeID,
+) -> world_async.BlockMaterialID {
+	if terrain_decoration_fortress_biome_is_green(biome_id) {
+		return terrain_block_material_id_from_biome_material(.Moss)
+	}
+	if terrain_decoration_fortress_biome_is_marsh(biome_id) {
+		return terrain_block_material_id_from_biome_material(.Wet_Marsh)
+	}
+	if terrain_decoration_fortress_biome_is_corrupted(biome_id) {
+		return terrain_block_material_id_from_biome_material(.Crystal)
+	}
+	if terrain_decoration_fortress_biome_is_stone(biome_id) {
+		return terrain_block_material_id_from_biome_material(.Crystal)
+	}
+	return terrain_block_material_id_from_biome_material(.Forest_Litter)
+}
+
+terrain_decoration_fortress_biome_detail_apply :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	feature: biomes.DecorationFeature,
+	chunk_origin: world_async.BlockCoord,
+	ctx: TerrainDecorationStampContext,
+	center_world_x, center_world_z: i32,
+	dx, dz, wall_radius, wall_height: i32,
+	rotation_quarters: u8,
+	materials: TerrainDecorationStampMaterials,
+) -> u32 {
+	written: u32
+	abs_x := math.abs(dx)
+	abs_z := math.abs(dz)
+	outer := math.max(abs_x, abs_z)
+	normal_x, normal_z := terrain_decoration_fortress_outer_normal(dx, dz)
+	world_dx, world_dz := terrain_decoration_structure_offset_rotate(dx, dz, rotation_quarters)
+	world_x := center_world_x + world_dx
+	world_z := center_world_z + world_dz
+	world_normal_x, world_normal_z := terrain_decoration_structure_offset_rotate(
+		normal_x,
+		normal_z,
+		rotation_quarters,
+	)
+	detail_material := terrain_decoration_fortress_detail_material(feature.biome_id)
+	roll := terrain_decoration_fortress_cell_roll(
+		feature.id,
+		dx,
+		dz,
+		TERRAIN_DECORATION_STAMP_OFFSET_Z_SALT,
+	)
+	if terrain_decoration_fortress_traversal_reserved_cell(dx, dz, wall_radius, wall_height) {
+		return written
+	}
+
+	if terrain_decoration_fortress_biome_is_green(feature.biome_id) {
+		if outer >= wall_radius - 1 && outer <= wall_radius + 1 && roll < 0.18 {
+			vine_x := world_x + world_normal_x
+			vine_z := world_z + world_normal_z
+			vine_height := 3 + i32(math.floor_f32(roll * 10.0))
+			written += terrain_decoration_surface_world_column_range_write(
+				view,
+				key,
+				feature,
+				chunk_origin,
+				ctx,
+				vine_x,
+				vine_z,
+				math.max(2, wall_height - vine_height),
+				vine_height,
+				detail_material,
+				detail_material,
+			)
+		}
+		if outer >= wall_radius + 2 && outer <= wall_radius + 5 && roll < 0.10 {
+			written += terrain_decoration_surface_world_column_range_write(
+				view,
+				key,
+				feature,
+				chunk_origin,
+				ctx,
+				world_x,
+				world_z,
+				1,
+				2,
+				detail_material,
+				materials.accent,
+			)
+		}
+	} else if terrain_decoration_fortress_biome_is_marsh(feature.biome_id) {
+		boardwalk := (abs_x <= 4 || abs_z <= 4) && outer <= wall_radius - 5
+		if boardwalk && ((abs_x + abs_z) & 3) == 0 {
+			written += terrain_decoration_surface_world_column_range_write(
+				view,
+				key,
+				feature,
+				chunk_origin,
+				ctx,
+				world_x,
+				world_z,
+				1,
+				2,
+				materials.accent,
+				materials.accent,
+			)
+		}
+		if outer >= wall_radius - 2 && outer <= wall_radius + 2 && roll < 0.08 {
+			written += terrain_decoration_surface_world_column_range_write(
+				view,
+				key,
+				feature,
+				chunk_origin,
+				ctx,
+				world_x + world_normal_x,
+				world_z + world_normal_z,
+				1,
+				3,
+				materials.accent,
+				detail_material,
+			)
+		}
+	} else if terrain_decoration_fortress_biome_is_corrupted(feature.biome_id) {
+		if outer >= wall_radius - 1 && outer <= wall_radius + 1 && roll < 0.14 {
+			spike_height := 3 + i32(math.floor_f32(roll * 5.0))
+			written += terrain_decoration_surface_world_column_range_write(
+				view,
+				key,
+				feature,
+				chunk_origin,
+				ctx,
+				world_x + world_normal_x,
+				world_z + world_normal_z,
+				wall_height + 1,
+				spike_height,
+				materials.primary,
+				detail_material,
+			)
+		}
+		if dz >= wall_radius - 3 &&
+		   dx >= -wall_radius + 8 &&
+		   dx <= -wall_radius + 18 &&
+		   roll < 0.28 {
+			written += terrain_decoration_surface_world_cover_write(
+				view,
+				key,
+				feature,
+				chunk_origin,
+				ctx,
+				world_x,
+				world_z,
+				materials.accent,
+			)
+		}
+	} else if terrain_decoration_fortress_biome_is_stone(feature.biome_id) {
+		if outer >= wall_radius - 1 && outer <= wall_radius + 1 && roll < 0.06 {
+			written += terrain_decoration_surface_world_column_range_write(
+				view,
+				key,
+				feature,
+				chunk_origin,
+				ctx,
+				world_x + world_normal_x,
+				world_z + world_normal_z,
+				wall_height - 1,
+				4,
+				detail_material,
+				detail_material,
+			)
+		}
+		if feature.biome_id == .Emberglass_Badlands &&
+		   abs_x <= 2 &&
+		   dz < -wall_radius &&
+		   dz >= -wall_radius - 8 {
+			written += terrain_decoration_surface_world_cover_write(
+				view,
+				key,
+				feature,
+				chunk_origin,
+				ctx,
+				world_x,
+				world_z,
+				terrain_block_material_id_from_biome_material(.Lava),
+			)
+		}
+	}
+	return written
+}
+
+terrain_decoration_fortress_prefab_apply :: proc(
+	view: ^world_async.ChunkVoxelView,
+	key: biomes.FeatureGridKey,
+	feature: biomes.DecorationFeature,
+	height_blocks, radius_blocks, material_variant, rotation_quarters: u8,
+	chunk_origin: world_async.BlockCoord,
+	ctx: TerrainDecorationStampContext,
+) -> u32 {
+	if !ctx.surface {
+		return 0
+	}
+
+	materials := terrain_decoration_stamp_materials_for(
+		.Palisade_Fort,
+		feature.biome_id,
+		material_variant,
+	)
+	center_world_x := i32(math.floor_f32(feature.x))
+	center_world_z := i32(math.floor_f32(feature.z))
+	wall_radius := TERRAIN_DECORATION_FORTRESS_WALL_RADIUS_BLOCKS
+	footprint_radius := terrain_decoration_surface_structure_footprint_radius(
+		.Palisade_Fort,
+		radius_blocks,
+	)
+	wall_height := math.clamp(i32(height_blocks), 13, 17)
+	floor_material := materials.secondary
+	if terrain_decoration_fortress_biome_is_green(feature.biome_id) {
+		floor_material = terrain_block_material_id_from_biome_material(.Forest_Litter)
+	} else if terrain_decoration_fortress_biome_is_marsh(feature.biome_id) {
+		floor_material = terrain_block_material_id_from_biome_material(.Wet_Marsh)
+	} else if terrain_decoration_fortress_biome_is_corrupted(feature.biome_id) {
+		floor_material = terrain_block_material_id_from_biome_material(.Corrupt_Mud)
+	}
+	road_material := terrain_decoration_fortress_road_material(feature.biome_id)
+
+	local_min_x := math.clamp(
+		center_world_x - footprint_radius - chunk_origin.x,
+		0,
+		CHUNK_BLOCK_LENGTH - 1,
+	)
+	local_max_x := math.clamp(
+		center_world_x + footprint_radius - chunk_origin.x,
+		0,
+		CHUNK_BLOCK_LENGTH - 1,
+	)
+	local_min_z := math.clamp(
+		center_world_z - footprint_radius - chunk_origin.z,
+		0,
+		CHUNK_BLOCK_LENGTH - 1,
+	)
+	local_max_z := math.clamp(
+		center_world_z + footprint_radius - chunk_origin.z,
+		0,
+		CHUNK_BLOCK_LENGTH - 1,
+	)
+	if local_min_x > local_max_x || local_min_z > local_max_z {
+		return 0
+	}
+
+	written: u32
+	for local_z := local_min_z; local_z <= local_max_z; local_z += 1 {
+		world_z := chunk_origin.z + local_z
+		for local_x := local_min_x; local_x <= local_max_x; local_x += 1 {
+			world_x := chunk_origin.x + local_x
+			world_dx := world_x - center_world_x
+			world_dz := world_z - center_world_z
+			dx, dz := terrain_decoration_structure_offset_inverse_rotate(
+				world_dx,
+				world_dz,
+				rotation_quarters,
+			)
+			abs_x := math.abs(dx)
+			abs_z := math.abs(dz)
+			outer := math.max(abs_x, abs_z)
+			if outer > footprint_radius {
+				continue
+			}
+
+			tower_height, tower_found := terrain_decoration_fortress_tower_height(
+				dx,
+				dz,
+				wall_radius,
+				wall_height,
+			)
+			gatehouse_height, gatehouse_found := terrain_decoration_fortress_gatehouse_height(
+				dx,
+				dz,
+				wall_radius,
+				wall_height,
+			)
+			keep_height, keep_found := terrain_decoration_fortress_keep_height(dx, dz, wall_height)
+			wall_column_height := terrain_decoration_fortress_wall_height(
+				feature.id,
+				dx,
+				dz,
+				wall_radius,
+				wall_height,
+				feature.biome_id,
+			)
+			structural_height := wall_column_height
+			if tower_found && tower_height > structural_height {
+				structural_height = tower_height
+			}
+			if gatehouse_found && gatehouse_height > structural_height {
+				structural_height = gatehouse_height
+			}
+			if keep_found && keep_height > structural_height {
+				structural_height = keep_height
+			}
+
+			if structural_height <= 0 &&
+			   terrain_decoration_fortress_ground_cell(dx, dz, wall_radius) {
+				ground_material := floor_material
+				if terrain_decoration_fortress_road_cell(dx, dz, wall_radius) {
+					ground_material = road_material
+				}
+				written += terrain_decoration_surface_world_column_range_paint(
+					view,
+					key,
+					feature,
+					chunk_origin,
+					ctx,
+					world_x,
+					world_z,
+					-1,
+					2,
+					ground_material,
+				)
+			}
+
+			if structural_height > 0 {
+				cap := materials.secondary
+				if tower_found || keep_found {
+					cap = materials.accent
+				}
+				written += terrain_decoration_surface_world_column_range_write(
+					view,
+					key,
+					feature,
+					chunk_origin,
+					ctx,
+					world_x,
+					world_z,
+					1,
+					structural_height,
+					materials.primary,
+					cap,
+				)
+			}
+
+			if terrain_decoration_fortress_gate_opening(dx, dz, wall_radius) {
+				written += terrain_decoration_surface_world_column_range_write(
+					view,
+					key,
+					feature,
+					chunk_origin,
+					ctx,
+					world_x,
+					world_z,
+					wall_height - 1,
+					3,
+					materials.secondary,
+					materials.accent,
+				)
+			}
+
+			if outer >= wall_radius - 2 ||
+			   keep_found ||
+			   tower_found ||
+			   terrain_decoration_fortress_ground_cell(dx, dz, wall_radius) {
+				written += terrain_decoration_fortress_biome_detail_apply(
+					view,
+					key,
+					feature,
+					chunk_origin,
+					ctx,
+					center_world_x,
+					center_world_z,
+					dx,
+					dz,
+					wall_radius,
+					wall_height,
+					rotation_quarters,
+					materials,
+				)
+			}
+		}
+	}
+	for local_z := local_min_z; local_z <= local_max_z; local_z += 1 {
+		world_z := chunk_origin.z + local_z
+		for local_x := local_min_x; local_x <= local_max_x; local_x += 1 {
+			world_x := chunk_origin.x + local_x
+			world_dx := world_x - center_world_x
+			world_dz := world_z - center_world_z
+			dx, dz := terrain_decoration_structure_offset_inverse_rotate(
+				world_dx,
+				world_dz,
+				rotation_quarters,
+			)
+			outer := math.max(math.abs(dx), math.abs(dz))
+			if outer > footprint_radius {
+				continue
+			}
+			written += terrain_decoration_fortress_access_apply(
+				view,
+				key,
+				feature,
+				chunk_origin,
+				ctx,
+				center_world_x,
+				center_world_z,
+				dx,
+				dz,
+				wall_radius,
+				wall_height,
+				rotation_quarters,
+				materials,
+			)
+		}
+	}
+	return written
+}
+
 terrain_decoration_palisade_fort_apply :: proc(
 	view: ^world_async.ChunkVoxelView,
 	biome_id: biomes.BiomeID,
@@ -3703,211 +5269,19 @@ terrain_decoration_palisade_fort_apply :: proc(
 	local_x, base_y, local_z: i32,
 	ctx: TerrainDecorationStampContext,
 ) -> u32 {
+	_ = view
+	_ = biome_id
+	_ = id
+	_ = height_blocks
+	_ = radius_blocks
+	_ = material_variant
 	_ = shape_variant
-	materials := terrain_decoration_stamp_materials_for(.Palisade_Fort, biome_id, material_variant)
-	radius := math.clamp(i32(radius_blocks), 16, 20)
-	wall_height := math.clamp(i32(height_blocks), 7, 10)
-	written: u32
-
-	written += terrain_decoration_structure_rect_cover_write(
-		view,
-		ctx,
-		local_x,
-		base_y,
-		local_z,
-		-radius + 2,
-		radius - 2,
-		-radius + 2,
-		radius - 2,
-		2,
-		materials.accent,
-	)
-	for dz := -radius; dz <= radius; dz += 1 {
-		for dx := -radius; dx <= radius; dx += 1 {
-			abs_x := math.abs(dx)
-			abs_z := math.abs(dz)
-			perimeter := abs_x == radius || abs_z == radius
-			corner_tower := abs_x >= radius - 2 && abs_z >= radius - 2
-			gatehouse := dz == -radius && abs_x >= 3 && abs_x <= 6
-			if !perimeter && !corner_tower && !gatehouse {
-				continue
-			}
-			gate := dz == -radius && abs_x <= 2
-			if gate && !corner_tower {
-				continue
-			}
-			height := wall_height
-			if corner_tower {
-				height = wall_height + 5
-			} else if gatehouse {
-				height = wall_height + 2
-			} else if ((dx + dz + i32(material_variant)) % 3) == 0 {
-				height = wall_height + 1
-			}
-			written += terrain_decoration_grounded_column_write(
-				view,
-				ctx,
-				local_x + dx,
-				base_y,
-				local_z + dz,
-				height,
-				3,
-				materials.primary,
-				materials.secondary,
-			)
-		}
-	}
-
-	for gate_x := i32(-2); gate_x <= 2; gate_x += 1 {
-		cell_base_y, floor_found := terrain_decoration_stamp_floor_find(
-			view,
-			ctx,
-			local_x + gate_x,
-			base_y,
-			local_z - radius,
-			3,
-		)
-		if !floor_found {
-			continue
-		}
-		if terrain_decoration_block_try_write(
-			view,
-			local_x + gate_x,
-			cell_base_y + wall_height + 2,
-			local_z - radius,
-			materials.secondary,
-		) {
-			written += 1
-		}
-	}
-
-	for walk_step := i32(-radius + 3); walk_step <= radius - 3; walk_step += 1 {
-		written += terrain_decoration_ground_cover_write(
-			view,
-			ctx,
-			local_x + walk_step,
-			base_y,
-			local_z - radius + 3,
-			2,
-			materials.secondary,
-		)
-		written += terrain_decoration_ground_cover_write(
-			view,
-			ctx,
-			local_x,
-			base_y,
-			local_z + walk_step,
-			2,
-			materials.secondary,
-		)
-	}
-
-	written += terrain_decoration_structure_room_apply(
-		view,
-		ctx,
-		id,
-		materials,
-		local_x,
-		base_y,
-		local_z,
-		0,
-		2,
-		6,
-		5,
-		math.max(5, wall_height - 2),
-		500,
-	)
-	written += terrain_decoration_structure_room_apply(
-		view,
-		ctx,
-		id,
-		materials,
-		local_x,
-		base_y,
-		local_z,
-		-9,
-		8,
-		3,
-		3,
-		math.max(4, wall_height - 3),
-		900,
-	)
-	written += terrain_decoration_structure_room_apply(
-		view,
-		ctx,
-		id,
-		materials,
-		local_x,
-		base_y,
-		local_z,
-		9,
-		8,
-		3,
-		3,
-		math.max(4, wall_height - 3),
-		1200,
-	)
-	keep_height := wall_height + 8
-	written += terrain_decoration_structure_room_apply(
-		view,
-		ctx,
-		id,
-		materials,
-		local_x,
-		base_y,
-		local_z,
-		0,
-		0,
-		4,
-		4,
-		keep_height,
-		1600,
-	)
-	for spike_index := i32(0); spike_index < 4; spike_index += 1 {
-		dx := i32(4)
-		if (spike_index & 1) == 0 {
-			dx = -4
-		}
-		dz := i32(4)
-		if spike_index < 2 {
-			dz = -4
-		}
-		spike_height := keep_height + 4
-		if biome_id == .Corrupted_Ash_Forest || biome_id == .Corrupted_Fen {
-			spike_height += 3 + spike_index
-		}
-		written += terrain_decoration_grounded_column_write_rotated(
-			view,
-			ctx,
-			local_x,
-			base_y,
-			local_z,
-			dx,
-			dz,
-			rotation_quarters,
-			spike_height,
-			3,
-			materials.primary,
-			materials.secondary,
-		)
-	}
-	if biome_id == .Corrupted_Ash_Forest || biome_id == .Corrupted_Fen {
-		for breach := i32(-radius + 6); breach <= -radius + 10; breach += 1 {
-			written += terrain_decoration_ground_cover_write_rotated(
-				view,
-				ctx,
-				local_x,
-				base_y,
-				local_z,
-				breach,
-				radius - 1,
-				rotation_quarters,
-				2,
-				materials.accent,
-			)
-		}
-	}
-	return written
+	_ = rotation_quarters
+	_ = local_x
+	_ = base_y
+	_ = local_z
+	_ = ctx
+	return 0
 }
 
 terrain_decoration_cave_ruin_hall_apply :: proc(

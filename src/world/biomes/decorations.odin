@@ -260,9 +260,9 @@ decoration_family_profile_for :: proc(family_id: DecorationFamilyID) -> Decorati
 			placement_kind = .Surface,
 			trunk_material = .Forest_Litter,
 			cap_material = .Stone,
-			min_height = 7,
-			max_height = 11,
-			radius_blocks = 18,
+			min_height = 13,
+			max_height = 17,
+			radius_blocks = 48,
 		}
 	case .Cave_Ruin_Hall:
 		return {
@@ -791,33 +791,42 @@ decoration_surface_family_select :: proc(
 
 	switch biome_id {
 	case .Temperate_Hills:
-		if density_class == .Grove && roll < 0.025 {
+		if roll < 0.005 {
+			return .Palisade_Fort
+		}
+		if density_class == .Grove && roll >= 0.005 && roll < 0.010 {
 			return .Ruin_Hamlet
 		}
-		if roll >= 0.025 && roll < 0.050 {
+		if roll >= 0.010 && roll < 0.020 {
 			return .Watchtower_Ruin
 		}
-		if roll >= 0.050 && roll < 0.075 {
+		if roll >= 0.020 && roll < 0.032 {
 			return .Ruin_Pillar_Set
 		}
 	case .Old_Growth_Forest:
-		if density_class == .Grove && roll < 0.020 {
+		if roll < 0.006 {
+			return .Palisade_Fort
+		}
+		if density_class == .Grove && roll >= 0.006 && roll < 0.014 {
 			return .Ruin_Hamlet
 		}
-		if roll >= 0.020 && roll < 0.045 {
+		if roll >= 0.014 && roll < 0.026 {
 			return .Watchtower_Ruin
 		}
-		if roll >= 0.045 && roll < 0.070 {
+		if roll >= 0.026 && roll < 0.040 {
 			return .Ruin_Pillar_Set
 		}
 		if roll < 0.24 {
 			return .Root_Cluster
 		}
 	case .Wet_Lowland_Marsh:
-		if density_class == .Grove && roll < 0.018 {
+		if roll < 0.008 {
+			return .Palisade_Fort
+		}
+		if density_class == .Grove && roll >= 0.008 && roll < 0.016 {
 			return .Ruin_Hamlet
 		}
-		if roll >= 0.018 && roll < 0.045 {
+		if roll >= 0.016 && roll < 0.032 {
 			return .Ruin_Pillar_Set
 		}
 		if roll < 0.28 {
@@ -872,6 +881,27 @@ decoration_surface_family_select :: proc(
 	case .Fungal_Vaults, .Crystal_Geode_Network, .Buried_Aquifer_Caves:
 	}
 	return default_family_id
+}
+
+decoration_surface_family_is_large_structure :: proc(family_id: DecorationFamilyID) -> bool {
+	switch family_id {
+	case .Ruin_Hamlet, .Watchtower_Ruin, .Palisade_Fort, .Ruin_Pillar_Set:
+		return true
+	case .Baseline_Tree,
+	     .Dead_Ash_Tree,
+	     .Fungal_Tree,
+	     .Stone_Tree,
+	     .Crystal_Growth_Cluster,
+	     .Fern_Thicket,
+	     .Ash_Bramble,
+	     .Root_Cluster,
+	     .Coral_DLA_Cluster,
+	     .Cave_Ruin_Hall,
+	     .Basalt_Column_Cluster,
+	     .Lava_Vent:
+		return false
+	}
+	return false
 }
 
 decoration_surface_feature_make :: proc(
@@ -2156,6 +2186,51 @@ decoration_tree_shape_fungal :: proc(biome_id: BiomeID, variant: u8) -> Decorati
 }
 
 when ODIN_DEBUG {
+	decoration_debug_surface_structure_counts_for_biome :: proc(
+		key: FeatureGridKey,
+		biome_id: BiomeID,
+		extent: i32,
+	) -> (
+		structure_count: u32,
+		fort_count: u32,
+	) {
+		placement, placement_found := decoration_surface_placement_profile_for_biome(biome_id)
+		if !placement_found || placement.slot_count <= 2 {
+			return
+		}
+		for owner_z := -extent; owner_z <= extent; owner_z += 1 {
+			for owner_x := -extent; owner_x <= extent; owner_x += 1 {
+				point := decoration_surface_slot_point_from_owner(
+					key,
+					FeatureGridCoord2{x = owner_x, z = owner_z},
+					2,
+				)
+				density_class := decoration_surface_density_class_from_strength(
+					decoration_surface_patch_strength_for_point(key, point, biome_id),
+				)
+				chance := decoration_surface_acceptance_chance(placement, density_class)
+				roll := feature_grid_unit_f32(u64(point.id), DECORATION_SURFACE_ROLL_SALT)
+				if roll > chance {
+					continue
+				}
+				family := decoration_surface_family_select(
+					point.id,
+					biome_id,
+					placement.family_id,
+					density_class,
+					2,
+				)
+				if decoration_surface_family_is_large_structure(family) {
+					structure_count += 1
+					if family == .Palisade_Fort {
+						fort_count += 1
+					}
+				}
+			}
+		}
+		return
+	}
+
 	decoration_debug_contract_checks_run :: proc() {
 		log.assert(
 			DECORATION_SURFACE_SLOT_COUNT_MAX >= 3,
@@ -2277,5 +2352,37 @@ when ODIN_DEBUG {
 			}
 		}
 		log.assert(structure_found, "surface slot 2 should produce visible structure families")
+
+		old_growth_structures, old_growth_forts :=
+			decoration_debug_surface_structure_counts_for_biome(key, .Old_Growth_Forest, 16)
+		temperate_structures, temperate_forts :=
+			decoration_debug_surface_structure_counts_for_biome(key, .Temperate_Hills, 16)
+		marsh_structures, marsh_forts := decoration_debug_surface_structure_counts_for_biome(
+			key,
+			.Wet_Lowland_Marsh,
+			16,
+		)
+		log.assertf(
+			old_growth_structures >= 1 && temperate_structures >= 1 && marsh_structures >= 1,
+			"green/marsh surface structure slots should remain possible: old_growth=%d temperate=%d marsh=%d",
+			old_growth_structures,
+			temperate_structures,
+			marsh_structures,
+		)
+		log.assertf(
+			old_growth_structures <= 32 &&
+			temperate_structures <= 26 &&
+			marsh_structures <= 28 &&
+			old_growth_forts <= 8 &&
+			temperate_forts <= 6 &&
+			marsh_forts <= 7,
+			"flat-friendly biomes should keep large structures sparse: old_growth=%d/%d temperate=%d/%d marsh=%d/%d",
+			old_growth_structures,
+			old_growth_forts,
+			temperate_structures,
+			temperate_forts,
+			marsh_structures,
+			marsh_forts,
+		)
 	}
 }
