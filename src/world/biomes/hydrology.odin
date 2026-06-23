@@ -43,6 +43,7 @@ WaterFeatureNode :: struct {
 	id:                      FeatureID,
 	owner:                   FeatureGridCoord3,
 	kind:                    WaterFeatureKind,
+	source_biome_id:         BiomeID,
 	x, y, z:                 f32,
 	water_level_blocks:      f32,
 	influence_radius_blocks: f32,
@@ -56,6 +57,7 @@ WaterFeatureSegment :: struct {
 	kind:                    WaterFeatureKind,
 	from_node_id:            FeatureID,
 	to_node_id:              FeatureID,
+	source_biome_id:         BiomeID,
 	from_x, from_y, from_z:  f32,
 	bend_x, bend_y, bend_z:  f32,
 	to_x, to_y, to_z:        f32,
@@ -74,33 +76,37 @@ WaterFeatureAnchor :: struct {
 }
 
 HydrologyLayerSurfaceSample :: struct {
-	nearest_feature_id:       FeatureID,
-	nearest_feature_kind:     WaterFeatureKind,
-	nearest_distance_blocks:  f32,
-	feature_count:            u32,
-	anchor_count:             u32,
-	water_level_blocks:       f32,
-	water_level_influence:    f32,
-	basin_influence:          f32,
-	channel_influence:        f32,
-	floor_depression_blocks:  f32,
-	bank_smoothing_strength:  f32,
-	anchor_connection_weight: f32,
+	nearest_feature_id:                FeatureID,
+	nearest_feature_kind:              WaterFeatureKind,
+	nearest_distance_blocks:           f32,
+	feature_count:                     u32,
+	anchor_count:                      u32,
+	water_level_blocks:                f32,
+	water_level_influence:             f32,
+	water_biome_id:                    BiomeID,
+	water_material_conflict_influence: f32,
+	basin_influence:                   f32,
+	channel_influence:                 f32,
+	floor_depression_blocks:           f32,
+	bank_smoothing_strength:           f32,
+	anchor_connection_weight:          f32,
 }
 
 HydrologyLayerSubterraneanSample :: struct {
-	nearest_feature_id:       FeatureID,
-	nearest_feature_kind:     WaterFeatureKind,
-	nearest_distance_blocks:  f32,
-	feature_count:            u32,
-	anchor_count:             u32,
-	water_level_blocks:       f32,
-	water_level_influence:    f32,
-	aquifer_influence:        f32,
-	channel_influence:        f32,
-	flooded_region_influence: f32,
-	floor_depression_blocks:  f32,
-	cave_connection_weight:   f32,
+	nearest_feature_id:                FeatureID,
+	nearest_feature_kind:              WaterFeatureKind,
+	nearest_distance_blocks:           f32,
+	feature_count:                     u32,
+	anchor_count:                      u32,
+	water_level_blocks:                f32,
+	water_level_influence:             f32,
+	water_biome_id:                    BiomeID,
+	water_material_conflict_influence: f32,
+	aquifer_influence:                 f32,
+	channel_influence:                 f32,
+	flooded_region_influence:          f32,
+	floor_depression_blocks:           f32,
+	cave_connection_weight:            f32,
 }
 
 //////////////////////////////////////
@@ -178,6 +184,7 @@ water_feature_surface_node_from_owner :: proc(
 		feature_grid_cell_center(owner.z, cell_size) +
 		feature_grid_signed_unit_f32(hash, HYDROLOGY_JITTER_Z_SALT) * jitter_radius
 	macro_zone, _ := surface_macro_zone_sample(key, i32(math.floor_f32(x)), i32(math.floor_f32(z)))
+	source_biome_id := water_feature_surface_source_biome_id(key, x, z, macro_zone)
 	kind := water_feature_surface_kind_from_macro_roll(
 		macro_zone,
 		feature_grid_unit_f32(hash, HYDROLOGY_NODE_KIND_SALT),
@@ -202,6 +209,7 @@ water_feature_surface_node_from_owner :: proc(
 		id = feature_id,
 		owner = {x = owner.x, y = 0, z = owner.z},
 		kind = kind,
+		source_biome_id = source_biome_id,
 		x = x,
 		y = SEA_LEVEL_BLOCKS,
 		z = z,
@@ -236,6 +244,7 @@ water_feature_subterranean_node_from_owner :: proc(
 		i32(math.floor_f32(y)),
 		i32(math.floor_f32(z)),
 	)
+	source_biome_id := water_feature_subterranean_source_biome_id(macro_zone)
 	depth_band := subterranean_depth_band_from_y(i32(math.floor_f32(y)))
 	kind := water_feature_subterranean_kind_from_macro_depth_roll(
 		macro_zone,
@@ -260,6 +269,7 @@ water_feature_subterranean_node_from_owner :: proc(
 		id = feature_id,
 		owner = owner,
 		kind = kind,
+		source_biome_id = source_biome_id,
 		x = x,
 		y = y,
 		z = z,
@@ -378,6 +388,71 @@ water_feature_surface_kind_from_macro_roll :: proc(
 	return .Surface_River
 }
 
+water_feature_surface_source_biome_id :: proc(
+	key: FeatureGridKey,
+	x, z: f32,
+	macro_zone: SurfaceMacroZone,
+) -> BiomeID {
+	sample := surface_biome_field_sample(key, i32(math.floor_f32(x)), i32(math.floor_f32(z)))
+	if sample.cell_count > 0 {
+		return sample.cells[sample.dominant_index].biome_id
+	}
+	switch macro_zone {
+	case .Wetland:
+		return .Wet_Lowland_Marsh
+	case .Volcanic:
+		return .Emberglass_Badlands
+	case .Corrupted:
+		return .Corrupted_Fen
+	case .Temperate:
+		return .Temperate_Hills
+	}
+	return .Temperate_Hills
+}
+
+water_feature_subterranean_source_biome_id :: proc(macro_zone: SubterraneanMacroZone) -> BiomeID {
+	switch macro_zone {
+	case .Aquifer:
+		return .Buried_Aquifer_Caves
+	case .Rooted:
+		return .Fungal_Vaults
+	case .Mineral:
+		return .Crystal_Geode_Network
+	}
+	return .Buried_Aquifer_Caves
+}
+
+water_feature_source_water_group :: proc(biome_id: BiomeID) -> u8 {
+	switch biome_id {
+	case .Wet_Lowland_Marsh, .Old_Growth_Forest, .Fungal_Vaults, .Buried_Aquifer_Caves:
+		return 1
+	case .Corrupted_Ash_Forest, .Corrupted_Fen:
+		return 2
+	case .Basalt_Spire_Highlands, .Emberglass_Badlands:
+		return 3
+	case .Crystal_Geode_Network:
+		return 4
+	case .Temperate_Hills:
+		return 0
+	}
+	return 0
+}
+
+water_feature_segment_source_biome_id :: proc(from_node, to_node: WaterFeatureNode) -> BiomeID {
+	from_group := water_feature_source_water_group(from_node.source_biome_id)
+	to_group := water_feature_source_water_group(to_node.source_biome_id)
+	if from_group == to_group {
+		return from_node.source_biome_id
+	}
+	if from_node.kind == .Surface_River || from_node.kind == .Underground_River {
+		return from_node.source_biome_id
+	}
+	if to_node.kind == .Surface_River || to_node.kind == .Underground_River {
+		return to_node.source_biome_id
+	}
+	return from_node.source_biome_id
+}
+
 water_feature_subterranean_kind_from_macro_depth_roll :: proc(
 	macro_zone: SubterraneanMacroZone,
 	depth_band: SubterraneanDepthBand,
@@ -452,6 +527,7 @@ water_feature_segment_from_nodes :: proc(
 		kind = kind,
 		from_node_id = from_node.id,
 		to_node_id = to_node.id,
+		source_biome_id = water_feature_segment_source_biome_id(from_node, to_node),
 		from_x = from_node.x,
 		from_y = from_node.y,
 		from_z = from_node.z,
@@ -473,6 +549,10 @@ water_feature_surface_segment_should_exist :: proc(
 	segment: WaterFeatureSegment,
 	from_node, to_node: WaterFeatureNode,
 ) -> bool {
+	if water_feature_source_water_group(from_node.source_biome_id) !=
+	   water_feature_source_water_group(to_node.source_biome_id) {
+		return false
+	}
 	roll := feature_grid_unit_f32(u64(segment.id), HYDROLOGY_SEGMENT_EXISTENCE_SALT)
 	chance := f32(0.18)
 	if from_node.kind == .Surface_River || to_node.kind == .Surface_River {
@@ -495,6 +575,10 @@ water_feature_subterranean_segment_should_exist :: proc(
 	segment: WaterFeatureSegment,
 	from_node, to_node: WaterFeatureNode,
 ) -> bool {
+	if water_feature_source_water_group(from_node.source_biome_id) !=
+	   water_feature_source_water_group(to_node.source_biome_id) {
+		return false
+	}
 	if from_node.kind == .Flooded_Region || to_node.kind == .Flooded_Region {
 		return true
 	}
@@ -567,6 +651,7 @@ hydrology_layer_surface_sample :: proc(
 		nearest_feature_kind    = .Sea,
 		nearest_distance_blocks = BIOME_FIELD_NO_DISTANCE,
 		water_level_blocks      = SEA_LEVEL_BLOCKS,
+		water_biome_id          = .Temperate_Hills,
 	}
 	bounds := BlockBounds2 {
 		min = {x = block_x, z = block_z},
@@ -640,6 +725,7 @@ hydrology_layer_subterranean_sample :: proc(
 		nearest_feature_kind    = .Aquifer,
 		nearest_distance_blocks = BIOME_FIELD_NO_DISTANCE,
 		water_level_blocks      = f32(block_y),
+		water_biome_id          = .Buried_Aquifer_Caves,
 	}
 	bounds := BlockBounds3 {
 		min = {x = block_x, y = block_y, z = block_z},
@@ -750,6 +836,7 @@ hydrology_layer_surface_sample_from_region :: proc(
 		nearest_feature_kind    = .Sea,
 		nearest_distance_blocks = BIOME_FIELD_NO_DISTANCE,
 		water_level_blocks      = SEA_LEVEL_BLOCKS,
+		water_biome_id          = .Temperate_Hills,
 	}
 	bounds := BlockBounds2 {
 		min = {x = block_x, z = block_z},
@@ -810,6 +897,7 @@ hydrology_layer_subterranean_sample_from_region :: proc(
 		nearest_feature_kind    = .Aquifer,
 		nearest_distance_blocks = BIOME_FIELD_NO_DISTANCE,
 		water_level_blocks      = f32(block_y),
+		water_biome_id          = .Buried_Aquifer_Caves,
 	}
 	bounds := BlockBounds3 {
 		min = {x = block_x, y = block_y, z = block_z},
@@ -897,7 +985,12 @@ hydrology_layer_surface_sample_accumulate_node :: proc(
 	} else {
 		sample.channel_influence = math.max(sample.channel_influence, influence)
 	}
-	hydrology_layer_surface_sample_note_water_level(sample, node.water_level_blocks, influence)
+	hydrology_layer_surface_sample_note_water_level(
+		sample,
+		node.water_level_blocks,
+		node.source_biome_id,
+		influence,
+	)
 	sample.floor_depression_blocks = math.max(
 		sample.floor_depression_blocks,
 		node.floor_depression_blocks * influence,
@@ -935,7 +1028,12 @@ hydrology_layer_surface_sample_accumulate_segment :: proc(
 		distance,
 	)
 	sample.channel_influence = math.max(sample.channel_influence, influence)
-	hydrology_layer_surface_sample_note_water_level(sample, segment.water_level_blocks, influence)
+	hydrology_layer_surface_sample_note_water_level(
+		sample,
+		segment.water_level_blocks,
+		segment.source_biome_id,
+		influence,
+	)
 	sample.floor_depression_blocks = math.max(
 		sample.floor_depression_blocks,
 		segment.floor_depression_blocks * influence,
@@ -1005,6 +1103,7 @@ hydrology_layer_subterranean_sample_accumulate_node :: proc(
 	hydrology_layer_subterranean_sample_note_water_level(
 		sample,
 		node.water_level_blocks,
+		node.source_biome_id,
 		influence,
 	)
 	sample.floor_depression_blocks = math.max(
@@ -1047,6 +1146,7 @@ hydrology_layer_subterranean_sample_accumulate_segment :: proc(
 	hydrology_layer_subterranean_sample_note_water_level(
 		sample,
 		segment.water_level_blocks,
+		segment.source_biome_id,
 		influence,
 	)
 	sample.floor_depression_blocks = math.max(
@@ -1096,11 +1196,30 @@ hydrology_layer_surface_sample_note_nearest :: proc(
 
 hydrology_layer_surface_sample_note_water_level :: proc(
 	sample: ^HydrologyLayerSurfaceSample,
-	water_level_blocks, influence: f32,
+	water_level_blocks: f32,
+	water_biome_id: BiomeID,
+	influence: f32,
 ) {
+	if influence <= 0 {
+		return
+	}
+	if sample.water_level_influence <= 0 {
+		sample.water_level_influence = influence
+		sample.water_level_blocks = water_level_blocks
+		sample.water_biome_id = water_biome_id
+		return
+	}
+	if water_feature_source_water_group(water_biome_id) !=
+	   water_feature_source_water_group(sample.water_biome_id) {
+		sample.water_material_conflict_influence = math.max(
+			sample.water_material_conflict_influence,
+			math.min(sample.water_level_influence, influence),
+		)
+	}
 	if influence > sample.water_level_influence {
 		sample.water_level_influence = influence
 		sample.water_level_blocks = water_level_blocks
+		sample.water_biome_id = water_biome_id
 	}
 }
 
@@ -1121,11 +1240,30 @@ hydrology_layer_subterranean_sample_note_nearest :: proc(
 
 hydrology_layer_subterranean_sample_note_water_level :: proc(
 	sample: ^HydrologyLayerSubterraneanSample,
-	water_level_blocks, influence: f32,
+	water_level_blocks: f32,
+	water_biome_id: BiomeID,
+	influence: f32,
 ) {
+	if influence <= 0 {
+		return
+	}
+	if sample.water_level_influence <= 0 {
+		sample.water_level_influence = influence
+		sample.water_level_blocks = water_level_blocks
+		sample.water_biome_id = water_biome_id
+		return
+	}
+	if water_feature_source_water_group(water_biome_id) !=
+	   water_feature_source_water_group(sample.water_biome_id) {
+		sample.water_material_conflict_influence = math.max(
+			sample.water_material_conflict_influence,
+			math.min(sample.water_level_influence, influence),
+		)
+	}
 	if influence > sample.water_level_influence {
 		sample.water_level_influence = influence
 		sample.water_level_blocks = water_level_blocks
+		sample.water_biome_id = water_biome_id
 	}
 }
 
@@ -1142,13 +1280,18 @@ hydrology_layer_apply_surface :: proc(
 	if water_influence <= 0 {
 		return result
 	}
+	conflict_gate :=
+		f32(1.0) - math.smoothstep(f32(0.18), f32(0.55), sample.water_material_conflict_influence)
+	if conflict_gate <= 0 {
+		return result
+	}
 
 	height_above_water := result.surface_height_blocks - sample.water_level_blocks
 	basin_support := 1.0 - math.smoothstep(f32(18), f32(54), math.max(height_above_water, f32(0)))
 	channel_support :=
 		1.0 - math.smoothstep(f32(42), f32(96), math.max(height_above_water, f32(0)))
-	basin_influence := sample.basin_influence * basin_support
-	channel_influence := sample.channel_influence * channel_support
+	basin_influence := sample.basin_influence * basin_support * conflict_gate
+	channel_influence := sample.channel_influence * channel_support * conflict_gate
 	shaping_influence := math.max(basin_influence, channel_influence)
 	if shaping_influence <= 0 {
 		return result
@@ -1386,6 +1529,35 @@ when ODIN_DEBUG {
 			segment.from_node_id == node.id,
 			"surface Water Feature Graph segment must retain its source node",
 		)
+		incompatible_segment_checked := false
+		for test_z := i32(-3); test_z <= 3 && !incompatible_segment_checked; test_z += 1 {
+			for test_x := i32(-3); test_x <= 3 && !incompatible_segment_checked; test_x += 1 {
+				test_owner := FeatureGridCoord2 {
+					x = test_x,
+					z = test_z,
+				}
+				test_neighbor := FeatureGridCoord2 {
+					x = test_x + 1,
+					z = test_z,
+				}
+				from_node := water_feature_surface_node_from_owner(key, test_owner)
+				to_node := water_feature_surface_node_from_owner(key, test_neighbor)
+				if water_feature_source_water_group(from_node.source_biome_id) ==
+				   water_feature_source_water_group(to_node.source_biome_id) {
+					continue
+				}
+				_, incompatible_exists := water_feature_surface_segment_from_owners(
+					key,
+					test_owner,
+					test_neighbor,
+				)
+				log.assert(
+					!incompatible_exists,
+					"incompatible surface water source groups must not be connected by a river segment",
+				)
+				incompatible_segment_checked = true
+			}
+		}
 		anchor := water_feature_node_anchor(underground_node)
 		log.assert(
 			anchor.kind == .Aquifer_Breach ||
@@ -1470,6 +1642,15 @@ when ODIN_DEBUG {
 			debug_f32_approx_equal(a.water_level_blocks, b.water_level_blocks, 0.001),
 			"surface hydrology water level mismatch",
 		)
+		log.assert(a.water_biome_id == b.water_biome_id, "surface hydrology water biome mismatch")
+		log.assert(
+			debug_f32_approx_equal(
+				a.water_material_conflict_influence,
+				b.water_material_conflict_influence,
+				0.001,
+			),
+			"surface hydrology water material conflict mismatch",
+		)
 		log.assert(
 			debug_f32_approx_equal(a.basin_influence, b.basin_influence, 0.001),
 			"surface hydrology basin influence mismatch",
@@ -1506,6 +1687,18 @@ when ODIN_DEBUG {
 		log.assert(
 			debug_f32_approx_equal(a.water_level_blocks, b.water_level_blocks, 0.001),
 			"subterranean hydrology water level mismatch",
+		)
+		log.assert(
+			a.water_biome_id == b.water_biome_id,
+			"subterranean hydrology water biome mismatch",
+		)
+		log.assert(
+			debug_f32_approx_equal(
+				a.water_material_conflict_influence,
+				b.water_material_conflict_influence,
+				0.001,
+			),
+			"subterranean hydrology water material conflict mismatch",
 		)
 		log.assert(
 			debug_f32_approx_equal(a.aquifer_influence, b.aquifer_influence, 0.001),

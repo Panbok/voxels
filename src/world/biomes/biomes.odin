@@ -96,12 +96,18 @@ FeaturePoint3 :: struct {
 BiomeID :: enum u8 {
 	// Surface baseline for ordinary hills, grass, dirt, stone, and default soft borders.
 	Temperate_Hills,
+	// Surface dense forest biome for canopy groves, root-heavy ground cover, and mossy terrain.
+	Old_Growth_Forest,
 	// Surface high-relief fantasy biome for cliffs, spires, hard borders, and stone-heavy terrain.
 	Basalt_Spire_Highlands,
+	// Surface volcanic biome for hot stone shelves, lava water variants, and columnar structures.
+	Emberglass_Badlands,
 	// Surface lowland biome for shorelines, shallow water, marsh shelves, and soft wet borders.
 	Wet_Lowland_Marsh,
 	// Surface hostile biome for ash layers, dead terrain, and structured corrupted borders.
 	Corrupted_Ash_Forest,
+	// Surface hostile-wet biome for corrupted water, brambles, and ash-mire transitions.
+	Corrupted_Fen,
 	// Subterranean major-region biome for broad chambers and fungal terrain identity.
 	Fungal_Vaults,
 	// Subterranean pocket-or-major biome for crystal shells, geodes, and mineral networks.
@@ -701,7 +707,13 @@ feature_grid_signed_unit_f32 :: proc(hash, salt: u64) -> f32 {
 
 biome_id_is_surface :: proc(biome_id: BiomeID) -> bool {
 	#partial switch biome_id {
-	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+	case .Temperate_Hills,
+	     .Old_Growth_Forest,
+	     .Basalt_Spire_Highlands,
+	     .Emberglass_Badlands,
+	     .Wet_Lowland_Marsh,
+	     .Corrupted_Ash_Forest,
+	     .Corrupted_Fen:
 		return true
 	}
 	return false
@@ -746,46 +758,82 @@ surface_biome_identity_from_macro_roll :: proc(
 ) -> BiomeID {
 	switch macro_zone {
 	case .Temperate:
-		if roll < 0.70 {
+		if roll < 0.38 {
+			return .Old_Growth_Forest
+		}
+		if roll < 0.66 {
 			return .Temperate_Hills
 		}
-		if roll < 0.84 {
+		if roll < 0.78 {
 			return .Wet_Lowland_Marsh
 		}
-		if roll < 0.94 {
+		if roll < 0.86 {
 			return .Basalt_Spire_Highlands
+		}
+		if roll < 0.91 {
+			return .Emberglass_Badlands
+		}
+		if roll < 0.96 {
+			return .Corrupted_Fen
 		}
 		return .Corrupted_Ash_Forest
 	case .Wetland:
-		if roll < 0.68 {
+		if roll < 0.42 {
 			return .Wet_Lowland_Marsh
+		}
+		if roll < 0.57 {
+			return .Corrupted_Fen
+		}
+		if roll < 0.73 {
+			return .Old_Growth_Forest
+		}
+		if roll < 0.84 {
+			return .Temperate_Hills
+		}
+		if roll < 0.93 {
+			return .Corrupted_Ash_Forest
+		}
+		if roll < 0.98 {
+			return .Basalt_Spire_Highlands
+		}
+		return .Emberglass_Badlands
+	case .Volcanic:
+		if roll < 0.42 {
+			return .Basalt_Spire_Highlands
+		}
+		if roll < 0.64 {
+			return .Emberglass_Badlands
+		}
+		if roll < 0.76 {
+			return .Corrupted_Ash_Forest
 		}
 		if roll < 0.86 {
 			return .Temperate_Hills
 		}
-		if roll < 0.95 {
-			return .Corrupted_Ash_Forest
+		if roll < 0.92 {
+			return .Old_Growth_Forest
 		}
-		return .Basalt_Spire_Highlands
-	case .Volcanic:
-		if roll < 0.68 {
-			return .Basalt_Spire_Highlands
-		}
-		if roll < 0.84 {
-			return .Temperate_Hills
-		}
-		if roll < 0.96 {
-			return .Corrupted_Ash_Forest
+		if roll < 0.97 {
+			return .Corrupted_Fen
 		}
 		return .Wet_Lowland_Marsh
 	case .Corrupted:
-		if roll < 0.70 {
+		if roll < 0.38 {
 			return .Corrupted_Ash_Forest
 		}
-		if roll < 0.84 {
+		if roll < 0.60 {
+			return .Corrupted_Fen
+		}
+		if roll < 0.70 {
+			return .Emberglass_Badlands
+		}
+		if roll < 0.80 {
 			return .Basalt_Spire_Highlands
 		}
-		if roll < 0.93 {
+		if roll < 0.88 {
+			return .Old_Growth_Forest
+		}
+		if roll < 0.96 {
 			return .Wet_Lowland_Marsh
 		}
 		return .Temperate_Hills
@@ -909,8 +957,20 @@ surface_biome_identities_are_compatible :: proc(a, b: BiomeID) -> bool {
 	   (a == .Wet_Lowland_Marsh && b == .Basalt_Spire_Highlands) {
 		return false
 	}
+	if (a == .Emberglass_Badlands && b == .Wet_Lowland_Marsh) ||
+	   (a == .Wet_Lowland_Marsh && b == .Emberglass_Badlands) {
+		return false
+	}
+	if (a == .Emberglass_Badlands && b == .Old_Growth_Forest) ||
+	   (a == .Old_Growth_Forest && b == .Emberglass_Badlands) {
+		return false
+	}
 	if (a == .Corrupted_Ash_Forest && b == .Temperate_Hills) ||
 	   (a == .Temperate_Hills && b == .Corrupted_Ash_Forest) {
+		return false
+	}
+	if (a == .Corrupted_Ash_Forest && b == .Old_Growth_Forest) ||
+	   (a == .Old_Growth_Forest && b == .Corrupted_Ash_Forest) {
 		return false
 	}
 	return true
@@ -1526,40 +1586,60 @@ surface_biome_identity_default_for_macro_zone :: proc(macro_zone: SurfaceMacroZo
 
 surface_biome_identity_priority_for_macro_zone :: proc(
 	macro_zone: SurfaceMacroZone,
-) -> [4]BiomeID {
+) -> [7]BiomeID {
 	switch macro_zone {
 	case .Temperate:
 		return {
+			.Old_Growth_Forest,
 			.Temperate_Hills,
 			.Wet_Lowland_Marsh,
 			.Basalt_Spire_Highlands,
+			.Emberglass_Badlands,
+			.Corrupted_Fen,
 			.Corrupted_Ash_Forest,
 		}
 	case .Wetland:
 		return {
 			.Wet_Lowland_Marsh,
+			.Corrupted_Fen,
+			.Old_Growth_Forest,
 			.Temperate_Hills,
 			.Corrupted_Ash_Forest,
 			.Basalt_Spire_Highlands,
+			.Emberglass_Badlands,
 		}
 	case .Volcanic:
 		return {
 			.Basalt_Spire_Highlands,
+			.Emberglass_Badlands,
 			.Corrupted_Ash_Forest,
 			.Temperate_Hills,
+			.Old_Growth_Forest,
+			.Corrupted_Fen,
 			.Wet_Lowland_Marsh,
 		}
 	case .Corrupted:
 		return {
 			.Corrupted_Ash_Forest,
+			.Corrupted_Fen,
+			.Emberglass_Badlands,
 			.Basalt_Spire_Highlands,
+			.Old_Growth_Forest,
 			.Wet_Lowland_Marsh,
 			.Temperate_Hills,
 		}
 	}
 
 	log.assertf(false, "unhandled surface macro zone: %v", macro_zone)
-	return {.Temperate_Hills, .Wet_Lowland_Marsh, .Basalt_Spire_Highlands, .Corrupted_Ash_Forest}
+	return {
+		.Temperate_Hills,
+		.Old_Growth_Forest,
+		.Wet_Lowland_Marsh,
+		.Basalt_Spire_Highlands,
+		.Emberglass_Badlands,
+		.Corrupted_Ash_Forest,
+		.Corrupted_Fen,
+	}
 }
 
 subterranean_biome_identity_priority_for_macro_depth :: proc(

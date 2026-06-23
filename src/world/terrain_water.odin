@@ -18,6 +18,42 @@ terrain_water_volume_surface_gate_world_y :: proc(column: TerrainBiomeColumn) ->
 	return i32(math.floor_f32(column.surface_height_blocks)) - surface_adjacent_depth
 }
 
+terrain_water_column_is_flooded :: proc(column: TerrainBiomeColumn) -> bool {
+	return column.water_fill_active && column.surface_height_blocks < column.water_level_blocks
+}
+
+terrain_water_surface_material_conflicts_neighbor :: proc(
+	columns: []TerrainBiomeColumn,
+	x, z: i32,
+	material_id: world_async.BlockMaterialID,
+) -> bool {
+	neighbor_offsets := [?]world_async.BlockCoord {
+		{x = 1, y = 0, z = 0},
+		{x = -1, y = 0, z = 0},
+		{x = 0, y = 0, z = 1},
+		{x = 0, y = 0, z = -1},
+	}
+	for offset in neighbor_offsets {
+		neighbor_x := x + offset.x
+		neighbor_z := z + offset.z
+		if neighbor_x < 0 ||
+		   neighbor_z < 0 ||
+		   neighbor_x >= CHUNK_BLOCK_LENGTH ||
+		   neighbor_z >= CHUNK_BLOCK_LENGTH {
+			continue
+		}
+		neighbor := columns[neighbor_x + neighbor_z * CHUNK_BLOCK_LENGTH]
+		if !terrain_water_column_is_flooded(neighbor) {
+			continue
+		}
+		neighbor_material_id := terrain_water_material_id_for_biome(neighbor.water_biome_id, false)
+		if neighbor_material_id != material_id {
+			return true
+		}
+	}
+	return false
+}
+
 terrain_water_volume_fill :: proc(
 	view: ^world_async.ChunkVoxelView,
 	chunk_origin: world_async.BlockCoord,
@@ -33,6 +69,15 @@ terrain_water_volume_fill :: proc(
 		for x in 0 ..< CHUNK_BLOCK_LENGTH {
 			column := columns[x + z * CHUNK_BLOCK_LENGTH]
 			if !column.water_fill_active {
+				continue
+			}
+			water_material_id := terrain_water_material_id_for_biome(column.water_biome_id, false)
+			if terrain_water_surface_material_conflicts_neighbor(
+				columns,
+				i32(x),
+				i32(z),
+				water_material_id,
+			) {
 				continue
 			}
 
@@ -68,7 +113,7 @@ terrain_water_volume_fill :: proc(
 				}
 
 				view.blocks.occupancy[index] = .Solid
-				view.blocks.material_id[index] = world_async.BlockMaterialID(TERRAIN_WATER_MAT_ID)
+				view.blocks.material_id[index] = water_material_id
 			}
 		}
 	}

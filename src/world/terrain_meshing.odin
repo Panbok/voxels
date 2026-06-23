@@ -45,7 +45,7 @@ TerrainBinaryGreedyScratch :: struct {
 	material_rows:           [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_MATERIAL_PALETTE_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u64,
 	hydrology_debug_rows:    [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u64,
 	cave_network_debug_rows: [TERRAIN_BINARY_AXIS_COUNT][TERRAIN_BINARY_AXIS_ROW_COUNT]u64,
-	face_material_masks:     [CHUNK_BLOCK_LENGTH]u64,
+	face_material_masks:     [CHUNK_BLOCK_LENGTH][TERRAIN_MATERIAL_FACE_VARIANT_MASK_WORD_COUNT]u64,
 	face_masks:              [CHUNK_BLOCK_LENGTH][TERRAIN_MATERIAL_FACE_VARIANT_COUNT][CHUNK_BLOCK_LENGTH]u64,
 }
 
@@ -228,11 +228,19 @@ terrain_binary_rect_mask :: proc(u, width: u32) -> u64 {
 	return ((u64(1) << width) - 1) << u
 }
 
-terrain_binary_greedy_scratch_alloc :: proc(
-	allocator: mem.Allocator,
-) -> ^TerrainBinaryGreedyScratch {
-	scratch := new(TerrainBinaryGreedyScratch, allocator)
-	log.assert(scratch != nil, "binary greedy scratch allocation failed")
+terrain_binary_greedy_scratch_alloc :: proc(arena: ^mem.Arena) -> ^TerrainBinaryGreedyScratch {
+	scratch_ptr, scratch_err := mem.arena_alloc(
+		arena,
+		size_of(TerrainBinaryGreedyScratch),
+		align_of(TerrainBinaryGreedyScratch),
+	)
+	scratch := (^TerrainBinaryGreedyScratch)(scratch_ptr)
+	log.assertf(
+		scratch_err == nil && scratch != nil,
+		"binary greedy scratch allocation failed: bytes=%d err=%v",
+		size_of(TerrainBinaryGreedyScratch),
+		scratch_err,
+	)
 	return scratch
 }
 
@@ -539,48 +547,154 @@ terrain_binary_neighbor_boundary_solid :: proc(
 
 terrain_binary_face_mask_bits_add :: proc(
 	scratch: ^TerrainBinaryGreedyScratch,
-	material_idx, v, u: u32,
+	face_variant_idx, v, u: u32,
 	face_bits: u64,
 ) {
 	log.assertf(
-		material_idx < TERRAIN_MATERIAL_FACE_VARIANT_COUNT,
+		face_variant_idx < TERRAIN_MATERIAL_FACE_VARIANT_COUNT,
 		"face material index out of range: %d",
-		material_idx,
+		face_variant_idx,
 	)
 	remaining_bits := face_bits
 	for remaining_bits != 0 {
 		slice := u32(bits.trailing_zeros(remaining_bits))
-		scratch.face_material_masks[slice] |= u64(1) << material_idx
-		scratch.face_masks[slice][material_idx][v] |= u64(1) << u
+		mask_word := face_variant_idx / 64
+		mask_bit := face_variant_idx % 64
+		scratch.face_material_masks[slice][mask_word] |= u64(1) << mask_bit
+		scratch.face_masks[slice][face_variant_idx][v] |= u64(1) << u
 		remaining_bits &~= u64(1) << slice
 	}
 }
 
+terrain_binary_face_variant_index_make :: proc(
+	material_idx, color_variant, debug_combo: u32,
+) -> u32 {
+	log.assertf(
+		material_idx < TERRAIN_MATERIAL_PALETTE_COUNT,
+		"face material out of range: %d",
+		material_idx,
+	)
+	log.assertf(
+		color_variant < TERRAIN_MATERIAL_COLOR_VARIANT_COUNT,
+		"face color variant out of range: %d",
+		color_variant,
+	)
+	when TERRAIN_MATERIAL_FACE_DEBUG_VARIANTS_ENABLED {
+		log.assertf(
+			debug_combo < TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_COUNT,
+			"face debug combo out of range: %d",
+			debug_combo,
+		)
+	} else {
+		log.assertf(debug_combo == 0, "face debug combo out of range: %d", debug_combo)
+	}
+	return(
+		material_idx +
+		color_variant * TERRAIN_MATERIAL_PALETTE_COUNT +
+		debug_combo * TERRAIN_MATERIAL_COLOR_COUNT \
+	)
+}
+
+terrain_binary_face_variant_material_id :: proc(face_variant_idx: u32) -> u32 {
+	log.assertf(
+		face_variant_idx < TERRAIN_MATERIAL_FACE_VARIANT_COUNT,
+		"face variant index out of range: %d",
+		face_variant_idx,
+	)
+	color_index := face_variant_idx % TERRAIN_MATERIAL_COLOR_COUNT
+	debug_combo := face_variant_idx / TERRAIN_MATERIAL_COLOR_COUNT
+	material_idx := color_index % TERRAIN_MATERIAL_PALETTE_COUNT
+	color_variant := color_index / TERRAIN_MATERIAL_PALETTE_COUNT
+	return(
+		material_idx |
+		(color_variant << u32(TERRAIN_MATERIAL_COLOR_VARIANT_SHIFT)) |
+		terrain_debug_material_flags_from_combo(debug_combo) \
+	)
+}
+
 terrain_binary_face_mask_debug_variants_add :: proc(
 	scratch: ^TerrainBinaryGreedyScratch,
+	axis, row_index, material_idx, color_variant, v, u: u32,
+	exposed_material_bits: u64,
+) {
+	when TERRAIN_MATERIAL_FACE_DEBUG_VARIANTS_ENABLED {
+		hydrology_row := scratch.hydrology_debug_rows[axis][row_index]
+		cave_network_row := scratch.cave_network_debug_rows[axis][row_index]
+		for combo := u32(0); combo < TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_COUNT; combo += 1 {
+			variant_bits := exposed_material_bits
+			if (combo & TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_HYDROLOGY) != 0 {
+				variant_bits &= hydrology_row
+			} else {
+				variant_bits &~= hydrology_row
+			}
+			if (combo & TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_CAVE_NETWORK) != 0 {
+				variant_bits &= cave_network_row
+			} else {
+				variant_bits &~= cave_network_row
+			}
+			if variant_bits == 0 {
+				continue
+			}
+
+			face_variant_idx := terrain_binary_face_variant_index_make(
+				material_idx,
+				color_variant,
+				combo,
+			)
+			terrain_binary_face_mask_bits_add(scratch, face_variant_idx, v, u, variant_bits)
+		}
+		return
+	}
+
+	face_variant_idx := terrain_binary_face_variant_index_make(material_idx, color_variant, 0)
+	terrain_binary_face_mask_bits_add(scratch, face_variant_idx, v, u, exposed_material_bits)
+}
+
+terrain_binary_face_color_variant_for_block :: proc(
+	view: world_async.ChunkVoxelView,
+	axis, row_index, axis_coord, face_material_idx: u32,
+) -> u32 {
+	x, y, z := terrain_binary_face_block_coord(axis, row_index, axis_coord)
+	index := chunk_block_index(x, y, z)
+	block_material_id := view.blocks.material_id[index]
+	if terrain_material_palette_index(block_material_id) != (face_material_idx & 7) {
+		return 0
+	}
+	return(
+		(u32(u8(block_material_id) & TERRAIN_MATERIAL_COLOR_VARIANT_MASK) >>
+			u32(TERRAIN_MATERIAL_COLOR_VARIANT_SHIFT)) &
+		(TERRAIN_MATERIAL_COLOR_VARIANT_COUNT - 1) \
+	)
+}
+
+terrain_binary_face_mask_debug_color_variants_add :: proc(
+	scratch: ^TerrainBinaryGreedyScratch,
+	view: world_async.ChunkVoxelView,
 	axis, row_index, material_idx, v, u: u32,
 	exposed_material_bits: u64,
 ) {
-	hydrology_row := scratch.hydrology_debug_rows[axis][row_index]
-	cave_network_row := scratch.cave_network_debug_rows[axis][row_index]
-	for combo := u32(0); combo < TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_COUNT; combo += 1 {
-		variant_bits := exposed_material_bits
-		if (combo & TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_HYDROLOGY) != 0 {
-			variant_bits &= hydrology_row
-		} else {
-			variant_bits &~= hydrology_row
-		}
-		if (combo & TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_CAVE_NETWORK) != 0 {
-			variant_bits &= cave_network_row
-		} else {
-			variant_bits &~= cave_network_row
-		}
-		if variant_bits == 0 {
-			continue
-		}
-
-		debug_material_idx := material_idx | terrain_debug_material_flags_from_combo(combo)
-		terrain_binary_face_mask_bits_add(scratch, debug_material_idx, v, u, variant_bits)
+	remaining_bits := exposed_material_bits
+	for remaining_bits != 0 {
+		axis_coord := u32(bits.trailing_zeros(remaining_bits))
+		face_bit := u64(1) << axis_coord
+		color_variant := terrain_binary_face_color_variant_for_block(
+			view,
+			axis,
+			row_index,
+			axis_coord,
+			material_idx,
+		)
+		terrain_binary_face_mask_debug_variants_add(
+			scratch,
+			axis,
+			row_index,
+			material_idx,
+			color_variant,
+			v,
+			u,
+			face_bit,
+		)
+		remaining_bits &~= face_bit
 	}
 }
 
@@ -651,8 +765,9 @@ terrain_binary_face_mask_material_variants_add :: proc(
 	}
 	cave_material_idx := terrain_binary_cave_face_material_index(normal_id, material_idx)
 	if cave_material_idx != material_idx {
-		terrain_binary_face_mask_debug_variants_add(
+		terrain_binary_face_mask_debug_color_variants_add(
 			scratch,
+			view,
 			axis,
 			row_index,
 			cave_material_idx,
@@ -663,8 +778,9 @@ terrain_binary_face_mask_material_variants_add :: proc(
 		return
 	}
 	if material_idx != TERRAIN_GRASS_MAT_ID || normal_id == 3 {
-		terrain_binary_face_mask_debug_variants_add(
+		terrain_binary_face_mask_debug_color_variants_add(
 			scratch,
+			view,
 			axis,
 			row_index,
 			material_idx,
@@ -680,8 +796,9 @@ terrain_binary_face_mask_material_variants_add :: proc(
 			(scratch.material_rows[1][TERRAIN_WET_MARSH_MAT_ID][row_index] << 1) &
 			exposed_material_bits
 		if wet_below_bits == 0 {
-			terrain_binary_face_mask_debug_variants_add(
+			terrain_binary_face_mask_debug_color_variants_add(
 				scratch,
+				view,
 				axis,
 				row_index,
 				material_idx,
@@ -692,8 +809,9 @@ terrain_binary_face_mask_material_variants_add :: proc(
 			return
 		}
 		grass_bits := exposed_material_bits & ~wet_below_bits
-		terrain_binary_face_mask_debug_variants_add(
+		terrain_binary_face_mask_debug_color_variants_add(
 			scratch,
+			view,
 			axis,
 			row_index,
 			material_idx,
@@ -701,8 +819,9 @@ terrain_binary_face_mask_material_variants_add :: proc(
 			u,
 			grass_bits,
 		)
-		terrain_binary_face_mask_debug_variants_add(
+		terrain_binary_face_mask_debug_color_variants_add(
 			scratch,
+			view,
 			axis,
 			row_index,
 			TERRAIN_WET_MARSH_MAT_ID,
@@ -726,11 +845,19 @@ terrain_binary_face_mask_material_variants_add :: proc(
 			axis_coord,
 			material_idx,
 		)
+		color_variant := terrain_binary_face_color_variant_for_block(
+			view,
+			axis,
+			row_index,
+			axis_coord,
+			face_material_idx,
+		)
 		terrain_binary_face_mask_debug_variants_add(
 			scratch,
 			axis,
 			row_index,
 			face_material_idx,
+			color_variant,
 			v,
 			u,
 			face_bit,
@@ -937,20 +1064,26 @@ terrain_binary_face_masks_process :: proc(
 	emit: bool,
 ) {
 	for slice := u32(0); slice < CHUNK_BLOCK_LENGTH; slice += 1 {
-		material_mask := scratch.face_material_masks[slice]
-		for material_mask != 0 {
-			material_idx := u32(bits.trailing_zeros(material_mask))
-			terrain_binary_greedy_material_process(
-				scratch.face_masks[slice][material_idx][:],
-				normal_id,
-				slice,
-				material_idx,
-				vertices,
-				indices,
-				face_cursor,
-				emit,
-			)
-			material_mask &~= u64(1) << material_idx
+		for mask_word := u32(0);
+		    mask_word < TERRAIN_MATERIAL_FACE_VARIANT_MASK_WORD_COUNT;
+		    mask_word += 1 {
+			material_mask := scratch.face_material_masks[slice][mask_word]
+			for material_mask != 0 {
+				material_bit := u32(bits.trailing_zeros(material_mask))
+				face_variant_idx := mask_word * 64 + material_bit
+				material_id := terrain_binary_face_variant_material_id(face_variant_idx)
+				terrain_binary_greedy_material_process(
+					scratch.face_masks[slice][face_variant_idx][:],
+					normal_id,
+					slice,
+					material_id,
+					vertices,
+					indices,
+					face_cursor,
+					emit,
+				)
+				material_mask &~= u64(1) << material_bit
+			}
 		}
 	}
 }
@@ -1073,24 +1206,30 @@ terrain_binary_face_masks_process_bounds :: proc(
 	slice_min, slice_max, u_min, u_max, v_min, v_max :=
 		terrain_binary_axis_bounds_from_chunk_bounds(normal_id, min_bound, max_bound)
 	for slice := slice_min; slice < slice_max; slice += 1 {
-		material_mask := scratch.face_material_masks[slice]
-		for material_mask != 0 {
-			material_idx := u32(bits.trailing_zeros(material_mask))
-			terrain_binary_greedy_material_process_bounds(
-				scratch.face_masks[slice][material_idx][:],
-				normal_id,
-				slice,
-				material_idx,
-				u_min,
-				u_max,
-				v_min,
-				v_max,
-				vertices,
-				indices,
-				face_cursor,
-				emit,
-			)
-			material_mask &~= u64(1) << material_idx
+		for mask_word := u32(0);
+		    mask_word < TERRAIN_MATERIAL_FACE_VARIANT_MASK_WORD_COUNT;
+		    mask_word += 1 {
+			material_mask := scratch.face_material_masks[slice][mask_word]
+			for material_mask != 0 {
+				material_bit := u32(bits.trailing_zeros(material_mask))
+				face_variant_idx := mask_word * 64 + material_bit
+				material_id := terrain_binary_face_variant_material_id(face_variant_idx)
+				terrain_binary_greedy_material_process_bounds(
+					scratch.face_masks[slice][face_variant_idx][:],
+					normal_id,
+					slice,
+					material_id,
+					u_min,
+					u_max,
+					v_min,
+					v_max,
+					vertices,
+					indices,
+					face_cursor,
+					emit,
+				)
+				material_mask &~= u64(1) << material_bit
+			}
 		}
 	}
 }
@@ -1619,7 +1758,7 @@ chunk_snapshot_build_subchunk_mesh :: proc(
 mesh_job_execute_sync :: proc(
 	job: world_async.ChunkMeshJob,
 	output_allocator: mem.Allocator,
-	scratch_allocator: mem.Allocator,
+	scratch_arena: ^mem.Arena,
 ) -> world_async.ChunkMeshOutput {
 	log.assertf(
 		len(job.snapshot.voxel_view.blocks) == CHUNK_BLOCK_COUNT,
@@ -1628,7 +1767,7 @@ mesh_job_execute_sync :: proc(
 		len(job.snapshot.voxel_view.blocks),
 	)
 
-	scratch := terrain_binary_greedy_scratch_alloc(scratch_allocator)
+	scratch := terrain_binary_greedy_scratch_alloc(scratch_arena)
 
 	switch job.scope_kind {
 	case .Subchunk:

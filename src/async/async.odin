@@ -25,7 +25,7 @@ GENERATION_RESULT_QUEUE_CAPACITY :: 128
 MESH_WORKER_COUNT_DEFAULT :: 4
 MESH_WORKER_COUNT_MIN :: 1
 MESH_WORKER_ARENA_BYTES :: 8 * mem.Megabyte
-MESH_WORKER_SCRATCH_ARENA_BYTES :: 3 * mem.Megabyte
+MESH_WORKER_SCRATCH_ARENA_BYTES :: 6 * mem.Megabyte
 
 MESH_QUEUE_CAPACITY :: 128
 
@@ -86,7 +86,7 @@ GenerationExecuteProc :: #type proc(
 MeshExecuteProc :: #type proc(
 	job: world_async.ChunkMeshJob,
 	output_allocator: mem.Allocator,
-	scratch_allocator: mem.Allocator,
+	scratch_arena: ^mem.Arena,
 ) -> world_async.ChunkMeshOutput
 
 InitConfig :: struct {
@@ -377,7 +377,7 @@ mesh_worker_proc :: proc(data: rawptr) {
 		output := execute(
 			job,
 			state.mesh_worker_arena_pool.elements[worker_index].allocator,
-			state.mesh_worker_scratch_pool.elements[worker_index].allocator,
+			&state.mesh_worker_scratch_pool.elements[worker_index].arena,
 		)
 
 		result := world_async.ChunkMeshJobResult {

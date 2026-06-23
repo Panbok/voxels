@@ -234,29 +234,6 @@ terrain_surface_density_sample_from_shape :: proc(
 	return density
 }
 
-terrain_surface_density_sample_with_features :: proc(
-	column: TerrainBiomeColumn,
-	shape: TerrainSurfaceMorphologyColumnShape,
-	features: []biomes.SurfaceMorphologyFeature,
-	feature_count: u32,
-	world_x, world_y, world_z: i32,
-) -> f32 {
-	density := terrain_surface_density_sample_from_shape(column, shape, world_y)
-	if world_y < 0 || feature_count == 0 {
-		return density
-	}
-
-	density += terrain_surface_morphology_feature_density_delta(
-		column,
-		features,
-		feature_count,
-		world_x,
-		world_y,
-		world_z,
-	)
-	return density
-}
-
 terrain_surface_density_sample_with_feature_plan :: proc(
 	column: TerrainBiomeColumn,
 	shape: TerrainSurfaceMorphologyColumnShape,
@@ -453,32 +430,6 @@ terrain_surface_morphology_features_for_block_direct :: proc(
 	return count
 }
 
-terrain_surface_morphology_features_column_bounds :: proc(
-	features: []biomes.SurfaceMorphologyFeature,
-	feature_count: u32,
-	world_x, world_z: i32,
-) -> TerrainSurfaceMorphologyColumnFeatureBounds {
-	bounds := TerrainSurfaceMorphologyColumnFeatureBounds{}
-	if feature_count == 0 {
-		return bounds
-	}
-
-	sample_x := f32(world_x) + 0.5
-	sample_z := f32(world_z) + 0.5
-	for i := u32(0); i < feature_count; i += 1 {
-		feature := features[i]
-		bands := terrain_surface_morphology_feature_column_bands(feature, sample_x, sample_z)
-		if !bands.active {
-			continue
-		}
-		bounds.active = true
-		bounds.feature_hits += 1
-		bounds.band_above = math.max(bounds.band_above, bands.band_above)
-		bounds.band_below = math.max(bounds.band_below, bands.band_below)
-	}
-	return bounds
-}
-
 terrain_surface_morphology_column_feature_plan_write :: proc(
 	features: []biomes.SurfaceMorphologyFeature,
 	feature_count: u32,
@@ -599,41 +550,6 @@ terrain_surface_morphology_feature_column_bands :: proc(
 		bands.band_below = math.max(bands.band_below, f32(2) * lateral)
 	}
 	return bands
-}
-
-terrain_surface_morphology_feature_density_delta :: proc(
-	column: TerrainBiomeColumn,
-	features: []biomes.SurfaceMorphologyFeature,
-	feature_count: u32,
-	world_x, world_y, world_z: i32,
-) -> f32 {
-	density_delta := f32(0)
-	sample_x := f32(world_x) + 0.5
-	sample_y := f32(world_y) + 0.5
-	sample_z := f32(world_z) + 0.5
-	relative_y := sample_y - column.surface_height_blocks
-	for i := u32(0); i < feature_count; i += 1 {
-		feature := features[i]
-		bands := terrain_surface_morphology_feature_column_bands(feature, sample_x, sample_z)
-		if !bands.active {
-			continue
-		}
-		if relative_y < -bands.band_below - 1 || relative_y > bands.band_above + 1 {
-			continue
-		}
-
-		feature_delta := terrain_surface_morphology_basalt_spire_field_density(
-			feature,
-			column,
-			sample_x,
-			sample_y,
-			sample_z,
-			relative_y,
-			bands.radial,
-		)
-		density_delta += feature_delta * bands.influence
-	}
-	return density_delta
 }
 
 terrain_surface_morphology_feature_plan_density_delta :: proc(

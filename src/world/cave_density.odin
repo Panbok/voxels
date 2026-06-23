@@ -515,7 +515,13 @@ terrain_density_cave_field_route_pocket_compound_shape :: proc(
 		branch_radius_along *= 1.18
 		branch_radius_height *= 0.68
 		branch_radius_away *= 1.18
-	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+	case .Temperate_Hills,
+	     .Old_Growth_Forest,
+	     .Basalt_Spire_Highlands,
+	     .Emberglass_Badlands,
+	     .Wet_Lowland_Marsh,
+	     .Corrupted_Ash_Forest,
+	     .Corrupted_Fen:
 	}
 
 	core_shape := along * along + height * height + away * away
@@ -712,7 +718,13 @@ terrain_density_carve_cave_field_route_pocket_cluster :: proc(
 		route_pocket_branch_radius_along *= 1.18
 		route_pocket_branch_radius_height *= 0.68
 		route_pocket_branch_radius_away *= 1.18
-	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+	case .Temperate_Hills,
+	     .Old_Growth_Forest,
+	     .Basalt_Spire_Highlands,
+	     .Emberglass_Badlands,
+	     .Wet_Lowland_Marsh,
+	     .Corrupted_Ash_Forest,
+	     .Corrupted_Fen:
 	}
 	route_pocket_shape_span := math.sqrt_f32(
 		f32(1.240001) + TERRAIN_CAVE_FIELD_ROUTE_POCKET_FIELD_BLEND_RADIUS,
@@ -2708,7 +2720,13 @@ terrain_density_carve_cave_node_edge_portals :: proc(
 			portal_radius_y *= 0.48
 			portal_radius_z *= 1.10
 			shape_kind = .Flooded_Passage
-		case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+		case .Temperate_Hills,
+		     .Old_Growth_Forest,
+		     .Basalt_Spire_Highlands,
+		     .Emberglass_Badlands,
+		     .Wet_Lowland_Marsh,
+		     .Corrupted_Ash_Forest,
+		     .Corrupted_Fen:
 		}
 
 		portal_shape := terrain_density_cave_passage_shape(shape_kind)
@@ -3055,7 +3073,13 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 	case .Buried_Aquifer_Caves:
 		cluster_shape = terrain_density_cave_passage_shape(.Flooded_Passage)
 		cluster_shape.radius_y_scale = math.min(cluster_shape.radius_y_scale, f32(0.48))
-	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+	case .Temperate_Hills,
+	     .Old_Growth_Forest,
+	     .Basalt_Spire_Highlands,
+	     .Emberglass_Badlands,
+	     .Wet_Lowland_Marsh,
+	     .Corrupted_Ash_Forest,
+	     .Corrupted_Fen:
 	}
 	terrain_density_cave_passage_shape_apply_biome(&cluster_shape, node.biome_id)
 
@@ -3136,7 +3160,13 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 			satellite_radius_x *= 1.20
 			satellite_radius_y *= 0.62
 			satellite_radius_z *= 1.08
-		case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+		case .Temperate_Hills,
+		     .Old_Growth_Forest,
+		     .Basalt_Spire_Highlands,
+		     .Emberglass_Badlands,
+		     .Wet_Lowland_Marsh,
+		     .Corrupted_Ash_Forest,
+		     .Corrupted_Fen:
 		}
 
 		satellite_center_x[satellite_index] = center_x
@@ -3361,7 +3391,13 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 			pocket_radius_x *= 1.18
 			pocket_radius_y *= 0.44
 			pocket_radius_z *= 1.06
-		case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+		case .Temperate_Hills,
+		     .Old_Growth_Forest,
+		     .Basalt_Spire_Highlands,
+		     .Emberglass_Badlands,
+		     .Wet_Lowland_Marsh,
+		     .Corrupted_Ash_Forest,
+		     .Corrupted_Fen:
 		}
 		terrain_density_carve_cave_room_lobed_ellipsoid(
 			view,
@@ -3437,7 +3473,13 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 			alcove_radius_x *= 1.26
 			alcove_radius_y *= 0.42
 			alcove_radius_z *= 1.08
-		case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+		case .Temperate_Hills,
+		     .Old_Growth_Forest,
+		     .Basalt_Spire_Highlands,
+		     .Emberglass_Badlands,
+		     .Wet_Lowland_Marsh,
+		     .Corrupted_Ash_Forest,
+		     .Corrupted_Fen:
 		}
 		terrain_density_carve_cave_room_lobed_ellipsoid(
 			view,
@@ -3535,7 +3577,13 @@ terrain_density_carve_cave_node_macro_satellite_apron_field :: proc(
 		radius_y_apron *= 0.54
 		branch_radius_scale *= 1.12
 		branch_offset *= 1.08
-	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+	case .Temperate_Hills,
+	     .Old_Growth_Forest,
+	     .Basalt_Spire_Highlands,
+	     .Emberglass_Badlands,
+	     .Wet_Lowland_Marsh,
+	     .Corrupted_Ash_Forest,
+	     .Corrupted_Fen:
 	}
 
 	padding := math.max(radius_along, math.max(radius_y_apron, radius_across)) * f32(2.25) + 2
@@ -3853,7 +3901,13 @@ terrain_density_carve_cave_node_macro_cluster_field :: proc(
 		outward_radius *= 1.48
 		vertical_radius *= 0.48
 		side_radius_scale *= 1.12
-	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+	case .Temperate_Hills,
+	     .Old_Growth_Forest,
+	     .Basalt_Spire_Highlands,
+	     .Emberglass_Badlands,
+	     .Wet_Lowland_Marsh,
+	     .Corrupted_Ash_Forest,
+	     .Corrupted_Fen:
 	}
 
 	bounds_radius :=
@@ -4453,6 +4507,7 @@ terrain_density_carve_cave_room :: proc(
 		terrain_density_fill_water_ellipsoid(
 			view,
 			chunk_origin,
+			terrain_water_material_id_for_biome(biome_id, true),
 			center_x,
 			center_y + ry * TERRAIN_AQUIFER_ROOM_WATER_Y_OFFSET_SCALE,
 			center_z,
@@ -4608,7 +4663,13 @@ terrain_density_cave_major_room_perimeter_shape :: proc(
 		upper_radius_along *= 0.72
 		upper_radius_y *= 0.66
 		upper_radius_across *= 0.72
-	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+	case .Temperate_Hills,
+	     .Old_Growth_Forest,
+	     .Basalt_Spire_Highlands,
+	     .Emberglass_Badlands,
+	     .Wet_Lowland_Marsh,
+	     .Corrupted_Ash_Forest,
+	     .Corrupted_Fen:
 	}
 
 	side_a_shape :=
@@ -4814,7 +4875,13 @@ terrain_density_cave_room_compound_shape :: proc(
 		rear_alcove_center_y = -0.18
 		rear_alcove_radius_y = 0.30
 		rear_alcove_radius_across = 0.36
-	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+	case .Temperate_Hills,
+	     .Old_Growth_Forest,
+	     .Basalt_Spire_Highlands,
+	     .Emberglass_Badlands,
+	     .Wet_Lowland_Marsh,
+	     .Corrupted_Ash_Forest,
+	     .Corrupted_Fen:
 	}
 
 	primary_shape :=
@@ -5287,7 +5354,13 @@ terrain_density_cave_room_internal_structure_preserves :: proc(
 			(1.0 - math.smoothstep(f32(0.50), f32(0.88), along_abs))
 		strength = island_band * lower_island * positive_rough
 		return strength > 0.32
-	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+	case .Temperate_Hills,
+	     .Old_Growth_Forest,
+	     .Basalt_Spire_Highlands,
+	     .Emberglass_Badlands,
+	     .Wet_Lowland_Marsh,
+	     .Corrupted_Ash_Forest,
+	     .Corrupted_Fen:
 		side_rib :=
 			math.clamp(1.0 - math.abs(across_abs - f32(0.36)) * f32(5.6), f32(0), f32(1)) *
 			(1.0 - math.smoothstep(f32(0.62), f32(0.92), along_abs))
@@ -5335,7 +5408,13 @@ terrain_density_cave_room_strata_threshold_adjust :: proc(
 		floor_mound_scale *= 0.72
 		floor_terrace_scale *= 1.36
 		ceiling_chimney_scale *= 0.76
-	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+	case .Temperate_Hills,
+	     .Old_Growth_Forest,
+	     .Basalt_Spire_Highlands,
+	     .Emberglass_Badlands,
+	     .Wet_Lowland_Marsh,
+	     .Corrupted_Ash_Forest,
+	     .Corrupted_Fen:
 	}
 
 	floor_mound := floor_band * (1.0 - core_open_support * 0.72) * floor_noise * floor_mound_scale
@@ -5382,6 +5461,7 @@ terrain_density_cave_room_lobe_threshold_adjust :: proc(nx, ny, nz, axis_x, axis
 terrain_density_fill_water_ellipsoid :: proc(
 	view: ^world_async.ChunkVoxelView,
 	chunk_origin: world_async.BlockCoord,
+	material_id: world_async.BlockMaterialID,
 	center_x, center_y, center_z, radius_x, radius_y, radius_z: f32,
 ) {
 	rx := math.max(f32(1), radius_x)
@@ -5413,7 +5493,7 @@ terrain_density_fill_water_ellipsoid :: proc(
 				if nx * nx + ny * ny + nz * nz > 1.0 {
 					continue
 				}
-				terrain_density_fill_local_water_block(view, x, y, z)
+				terrain_density_fill_local_supported_water_block(view, x, y, z, material_id, 6)
 			}
 		}
 	}
@@ -5841,7 +5921,13 @@ terrain_density_carve_cave_edge_approach_vestibules :: proc(
 			radius_y *= 0.54
 			radius_z *= 1.06
 			shape_kind = .Flooded_Passage
-		case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+		case .Temperate_Hills,
+		     .Old_Growth_Forest,
+		     .Basalt_Spire_Highlands,
+		     .Emberglass_Badlands,
+		     .Wet_Lowland_Marsh,
+		     .Corrupted_Ash_Forest,
+		     .Corrupted_Fen:
 		}
 
 		throat_shape := terrain_density_cave_passage_shape(shape_kind)
@@ -6290,7 +6376,13 @@ terrain_density_carve_cave_edge_route_bypasses :: proc(
 			shape_kind = .Fracture
 		case .Buried_Aquifer_Caves:
 			shape_kind = .Flooded_Passage
-		case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+		case .Temperate_Hills,
+		     .Old_Growth_Forest,
+		     .Basalt_Spire_Highlands,
+		     .Emberglass_Badlands,
+		     .Wet_Lowland_Marsh,
+		     .Corrupted_Ash_Forest,
+		     .Corrupted_Fen:
 		}
 		bypass_shape := terrain_density_cave_passage_shape(shape_kind)
 		terrain_density_cave_passage_shape_apply_biome(&bypass_shape, biome_id)
@@ -6427,7 +6519,13 @@ terrain_density_carve_cave_edge_route_bypasses :: proc(
 			radius_x *= 1.16
 			radius_y *= 0.62
 			radius_z *= 1.14
-		case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+		case .Temperate_Hills,
+		     .Old_Growth_Forest,
+		     .Basalt_Spire_Highlands,
+		     .Emberglass_Badlands,
+		     .Wet_Lowland_Marsh,
+		     .Corrupted_Ash_Forest,
+		     .Corrupted_Fen:
 		}
 		terrain_density_carve_cave_room_lobed_ellipsoid(
 			view,
@@ -7484,7 +7582,13 @@ terrain_density_carve_cave_edge_seam_bypasses :: proc(
 			radius_x *= 1.14
 			radius_y *= 0.68
 			radius_z *= 1.16
-		case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+		case .Temperate_Hills,
+		     .Old_Growth_Forest,
+		     .Basalt_Spire_Highlands,
+		     .Emberglass_Badlands,
+		     .Wet_Lowland_Marsh,
+		     .Corrupted_Ash_Forest,
+		     .Corrupted_Fen:
 		}
 		terrain_density_carve_cave_room_lobed_ellipsoid(
 			view,
@@ -7743,7 +7847,13 @@ terrain_density_carve_cave_edge_seam_crosscuts :: proc(
 			radius_x *= 1.12
 			radius_y *= 0.68
 			radius_z *= 1.12
-		case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+		case .Temperate_Hills,
+		     .Old_Growth_Forest,
+		     .Basalt_Spire_Highlands,
+		     .Emberglass_Badlands,
+		     .Wet_Lowland_Marsh,
+		     .Corrupted_Ash_Forest,
+		     .Corrupted_Fen:
 		}
 		terrain_density_carve_cave_room_lobed_ellipsoid(
 			view,
@@ -8054,7 +8164,13 @@ terrain_density_carve_cave_edge_seam_vertical_relief :: proc(
 			if vertical_sign > 0 {
 				vertical_offset *= 0.82
 			}
-		case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+		case .Temperate_Hills,
+		     .Old_Growth_Forest,
+		     .Basalt_Spire_Highlands,
+		     .Emberglass_Badlands,
+		     .Wet_Lowland_Marsh,
+		     .Corrupted_Ash_Forest,
+		     .Corrupted_Fen:
 		}
 		side_drift :=
 			route_radius *
@@ -8171,7 +8287,13 @@ terrain_density_carve_cave_edge_seam_vertical_relief :: proc(
 			} else {
 				radius_y *= 0.72
 			}
-		case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+		case .Temperate_Hills,
+		     .Old_Growth_Forest,
+		     .Basalt_Spire_Highlands,
+		     .Emberglass_Badlands,
+		     .Wet_Lowland_Marsh,
+		     .Corrupted_Ash_Forest,
+		     .Corrupted_Fen:
 		}
 		terrain_density_carve_cave_room_lobed_ellipsoid(
 			view,
@@ -8634,6 +8756,7 @@ terrain_density_carve_cave_edge_chamberlet_biome_detail :: proc(
 			terrain_density_fill_water_ellipsoid(
 				view,
 				chunk_origin,
+				terrain_water_material_id_for_biome(biome_id, true),
 				detail_center_x,
 				detail_center_y - detail_radius * f32(0.40),
 				detail_center_z,
@@ -11021,13 +11144,97 @@ terrain_density_carve_checked_local_block_with_material_result :: proc(
 terrain_density_fill_local_water_block :: proc(
 	view: ^world_async.ChunkVoxelView,
 	local_x, local_y, local_z: i32,
+	material_id: world_async.BlockMaterialID,
 ) {
 	index := chunk_block_index(u32(local_x), u32(local_y), u32(local_z))
 	if view.blocks.occupancy[index] != .Empty {
 		return
 	}
 	view.blocks.occupancy[index] = .Solid
-	view.blocks.material_id[index] = world_async.BlockMaterialID(TERRAIN_WATER_MAT_ID)
+	view.blocks.material_id[index] = material_id
+}
+
+terrain_density_local_water_material_conflicts_neighbor :: proc(
+	view: ^world_async.ChunkVoxelView,
+	local_x, local_y, local_z: i32,
+	material_id: world_async.BlockMaterialID,
+) -> bool {
+	neighbor_offsets := [?]world_async.BlockCoord {
+		{x = 1, y = 0, z = 0},
+		{x = -1, y = 0, z = 0},
+		{x = 0, y = 0, z = 1},
+		{x = 0, y = 0, z = -1},
+		{x = 0, y = 1, z = 0},
+		{x = 0, y = -1, z = 0},
+	}
+	for offset in neighbor_offsets {
+		x := local_x + offset.x
+		y := local_y + offset.y
+		z := local_z + offset.z
+		if !chunk_block_coord_is_inside(x, y, z) {
+			continue
+		}
+		index := chunk_block_index(u32(x), u32(y), u32(z))
+		if view.blocks.occupancy[index] != .Solid {
+			continue
+		}
+		if terrain_material_palette_index(view.blocks.material_id[index]) != TERRAIN_WATER_MAT_ID {
+			continue
+		}
+		if view.blocks.material_id[index] != material_id {
+			return true
+		}
+	}
+	return false
+}
+
+terrain_density_local_water_column_has_support :: proc(
+	view: ^world_async.ChunkVoxelView,
+	local_x, local_y, local_z: i32,
+	max_depth: i32,
+) -> bool {
+	depth := math.max(max_depth, 1)
+	for y := local_y - 1; y >= math.max(local_y - depth, 0); y -= 1 {
+		index := chunk_block_index(u32(local_x), u32(y), u32(local_z))
+		if view.blocks.occupancy[index] == .Solid {
+			return true
+		}
+	}
+	return false
+}
+
+terrain_density_fill_local_supported_water_block :: proc(
+	view: ^world_async.ChunkVoxelView,
+	local_x, local_y, local_z: i32,
+	material_id: world_async.BlockMaterialID,
+	support_depth: i32,
+) {
+	if !chunk_block_coord_is_inside(local_x, local_y, local_z) {
+		return
+	}
+	index := chunk_block_index(u32(local_x), u32(local_y), u32(local_z))
+	if view.blocks.occupancy[index] != .Empty {
+		return
+	}
+	if terrain_density_local_water_material_conflicts_neighbor(
+		view,
+		local_x,
+		local_y,
+		local_z,
+		material_id,
+	) {
+		return
+	}
+	if !terrain_density_local_water_column_has_support(
+		view,
+		local_x,
+		local_y,
+		local_z,
+		support_depth,
+	) {
+		return
+	}
+	terrain_density_fill_local_water_block(view, local_x, local_y, local_z, material_id)
 }
 
 terrain_density_cave_vertical_support :: proc(world_y: f32) -> f32 {

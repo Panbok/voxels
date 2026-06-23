@@ -1399,11 +1399,259 @@ when ODIN_DEBUG {
 		temp := mem.begin_arena_temp_memory(transient_arena)
 		defer mem.end_arena_temp_memory(temp)
 		allocator := mem.arena_allocator(transient_arena)
-		scratch := terrain_binary_greedy_scratch_alloc(allocator)
+		scratch := terrain_binary_greedy_scratch_alloc(transient_arena)
+		decoration_contract_key := terrain_generation_key_make(0)
 
 		view := world_async.ChunkVoxelView {
 			blocks = make(#soa[]world_async.ChunkVoxelViewElement, CHUNK_BLOCK_COUNT, allocator),
 		}
+
+		chunk_voxel_view_fill_empty(&view)
+		anchoring_node := biomes.CaveNetworkNode {
+			id            = biomes.FeatureID(0xdec0a11),
+			x             = 32,
+			y             = 32,
+			z             = 32,
+			radius_blocks = 12,
+			biome_id      = .Crystal_Geode_Network,
+			major_region  = true,
+		}
+		floating_written := terrain_decoration_cave_node_apply(
+			&view,
+			anchoring_node,
+			.Cave_Ruin_Hall,
+			{},
+		)
+		log.assert(
+			floating_written == 0,
+			"cave decoration without a discovered floor must not stamp floating structures",
+		)
+		for z := i32(20); z <= 44; z += 1 {
+			for x := i32(20); x <= 44; x += 1 {
+				index := chunk_block_index(u32(x), 16, u32(z))
+				view.blocks.occupancy[index] = .Solid
+				view.blocks.material_id[index] = world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+			}
+		}
+		grounded_written := terrain_decoration_cave_node_apply(
+			&view,
+			anchoring_node,
+			.Cave_Ruin_Hall,
+			{},
+		)
+		ground_contact_count: u32
+		for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+			for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+				index := chunk_block_index(u32(x), 17, u32(z))
+				if view.blocks.occupancy[index] == .Solid {
+					ground_contact_count += 1
+				}
+			}
+		}
+		log.assert(
+			grounded_written > 0 && ground_contact_count > 0,
+			"cave decoration with a valid floor should stamp grounded contact blocks",
+		)
+
+		chunk_voxel_view_fill_empty(&view)
+		cave_water_material := terrain_block_material_id_from_biome_material(.Swamp_Water)
+		terrain_density_fill_water_ellipsoid(&view, {}, cave_water_material, 32, 32, 32, 5, 2, 5)
+		unsupported_cave_water_count: u32
+		for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+			for y := i32(0); y < CHUNK_BLOCK_LENGTH; y += 1 {
+				for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+					index := chunk_block_index(u32(x), u32(y), u32(z))
+					if terrain_material_palette_index(view.blocks.material_id[index]) ==
+					   TERRAIN_WATER_MAT_ID {
+						unsupported_cave_water_count += 1
+					}
+				}
+			}
+		}
+		log.assert(
+			unsupported_cave_water_count == 0,
+			"cave water ellipsoids without nearby support must not create floating water",
+		)
+
+		for z := i32(25); z <= 39; z += 1 {
+			for x := i32(25); x <= 39; x += 1 {
+				index := chunk_block_index(u32(x), 29, u32(z))
+				view.blocks.occupancy[index] = .Solid
+				view.blocks.material_id[index] = world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+			}
+		}
+		terrain_density_fill_water_ellipsoid(&view, {}, cave_water_material, 32, 32, 32, 5, 2, 5)
+		supported_cave_water_count: u32
+		for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+			for y := i32(0); y < CHUNK_BLOCK_LENGTH; y += 1 {
+				for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+					index := chunk_block_index(u32(x), u32(y), u32(z))
+					if terrain_material_palette_index(view.blocks.material_id[index]) ==
+					   TERRAIN_WATER_MAT_ID {
+						supported_cave_water_count += 1
+					}
+				}
+			}
+		}
+		log.assert(
+			supported_cave_water_count > 0,
+			"cave water ellipsoids should still fill floor-backed basin pockets",
+		)
+
+		surface_columns: [CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH]TerrainBiomeColumn
+		surface_feature := biomes.DecorationFeature {
+			id               = biomes.FeatureID(0x51a7face),
+			x                = 32,
+			z                = 32,
+			biome_id         = .Temperate_Hills,
+			family_id        = .Ruin_Hamlet,
+			height_blocks    = 5,
+			radius_blocks    = 10,
+			material_variant = 0,
+		}
+		for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+			for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+				surface_columns[x + z * CHUNK_BLOCK_LENGTH] = {
+					surface_height        = 16,
+					surface_height_blocks = 16,
+					surface_material_id   = world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID),
+				}
+			}
+		}
+
+		chunk_voxel_view_fill_empty(&view)
+		for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+			for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+				index := chunk_block_index(u32(x), 16, u32(z))
+				view.blocks.occupancy[index] = .Solid
+				view.blocks.material_id[index] = world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID)
+			}
+		}
+		dry_flat_result := terrain_decoration_surface_feature_apply(
+			&view,
+			decoration_contract_key,
+			surface_feature,
+			{},
+			surface_columns[:],
+		)
+		log.assert(
+			dry_flat_result.blocks_written > 800,
+			"surface village should stamp a substantial multi-building cluster on a flat dry footprint",
+		)
+
+		chunk_voxel_view_fill_empty(&view)
+		for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+			for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+				surface_columns[x + z * CHUNK_BLOCK_LENGTH].water_fill_active = true
+				surface_columns[x + z * CHUNK_BLOCK_LENGTH].water_level_blocks = 32
+				index := chunk_block_index(u32(x), 16, u32(z))
+				view.blocks.occupancy[index] = .Solid
+				view.blocks.material_id[index] = world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID)
+			}
+		}
+		water_result := terrain_decoration_surface_feature_apply(
+			&view,
+			decoration_contract_key,
+			surface_feature,
+			{},
+			surface_columns[:],
+		)
+		log.assert(
+			water_result.blocks_written == 0,
+			"surface structures must reject water-covered footprints",
+		)
+
+		chunk_voxel_view_fill_empty(&view)
+		for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+			for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+				surface_columns[x + z * CHUNK_BLOCK_LENGTH].water_fill_active = false
+				surface_columns[x + z * CHUNK_BLOCK_LENGTH].water_level_blocks = 0
+				surface_columns[x + z * CHUNK_BLOCK_LENGTH].surface_height = 16
+				surface_columns[x + z * CHUNK_BLOCK_LENGTH].surface_height_blocks = 16
+				index := chunk_block_index(u32(x), 16, u32(z))
+				view.blocks.occupancy[index] = .Solid
+				view.blocks.material_id[index] = world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID)
+			}
+		}
+		for slope_z := i32(12); slope_z <= 52; slope_z += 2 {
+			for slope_x := i32(12); slope_x <= 52; slope_x += 2 {
+				surface_columns[slope_x + slope_z * CHUNK_BLOCK_LENGTH].surface_height = 19
+				surface_columns[slope_x + slope_z * CHUNK_BLOCK_LENGTH].surface_height_blocks = 19
+				slope_index := chunk_block_index(u32(slope_x), 19, u32(slope_z))
+				view.blocks.occupancy[slope_index] = .Solid
+				view.blocks.material_id[slope_index] = world_async.BlockMaterialID(
+					TERRAIN_GRASS_MAT_ID,
+				)
+			}
+		}
+		slope_result := terrain_decoration_surface_feature_apply(
+			&view,
+			decoration_contract_key,
+			surface_feature,
+			{},
+			surface_columns[:],
+		)
+		log.assert(
+			slope_result.blocks_written == 0,
+			"surface structures must reject uneven footprints",
+		)
+
+		for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+			for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+				height := i32(12 + (x + z) % 7)
+				surface_columns[x + z * CHUNK_BLOCK_LENGTH] = {
+					surface_height        = height,
+					surface_height_blocks = f32(height),
+					dominant_biome_id     = .Temperate_Hills,
+					surface_material_id   = world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID),
+				}
+			}
+		}
+		terrain_decoration_surface_structure_pad_apply(
+			decoration_contract_key,
+			surface_feature,
+			{},
+			surface_columns[:],
+		)
+		pad_min := i32(100000)
+		pad_max := i32(-100000)
+		for z := i32(24); z <= 40; z += 1 {
+			for x := i32(24); x <= 40; x += 1 {
+				column := surface_columns[x + z * CHUNK_BLOCK_LENGTH]
+				pad_min = math.min(pad_min, column.surface_height)
+				pad_max = math.max(pad_max, column.surface_height)
+			}
+		}
+		log.assertf(
+			pad_max - pad_min <= 1,
+			"structure pad should flatten the core footprint, min=%d max=%d",
+			pad_min,
+			pad_max,
+		)
+
+		reservations: [TERRAIN_DECORATION_SURFACE_STRUCTURE_RESERVATION_CAPACITY]TerrainDecorationSurfaceReservation
+		reservation_count: u32
+		terrain_decoration_surface_reservation_add(
+			reservations[:],
+			&reservation_count,
+			surface_feature,
+		)
+		tree_feature := biomes.DecorationFeature {
+			id                  = biomes.FeatureID(0x7aee),
+			x                   = 34,
+			z                   = 34,
+			biome_id            = .Temperate_Hills,
+			family_id           = .Baseline_Tree,
+			radius_blocks       = 8,
+			stand_radius_blocks = 12,
+		}
+		log.assert(
+			terrain_decoration_surface_feature_overlaps_reservations(
+				tree_feature,
+				reservations[:reservation_count],
+			),
+			"tree stands must be reserved out of structure footprints",
+		)
 
 		packed_fields := terrain_unpack_vertex(terrain_pack_vertex(2, 3, 4, 5, 6))
 		log.assertf(
@@ -1776,7 +2024,7 @@ when ODIN_DEBUG {
 					boundary_policy = .Treat_Out_Of_Chunk_As_Empty,
 				},
 				allocator,
-				allocator,
+				transient_arena,
 			)
 			log.assertf(
 				greedy_single_output.face_count == 6,
@@ -1802,7 +2050,7 @@ when ODIN_DEBUG {
 					boundary_policy = .Treat_Out_Of_Chunk_As_Empty,
 				},
 				allocator,
-				allocator,
+				transient_arena,
 			)
 			log.assertf(
 				subchunk_single_output.face_count == 6,
@@ -1818,7 +2066,7 @@ when ODIN_DEBUG {
 					boundary_policy = .Treat_Out_Of_Chunk_As_Empty,
 				},
 				allocator,
-				allocator,
+				transient_arena,
 			)
 			log.assertf(
 				subchunk_empty_output.face_count == 0,
@@ -1941,7 +2189,7 @@ when ODIN_DEBUG {
 				boundary_policy = .Sample_Neighbor_Snapshots,
 			},
 			allocator,
-			allocator,
+			transient_arena,
 		)
 		log.assertf(
 			left_neighbor_output.face_count == 5,
@@ -1960,7 +2208,7 @@ when ODIN_DEBUG {
 				boundary_policy = .Sample_Neighbor_Snapshots,
 			},
 			allocator,
-			allocator,
+			transient_arena,
 		)
 		log.assertf(
 			right_neighbor_output.face_count == 5,
@@ -1979,7 +2227,7 @@ when ODIN_DEBUG {
 				boundary_policy = .Sample_Neighbor_Snapshots,
 			},
 			allocator,
-			allocator,
+			transient_arena,
 		)
 		log.assertf(
 			missing_neighbor_output.face_count == 5,
@@ -2001,7 +2249,7 @@ when ODIN_DEBUG {
 					boundary_policy = .Sample_Neighbor_Snapshots,
 				},
 				allocator,
-				allocator,
+				transient_arena,
 			)
 			log.assertf(
 				left_greedy_neighbor_output.face_count == 5,
@@ -2020,7 +2268,7 @@ when ODIN_DEBUG {
 					boundary_policy = .Sample_Neighbor_Snapshots,
 				},
 				allocator,
-				allocator,
+				transient_arena,
 			)
 			log.assertf(
 				right_greedy_neighbor_output.face_count == 5,
@@ -2158,7 +2406,10 @@ when ODIN_DEBUG {
 		heightfield_seed := u32(0)
 		heightfield_key := terrain_generation_key_make(heightfield_seed)
 
-		heightfield_coord := world_async.ChunkCoord{0, 0, 0}
+		heightfield_sample_column := terrain_biome_column_sample_direct(heightfield_key, 0, 0)
+		heightfield_coord := chunk_coord_from_block_coord(
+			world_async.BlockCoord{x = 0, y = heightfield_sample_column.surface_height, z = 0},
+		)
 		heightfield_origin := chunk_origin_from_coord(heightfield_coord)
 		terrain_heightfield_voxel_view_fill(&view, heightfield_coord, heightfield_seed)
 		heightfield_solid_count: u32
@@ -2179,7 +2430,9 @@ when ODIN_DEBUG {
 						surface_material_id := terrain_material_palette_index(
 							view.blocks.material_id[surface_index],
 						)
-						expected_surface_material_id := u32(u8(column.surface_material_id))
+						expected_surface_material_id := terrain_material_palette_index(
+							column.surface_material_id,
+						)
 						if surface_material_id == expected_surface_material_id {
 							heightfield_surface_material_column_count += 1
 						}
@@ -2204,7 +2457,11 @@ when ODIN_DEBUG {
 			"heightfield chunk: expected at least one uncarved biome surface material",
 		)
 
-		lower_heightfield_coord := world_async.ChunkCoord{0, -1, 0}
+		lower_heightfield_coord := world_async.ChunkCoord {
+			heightfield_coord.x,
+			heightfield_coord.y - 1,
+			heightfield_coord.z,
+		}
 		terrain_heightfield_voxel_view_fill(&view, lower_heightfield_coord, heightfield_seed)
 		lower_solid_count: u32
 		for z in 0 ..< CHUNK_BLOCK_LENGTH {
@@ -2239,34 +2496,47 @@ when ODIN_DEBUG {
 			z = 0,
 		}
 		log.assert(
-			terrain_cave_wall_material_id_for_neighbor(.Fungal_Vaults, cave_floor_offset) ==
-			world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID),
+			terrain_material_palette_index(
+				terrain_cave_wall_material_id_for_neighbor(.Fungal_Vaults, cave_floor_offset),
+			) ==
+			TERRAIN_GRASS_MAT_ID,
 			"fungal cave profile should use mossy floor material",
 		)
 		log.assert(
-			terrain_cave_wall_material_id_for_neighbor(.Fungal_Vaults, cave_ceiling_offset) ==
-			world_async.BlockMaterialID(TERRAIN_DIRT_MAT_ID),
+			terrain_material_palette_index(
+				terrain_cave_wall_material_id_for_neighbor(.Fungal_Vaults, cave_ceiling_offset),
+			) ==
+			TERRAIN_DIRT_MAT_ID,
 			"fungal cave profile should use earth ceiling material",
 		)
 		log.assert(
-			terrain_cave_wall_material_id_for_neighbor(
-				.Crystal_Geode_Network,
-				cave_floor_offset,
+			terrain_material_palette_index(
+				terrain_cave_wall_material_id_for_neighbor(
+					.Crystal_Geode_Network,
+					cave_floor_offset,
+				),
 			) ==
-			world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID),
+			TERRAIN_STONE_MAT_ID,
 			"crystal cave profile should use stone floor material",
 		)
 		log.assert(
-			terrain_cave_wall_material_id_for_neighbor(
-				.Crystal_Geode_Network,
-				cave_ceiling_offset,
+			terrain_material_palette_index(
+				terrain_cave_wall_material_id_for_neighbor(
+					.Crystal_Geode_Network,
+					cave_ceiling_offset,
+				),
 			) ==
-			world_async.BlockMaterialID(TERRAIN_CRYSTAL_MAT_ID),
+			TERRAIN_CRYSTAL_MAT_ID,
 			"crystal cave profile should use crystal ceiling material",
 		)
 		log.assert(
-			terrain_cave_wall_material_id_for_neighbor(.Buried_Aquifer_Caves, cave_wall_offset) ==
-			world_async.BlockMaterialID(TERRAIN_AQUIFER_WALL_MAT_ID),
+			terrain_material_palette_index(
+				terrain_cave_wall_material_id_for_neighbor(
+					.Buried_Aquifer_Caves,
+					cave_wall_offset,
+				),
+			) ==
+			TERRAIN_AQUIFER_WALL_MAT_ID,
 			"aquifer cave profile should use distinct side wall material",
 		)
 
@@ -2686,6 +2956,42 @@ when ODIN_DEBUG {
 			view.blocks.occupancy[undercut_deep_index] == .Empty,
 			"surface water volume fill should not flood exposed cavities below the surface band",
 		)
+
+		chunk_voxel_view_fill_empty(&view)
+		for z in 0 ..< CHUNK_BLOCK_LENGTH {
+			for x in 0 ..< CHUNK_BLOCK_LENGTH {
+				test_columns[x + z * CHUNK_BLOCK_LENGTH] = {
+					surface_height        = 16,
+					surface_height_blocks = 16,
+				}
+				index = chunk_block_index(u32(x), 16, u32(z))
+				view.blocks.occupancy[index] = .Solid
+				view.blocks.material_id[index] = world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+			}
+		}
+		normal_water_x := i32(20)
+		lava_water_x := i32(21)
+		mixed_water_z := i32(20)
+		normal_water_column := normal_water_x + mixed_water_z * CHUNK_BLOCK_LENGTH
+		lava_water_column := lava_water_x + mixed_water_z * CHUNK_BLOCK_LENGTH
+		test_columns[normal_water_column].dominant_biome_id = .Temperate_Hills
+		test_columns[normal_water_column].water_biome_id = .Temperate_Hills
+		test_columns[normal_water_column].water_fill_active = true
+		test_columns[normal_water_column].water_level_blocks = 24
+		test_columns[lava_water_column].dominant_biome_id = .Emberglass_Badlands
+		test_columns[lava_water_column].water_biome_id = .Emberglass_Badlands
+		test_columns[lava_water_column].water_fill_active = true
+		test_columns[lava_water_column].water_level_blocks = 24
+		terrain_water_volume_fill(&view, world_async.BlockCoord{}, test_columns[:])
+		normal_border_index := chunk_block_index(u32(normal_water_x), 24, u32(mixed_water_z))
+		lava_border_index := chunk_block_index(u32(lava_water_x), 24, u32(mixed_water_z))
+		log.assert(
+			terrain_material_palette_index(view.blocks.material_id[normal_border_index]) !=
+				TERRAIN_WATER_MAT_ID &&
+			terrain_material_palette_index(view.blocks.material_id[lava_border_index]) !=
+				TERRAIN_WATER_MAT_ID,
+			"different surface water materials must not touch without a terrain separator",
+		)
 		debug_terrain_generation_quality_contract_checks_run(heightfield_key)
 
 		terrain_heightfield_voxel_view_fill(&view, heightfield_coord, heightfield_seed)
@@ -2771,7 +3077,7 @@ when ODIN_DEBUG {
 		{
 			temp := mem.begin_arena_temp_memory(transient_arena)
 			allocator := mem.arena_allocator(transient_arena)
-			scratch := terrain_binary_greedy_scratch_alloc(allocator)
+			scratch := terrain_binary_greedy_scratch_alloc(transient_arena)
 			seed_index := chunk_block_index(8, 8, 8)
 			left.block_storage.voxel_view.blocks.occupancy[seed_index] = .Solid
 			left.block_storage.voxel_view.blocks.material_id[seed_index] =

@@ -968,6 +968,34 @@ biome_profile_for :: proc(biome_id: BiomeID) -> BiomeProfile {
 			cold_affinity_weight = 0.00,
 			subterranean_pressure_weight = 0.05,
 		}
+	case .Old_Growth_Forest:
+		return {
+			biome_id = biome_id,
+			base_height_blocks = 34,
+			continental_height_blocks = 46,
+			elevation_height_blocks = 28,
+			erosion_height_blocks = -12,
+			relief_height_blocks = 18,
+			relief_amplitude_blocks = 14,
+			ruggedness_response = 0.48,
+			cliff_bias = 0.06,
+			terrace_strength = 0.04,
+			cave_openness = 0.24,
+			surface_layer_depth_blocks = 6,
+			local_detail_amplitude_blocks = 4,
+			shoreline_width_blocks = 18,
+			shoreline_slope = 0.32,
+			underwater_floor_depression_blocks = 2,
+			cliff_coast_bias = 0.04,
+			swamp_shallowness = 0.18,
+			seabed_roughness_blocks = 1,
+			fantasy_affinity_bias = 0.08,
+			magic_affinity_weight = 0.22,
+			corruption_affinity_weight = -0.20,
+			heat_affinity_weight = -0.05,
+			cold_affinity_weight = 0.04,
+			subterranean_pressure_weight = 0.12,
+		}
 	case .Basalt_Spire_Highlands:
 		return {
 			biome_id = biome_id,
@@ -995,6 +1023,34 @@ biome_profile_for :: proc(biome_id: BiomeID) -> BiomeProfile {
 			heat_affinity_weight = 0.55,
 			cold_affinity_weight = -0.20,
 			subterranean_pressure_weight = 0.10,
+		}
+	case .Emberglass_Badlands:
+		return {
+			biome_id = biome_id,
+			base_height_blocks = 46,
+			continental_height_blocks = 58,
+			elevation_height_blocks = 48,
+			erosion_height_blocks = 6,
+			relief_height_blocks = 42,
+			relief_amplitude_blocks = 34,
+			ruggedness_response = 1.64,
+			cliff_bias = 0.62,
+			terrace_strength = 0.26,
+			cave_openness = 0.30,
+			surface_layer_depth_blocks = 2,
+			local_detail_amplitude_blocks = 13,
+			shoreline_width_blocks = 6,
+			shoreline_slope = 0.80,
+			underwater_floor_depression_blocks = 4,
+			cliff_coast_bias = 0.42,
+			swamp_shallowness = 0.00,
+			seabed_roughness_blocks = 5,
+			fantasy_affinity_bias = 0.18,
+			magic_affinity_weight = 0.10,
+			corruption_affinity_weight = 0.10,
+			heat_affinity_weight = 0.76,
+			cold_affinity_weight = -0.28,
+			subterranean_pressure_weight = 0.14,
 		}
 	case .Wet_Lowland_Marsh:
 		return {
@@ -1051,6 +1107,34 @@ biome_profile_for :: proc(biome_id: BiomeID) -> BiomeProfile {
 			heat_affinity_weight = 0.10,
 			cold_affinity_weight = -0.05,
 			subterranean_pressure_weight = 0.16,
+		}
+	case .Corrupted_Fen:
+		return {
+			biome_id = biome_id,
+			base_height_blocks = 18,
+			continental_height_blocks = 22,
+			elevation_height_blocks = 14,
+			erosion_height_blocks = -8,
+			relief_height_blocks = 9,
+			relief_amplitude_blocks = 8,
+			ruggedness_response = 0.52,
+			cliff_bias = 0.16,
+			terrace_strength = 0.14,
+			cave_openness = 0.36,
+			surface_layer_depth_blocks = 4,
+			local_detail_amplitude_blocks = 5,
+			shoreline_width_blocks = 24,
+			shoreline_slope = 0.22,
+			underwater_floor_depression_blocks = 2,
+			cliff_coast_bias = 0.08,
+			swamp_shallowness = 0.74,
+			seabed_roughness_blocks = 2,
+			fantasy_affinity_bias = 0.20,
+			magic_affinity_weight = 0.18,
+			corruption_affinity_weight = 0.72,
+			heat_affinity_weight = 0.04,
+			cold_affinity_weight = -0.02,
+			subterranean_pressure_weight = 0.22,
 		}
 	case .Fungal_Vaults:
 		return {
@@ -1157,6 +1241,19 @@ surface_morphology_profile_for_biome :: proc(biome_id: BiomeID) -> SurfaceMorpho
 			support_bias = 0.90,
 			heightfield_shape_strength = 0.38,
 		}
+	case .Old_Growth_Forest:
+		return {
+			strength = 0.62,
+			band_above_blocks = 18,
+			band_below_blocks = 11,
+			warp_blocks = 7,
+			cell_blocks = 46,
+			shelf_strength = 0.32,
+			overhang_strength = 0.10,
+			spire_strength = 0.12,
+			support_bias = 0.92,
+			heightfield_shape_strength = 0.30,
+		}
 	case .Basalt_Spire_Highlands:
 		return {
 			strength = 1.00,
@@ -1169,6 +1266,19 @@ surface_morphology_profile_for_biome :: proc(biome_id: BiomeID) -> SurfaceMorpho
 			spire_strength = 1.22,
 			support_bias = 0.58,
 			heightfield_shape_strength = 1.35,
+		}
+	case .Emberglass_Badlands:
+		return {
+			strength = 0.94,
+			band_above_blocks = 34,
+			band_below_blocks = 12,
+			warp_blocks = 12,
+			cell_blocks = 24,
+			shelf_strength = 0.82,
+			overhang_strength = 0.24,
+			spire_strength = 0.88,
+			support_bias = 0.60,
+			heightfield_shape_strength = 1.12,
 		}
 	case .Wet_Lowland_Marsh:
 		return {
@@ -1195,6 +1305,19 @@ surface_morphology_profile_for_biome :: proc(biome_id: BiomeID) -> SurfaceMorpho
 			spire_strength = 0.62,
 			support_bias = 0.46,
 			heightfield_shape_strength = 1.08,
+		}
+	case .Corrupted_Fen:
+		return {
+			strength = 0.52,
+			band_above_blocks = 12,
+			band_below_blocks = 10,
+			warp_blocks = 6,
+			cell_blocks = 30,
+			shelf_strength = 0.48,
+			overhang_strength = 0.16,
+			spire_strength = 0.18,
+			support_bias = 0.78,
+			heightfield_shape_strength = 0.42,
 		}
 	case .Fungal_Vaults:
 		return {
@@ -2072,12 +2195,18 @@ biome_surface_landform_radius_range :: proc(biome_id: BiomeID) -> (min_radius, m
 	switch biome_id {
 	case .Temperate_Hills:
 		return 180, 360
+	case .Old_Growth_Forest:
+		return 220, 460
 	case .Basalt_Spire_Highlands:
 		return 110, 240
+	case .Emberglass_Badlands:
+		return 120, 260
 	case .Wet_Lowland_Marsh:
 		return 210, 430
 	case .Corrupted_Ash_Forest:
 		return 120, 260
+	case .Corrupted_Fen:
+		return 170, 340
 	case .Fungal_Vaults, .Crystal_Geode_Network, .Buried_Aquifer_Caves:
 		return 130, 270
 	}
@@ -2087,7 +2216,7 @@ biome_surface_landform_radius_range :: proc(biome_id: BiomeID) -> (min_radius, m
 
 biome_surface_landform_uses_spiral :: proc(biome_id: BiomeID) -> bool {
 	#partial switch biome_id {
-	case .Basalt_Spire_Highlands, .Corrupted_Ash_Forest:
+	case .Basalt_Spire_Highlands, .Emberglass_Badlands, .Corrupted_Ash_Forest:
 		return true
 	}
 	return false
@@ -2097,12 +2226,18 @@ biome_surface_landform_chain_strength :: proc(biome_id: BiomeID, fantasy_bias: f
 	switch biome_id {
 	case .Temperate_Hills:
 		return 0.18 + fantasy_bias * 0.10
+	case .Old_Growth_Forest:
+		return 0.26 + fantasy_bias * 0.12
 	case .Basalt_Spire_Highlands:
 		return 1.00
+	case .Emberglass_Badlands:
+		return 0.92
 	case .Wet_Lowland_Marsh:
 		return 0.14
 	case .Corrupted_Ash_Forest:
 		return math.clamp(0.84 + fantasy_bias * 0.18, f32(0), f32(1))
+	case .Corrupted_Fen:
+		return math.clamp(0.46 + fantasy_bias * 0.16, f32(0), f32(0.78))
 	case .Fungal_Vaults, .Crystal_Geode_Network:
 		return 0.42 + fantasy_bias * 0.14
 	case .Buried_Aquifer_Caves:
@@ -2142,6 +2277,13 @@ biome_surface_landform_contribution :: proc(
 		cliff_boost = shoulder * 0.035 + ring * 0.025 + chain_ridge * 0.018
 		terrace_boost = ring * 0.020
 		relief_boost = mountain_amp * 0.035 * (shoulder + ring + chain_ridge * 0.70)
+	case .Old_Growth_Forest:
+		height_delta =
+			mountain_amp * (core * 0.36 + shoulder * 0.34 + ring * 0.18 + chain_ridge * 0.28) -
+			valley_amp * (basin * (0.34 + erosion_bias * 0.26) + chain_valley * 0.24)
+		cliff_boost = shoulder * 0.020 + ring * 0.018 + chain_ridge * 0.020
+		terrace_boost = ring * 0.016
+		relief_boost = mountain_amp * 0.026 * (shoulder + ring + chain_ridge)
 	case .Basalt_Spire_Highlands:
 		height_delta =
 			mountain_amp *
@@ -2168,6 +2310,31 @@ biome_surface_landform_contribution :: proc(
 		relief_boost =
 			mountain_amp * 0.105 * (shoulder + ring + chain_ridge + spiral) +
 			mountain_amp * 0.045 * (summit + moat + chain_valley + spiral_trench)
+	case .Emberglass_Badlands:
+		height_delta =
+			mountain_amp *
+				(summit * 0.88 +
+						core * 0.16 +
+						shoulder * 0.42 +
+						ring * 0.72 +
+						chain_ridge * 1.02 +
+						spiral * 0.82) -
+			valley_amp *
+				(basin * (0.62 + erosion_bias * 0.28) +
+						moat * 0.38 +
+						chain_valley * (0.66 + rugged_bias * 0.18) +
+						spiral_trench * 0.38)
+		cliff_boost =
+			shoulder * 0.052 +
+			moat * 0.070 +
+			ring * 0.092 +
+			chain_ridge * 0.112 +
+			chain_valley * 0.078 +
+			spiral * 0.082
+		terrace_boost = shoulder * 0.024 + ring * 0.050 + chain_ridge * 0.034
+		relief_boost =
+			mountain_amp * 0.086 * (shoulder + ring + chain_ridge + spiral) +
+			mountain_amp * 0.034 * (summit + moat + chain_valley + spiral_trench)
 	case .Wet_Lowland_Marsh:
 		height_delta =
 			mountain_amp * (shoulder * 0.18 + ring * 0.20) -
@@ -2200,6 +2367,16 @@ biome_surface_landform_contribution :: proc(
 		relief_boost =
 			mountain_amp * 0.070 * (shoulder + ring + chain_ridge + spiral) +
 			mountain_amp * 0.030 * (summit + moat + chain_valley + spiral_trench)
+	case .Corrupted_Fen:
+		height_delta =
+			mountain_amp * (core * 0.20 + shoulder * 0.28 + ring * 0.34 + chain_ridge * 0.48) -
+			valley_amp *
+				(basin * (0.62 + erosion_bias * 0.30) +
+						moat * 0.20 +
+						chain_valley * (0.46 + fantasy_bias * 0.12))
+		cliff_boost = shoulder * 0.030 + ring * 0.040 + chain_ridge * 0.054
+		terrace_boost = ring * 0.030 + chain_ridge * 0.018
+		relief_boost = mountain_amp * 0.040 * (shoulder + ring + chain_ridge)
 	case .Fungal_Vaults, .Crystal_Geode_Network, .Buried_Aquifer_Caves:
 		height_delta =
 			mountain_amp *

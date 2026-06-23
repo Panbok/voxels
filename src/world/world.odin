@@ -713,6 +713,43 @@ when TERRAIN_GENERATION_PROFILE_PHASES {
 			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Crystal_Growth_Cluster)],
 			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Crystal_Growth_Cluster)],
 		)
+		log.infof(
+			"TERRAIN_GENERATION_PROFILE_DECORATION_FAMILY_EXTRA phase=%s fern=%d/%d/%d bramble=%d/%d/%d root=%d/%d/%d coral=%d/%d/%d ruin=%d/%d/%d hamlet=%d/%d/%d tower=%d/%d/%d fort=%d/%d/%d cave_hall=%d/%d/%d basalt=%d/%d/%d lava=%d/%d/%d",
+			phase,
+			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Fern_Thicket)],
+			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Fern_Thicket)],
+			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Fern_Thicket)],
+			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Ash_Bramble)],
+			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Ash_Bramble)],
+			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Ash_Bramble)],
+			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Root_Cluster)],
+			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Root_Cluster)],
+			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Root_Cluster)],
+			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Coral_DLA_Cluster)],
+			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Coral_DLA_Cluster)],
+			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Coral_DLA_Cluster)],
+			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Ruin_Pillar_Set)],
+			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Ruin_Pillar_Set)],
+			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Ruin_Pillar_Set)],
+			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Ruin_Hamlet)],
+			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Ruin_Hamlet)],
+			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Ruin_Hamlet)],
+			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Watchtower_Ruin)],
+			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Watchtower_Ruin)],
+			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Watchtower_Ruin)],
+			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Palisade_Fort)],
+			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Palisade_Fort)],
+			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Palisade_Fort)],
+			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Cave_Ruin_Hall)],
+			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Cave_Ruin_Hall)],
+			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Cave_Ruin_Hall)],
+			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Basalt_Column_Cluster)],
+			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Basalt_Column_Cluster)],
+			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Basalt_Column_Cluster)],
+			stats.decoration_family_candidates[u32(biomes.DecorationFamilyID.Lava_Vent)],
+			stats.decoration_family_accepted[u32(biomes.DecorationFamilyID.Lava_Vent)],
+			stats.decoration_family_blocks[u32(biomes.DecorationFamilyID.Lava_Vent)],
+		)
 	}
 }
 
@@ -1402,15 +1439,35 @@ TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG :: u8(0x08)
 TERRAIN_CAVE_NETWORK_DEBUG_MATERIAL_FLAG :: u8(0x10)
 TERRAIN_DECORATION_DEBUG_MATERIAL_FLAG ::
 	TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG | TERRAIN_CAVE_NETWORK_DEBUG_MATERIAL_FLAG
+TERRAIN_MATERIAL_COLOR_VARIANT_SHIFT :: u8(5)
+TERRAIN_MATERIAL_COLOR_VARIANT_COUNT :: u32(4)
+TERRAIN_MATERIAL_COLOR_VARIANT_MASK :: u8(0x60)
 TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_HYDROLOGY :: u32(0x1)
 TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_CAVE_NETWORK :: u32(0x2)
 TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_COUNT :: u32(4)
 TERRAIN_MATERIAL_PALETTE_COUNT :: 8
-TERRAIN_MATERIAL_FACE_VARIANT_COUNT :: 32
+TERRAIN_MATERIAL_COLOR_COUNT ::
+	TERRAIN_MATERIAL_PALETTE_COUNT * TERRAIN_MATERIAL_COLOR_VARIANT_COUNT
+TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS :: #config(TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS, false)
+TERRAIN_MATERIAL_FACE_DEBUG_VARIANTS_ENABLED :: ODIN_DEBUG || TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS
+when TERRAIN_MATERIAL_FACE_DEBUG_VARIANTS_ENABLED {
+	TERRAIN_MATERIAL_FACE_VARIANT_COUNT ::
+		TERRAIN_MATERIAL_COLOR_COUNT * TERRAIN_DEBUG_MATERIAL_FLAG_COMBO_COUNT
+} else {
+	TERRAIN_MATERIAL_FACE_VARIANT_COUNT :: TERRAIN_MATERIAL_COLOR_COUNT
+}
+TERRAIN_MATERIAL_FACE_VARIANT_MASK_WORD_COUNT :: (TERRAIN_MATERIAL_FACE_VARIANT_COUNT + 63) / 64
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == 8)
 #assert(TERRAIN_MATERIAL_PALETTE_COUNT == world_async.TERRAIN_MATERIAL_PALETTE_COUNT)
-#assert(TERRAIN_MATERIAL_FACE_VARIANT_COUNT == 32)
-TERRAIN_GENERATOR_VERSION :: #config(TERRAIN_GENERATOR_VERSION, u32(11))
+#assert(TERRAIN_MATERIAL_COLOR_COUNT == 32)
+when TERRAIN_MATERIAL_FACE_DEBUG_VARIANTS_ENABLED {
+	#assert(TERRAIN_MATERIAL_FACE_VARIANT_COUNT == 128)
+	#assert(TERRAIN_MATERIAL_FACE_VARIANT_MASK_WORD_COUNT == 2)
+} else {
+	#assert(TERRAIN_MATERIAL_FACE_VARIANT_COUNT == 32)
+	#assert(TERRAIN_MATERIAL_FACE_VARIANT_MASK_WORD_COUNT == 1)
+}
+TERRAIN_GENERATOR_VERSION :: #config(TERRAIN_GENERATOR_VERSION, u32(12))
 TERRAIN_GRASS_CAP_BLOCK_DEPTH :: 4
 TERRAIN_DIRT_LAYER_BLOCK_DEPTH :: 4
 TERRAIN_SURFACE_MATERIAL_BLEND_SALT :: u64(0x475c91d2e03af86b)
@@ -1451,7 +1508,6 @@ TERRAIN_CAVE_ROOM_DETAIL_SALT :: u64(0x29f6c14a87b35d02)
 TERRAIN_CAVE_PASSAGE_RIB_SALT :: u64(0x83d14f70ca56e92b)
 TERRAIN_CAVE_BRANCH_SALT :: u64(0xf2306de74a9c58b1)
 TERRAIN_CAVE_CURVE_SALT :: u64(0x4d9b7a52e168c03f)
-TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS :: #config(TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS, false)
 TERRAIN_SURFACE_HEIGHT_TOP_SOFT_START_BLOCKS :: f32(94)
 TERRAIN_SURFACE_HEIGHT_TOP_LIMIT_BLOCKS :: f32(118)
 TERRAIN_SURFACE_HEIGHT_BOTTOM_SOFT_START_BLOCKS :: f32(-78)
@@ -2441,21 +2497,52 @@ TERRAIN_FACE_DESCS := [?]TerrainFaceDesc {
 }
 
 TERRAIN_MATERIAL_COLORS := TerrainMaterialColorPalette {
+	// Variant 0: canonical base colors.
 	{0.30, 0.62, 0.27, 1.0}, // Grass
 	{0.43, 0.28, 0.15, 1.0}, // Dirt
 	{0.40, 0.41, 0.45, 1.0}, // Stone
-	{0.66, 0.63, 0.49, 1.0}, // Sand
+	{0.66, 0.63, 0.49, 1.0}, // Wet marsh / sand
 	{0.18, 0.37, 0.72, 1.0}, // Water
-	{0.20, 0.18, 0.20, 1.0}, // Corrupted Ash
+	{0.20, 0.18, 0.20, 1.0}, // Corrupted ash
 	{0.48, 0.56, 0.46, 1.0}, // Aquifer wall
 	{0.58, 0.82, 0.92, 1.0}, // Crystal
+
+	// Variant 1: moss, litter, basalt, swamp water, and aquifer algae.
+	{0.22, 0.49, 0.23, 1.0},
+	{0.36, 0.24, 0.12, 1.0},
+	{0.30, 0.32, 0.36, 1.0},
+	{0.40, 0.47, 0.34, 1.0},
+	{0.14, 0.31, 0.28, 1.0},
+	{0.25, 0.20, 0.16, 1.0},
+	{0.38, 0.52, 0.42, 1.0},
+	{0.46, 0.72, 0.84, 1.0},
+
+	// Variant 2: dry grass, loam, ember ash, corrupted water, and mineral stains.
+	{0.45, 0.58, 0.25, 1.0},
+	{0.30, 0.19, 0.12, 1.0},
+	{0.24, 0.23, 0.26, 1.0},
+	{0.52, 0.44, 0.32, 1.0},
+	{0.28, 0.18, 0.43, 1.0},
+	{0.31, 0.12, 0.20, 1.0},
+	{0.42, 0.48, 0.50, 1.0},
+	{0.64, 0.54, 0.94, 1.0},
+
+	// Variant 3: flowered grass, root-rich dirt, hot stone, lava, and bright crystal.
+	{0.36, 0.66, 0.34, 1.0},
+	{0.50, 0.34, 0.18, 1.0},
+	{0.46, 0.27, 0.18, 1.0},
+	{0.58, 0.34, 0.22, 1.0},
+	{0.96, 0.28, 0.06, 1.0},
+	{0.42, 0.16, 0.10, 1.0},
+	{0.54, 0.48, 0.36, 1.0},
+	{0.86, 0.92, 1.00, 1.0},
 }
 
 //////////////////////////////////////
 // Terrain Types
 /////////////////////////////////////
 
-TerrainMaterialColorPalette :: [8]Vec4
+TerrainMaterialColorPalette :: [TERRAIN_MATERIAL_COLOR_COUNT]Vec4
 
 TerrainDrawParams :: struct {
 	vertex_byte_offset:  u32,
@@ -2477,13 +2564,14 @@ TerrainBiomeColumn :: struct {
 	surface_height:                  i32,
 	surface_height_blocks:           f32,
 	surface_layer_depth:             i32,
-	dominant_biome_id:               biomes.BiomeID,
+	water_level_blocks:              f32,
 	surface_morphology_profile:      biomes.SurfaceMorphologyProfile,
+	dominant_biome_id:               biomes.BiomeID,
+	water_biome_id:                  biomes.BiomeID,
 	surface_material_id:             world_async.BlockMaterialID,
 	subsurface_material_id:          world_async.BlockMaterialID,
 	hydrology_debug_material_active: bool,
 	water_fill_active:               bool,
-	water_level_blocks:              f32,
 }
 
 //////////////////////////////////////
@@ -2637,6 +2725,7 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 		}
 		terrain_generation_column_cache_store(column_targets[:], key, chunk)
 	}
+	terrain_decoration_surface_structure_pads_apply(&generation_region, origin, column_targets[:])
 	block_fill_done := false
 	chunk_bottom_world_y := origin.y
 	chunk_top_world_y := origin.y + CHUNK_BLOCK_LENGTH - 1
@@ -3133,11 +3222,26 @@ terrain_biome_column_from_profile_evaluation :: proc(
 	sea_fill_active := surface_height_blocks < biomes.SEA_LEVEL_BLOCKS
 	local_water_level := evaluation.hydrology_sample.water_level_blocks
 	water_surface_below_level := surface_height_blocks < local_water_level
+	water_source_conflict :=
+		evaluation.hydrology_sample.water_material_conflict_influence >= 0.35 &&
+		evaluation.hydrology_sample.water_material_conflict_influence >= water_influence * 0.58
+	local_water_source_group := biomes.water_feature_source_water_group(
+		evaluation.hydrology_sample.water_biome_id,
+	)
+	local_water_collides_with_sea :=
+		sea_fill_active &&
+		local_water_source_group != 0 &&
+		local_water_level <= biomes.SEA_LEVEL_BLOCKS + 1.0
 	local_water_fill_active :=
-		water_influence > TERRAIN_LOCAL_WATER_FILL_INFLUENCE_MIN && water_surface_below_level
+		water_influence > TERRAIN_LOCAL_WATER_FILL_INFLUENCE_MIN &&
+		water_surface_below_level &&
+		!water_source_conflict &&
+		!local_water_collides_with_sea
 	water_level := biomes.SEA_LEVEL_BLOCKS
+	water_biome_id := biomes.BiomeID.Temperate_Hills
 	if local_water_fill_active {
 		water_level = math.max(biomes.SEA_LEVEL_BLOCKS, local_water_level)
+		water_biome_id = evaluation.hydrology_sample.water_biome_id
 	}
 	surface_material_id := terrain_biome_surface_material_id(material_biome_id)
 	surface_material_id = terrain_surface_material_apply_shoreline(
@@ -3149,6 +3253,14 @@ terrain_biome_column_from_profile_evaluation :: proc(
 		world_x,
 		world_z,
 	)
+	surface_material_id = terrain_material_apply_surface_color_variant(
+		key,
+		surface_material_id,
+		material_biome_id,
+		world_x,
+		world_z,
+		0,
+	)
 	subsurface_material_id := terrain_biome_subsurface_material_id(material_biome_id)
 	subsurface_material_id = terrain_subsurface_material_apply_shoreline(
 		evaluation,
@@ -3156,9 +3268,17 @@ terrain_biome_column_from_profile_evaluation :: proc(
 		surface_height_blocks,
 		water_level,
 	)
-	if surface_material_id == world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID) {
+	if terrain_material_palette_index(surface_material_id) == TERRAIN_WET_MARSH_MAT_ID {
 		subsurface_material_id = surface_material_id
 	}
+	subsurface_material_id = terrain_material_apply_surface_color_variant(
+		key,
+		subsurface_material_id,
+		material_biome_id,
+		world_x,
+		world_z,
+		1,
+	)
 	surface_layer_depth = terrain_surface_layer_depth_apply_shoreline(
 		evaluation,
 		surface_layer_depth,
@@ -3176,6 +3296,7 @@ terrain_biome_column_from_profile_evaluation :: proc(
 		subsurface_material_id = subsurface_material_id,
 		hydrology_debug_material_active = local_water_fill_active,
 		water_fill_active = sea_fill_active || local_water_fill_active,
+		water_biome_id = water_biome_id,
 		water_level_blocks = water_level,
 	}
 }
@@ -3362,6 +3483,119 @@ terrain_hydrology_debug_material_id :: proc(
 	return world_async.BlockMaterialID(u8(material_id) | TERRAIN_HYDROLOGY_DEBUG_MATERIAL_FLAG)
 }
 
+terrain_material_id_with_color_variant :: proc(
+	material_id: world_async.BlockMaterialID,
+	variant_index: u32,
+) -> world_async.BlockMaterialID {
+	variant :=
+		(variant_index & (TERRAIN_MATERIAL_COLOR_VARIANT_COUNT - 1)) <<
+		u32(TERRAIN_MATERIAL_COLOR_VARIANT_SHIFT)
+	base_and_debug := u8(material_id) & ~TERRAIN_MATERIAL_COLOR_VARIANT_MASK
+	return world_async.BlockMaterialID(base_and_debug | u8(variant))
+}
+
+terrain_material_color_variant_from_noise :: proc(
+	key: biomes.FeatureGridKey,
+	world_x, world_z: i32,
+	salt: u64,
+) -> u32 {
+	noise := biomes.regional_terrain_field_value_noise_2(
+		key,
+		world_x,
+		world_z,
+		TERRAIN_SURFACE_MATERIAL_BLEND_CELL_BLOCKS,
+		salt,
+	)
+	value := math.clamp(noise * 0.5 + 0.5, f32(0), f32(0.999))
+	return u32(math.floor_f32(value * f32(TERRAIN_MATERIAL_COLOR_VARIANT_COUNT)))
+}
+
+terrain_material_apply_surface_color_variant :: proc(
+	key: biomes.FeatureGridKey,
+	material_id: world_async.BlockMaterialID,
+	biome_id: biomes.BiomeID,
+	world_x, world_z: i32,
+	layer_index: u32,
+) -> world_async.BlockMaterialID {
+	palette := terrain_material_palette_index(material_id)
+	salt := biomes.feature_grid_hash_combine(
+		TERRAIN_SURFACE_MATERIAL_BLEND_SALT,
+		u64(biome_id) + u64(layer_index) * 31,
+	)
+	noise_variant := terrain_material_color_variant_from_noise(key, world_x, world_z, salt)
+	variant := noise_variant
+	switch palette {
+	case TERRAIN_GRASS_MAT_ID:
+		#partial switch biome_id {
+		case .Old_Growth_Forest:
+			variant = 1
+		case .Wet_Lowland_Marsh, .Corrupted_Fen:
+			variant = 1 + noise_variant % 2
+		case .Temperate_Hills:
+			variant = noise_variant
+		}
+	case TERRAIN_DIRT_MAT_ID:
+		if biome_id == .Old_Growth_Forest {
+			variant = 3
+		} else if biome_id == .Wet_Lowland_Marsh || biome_id == .Corrupted_Fen {
+			variant = 1
+		}
+	case TERRAIN_STONE_MAT_ID:
+		if biome_id == .Basalt_Spire_Highlands {
+			variant = 1 + noise_variant % 2
+		} else if biome_id == .Emberglass_Badlands {
+			variant = 2 + noise_variant % 2
+		}
+	case TERRAIN_WET_MARSH_MAT_ID:
+		if biome_id == .Corrupted_Fen {
+			variant = 2
+		} else if biome_id == .Emberglass_Badlands {
+			variant = 3
+		} else {
+			variant = 1
+		}
+	case TERRAIN_CORRUPTED_ASH_MAT_ID:
+		if biome_id == .Emberglass_Badlands {
+			variant = 3
+		} else if biome_id == .Corrupted_Fen {
+			variant = 2
+		}
+	case TERRAIN_AQUIFER_WALL_MAT_ID:
+		if biome_id == .Old_Growth_Forest || biome_id == .Wet_Lowland_Marsh {
+			variant = 1
+		}
+	case TERRAIN_CRYSTAL_MAT_ID:
+		variant = noise_variant
+	case:
+	}
+	return terrain_material_id_with_color_variant(material_id, variant)
+}
+
+terrain_water_material_id_for_biome :: proc(
+	biome_id: biomes.BiomeID,
+	subterranean: bool,
+) -> world_async.BlockMaterialID {
+	_ = subterranean
+	switch biome_id {
+	case .Wet_Lowland_Marsh, .Old_Growth_Forest, .Fungal_Vaults:
+		return terrain_block_material_id_from_biome_material(.Swamp_Water)
+	case .Corrupted_Ash_Forest, .Corrupted_Fen:
+		return terrain_block_material_id_from_biome_material(.Corrupted_Water)
+	case .Basalt_Spire_Highlands, .Emberglass_Badlands:
+		return terrain_block_material_id_from_biome_material(.Lava)
+	case .Buried_Aquifer_Caves:
+		return terrain_block_material_id_from_biome_material(.Swamp_Water)
+	case .Crystal_Geode_Network:
+		return terrain_material_id_with_color_variant(
+			world_async.BlockMaterialID(TERRAIN_WATER_MAT_ID),
+			2,
+		)
+	case .Temperate_Hills:
+		return world_async.BlockMaterialID(TERRAIN_WATER_MAT_ID)
+	}
+	return world_async.BlockMaterialID(TERRAIN_WATER_MAT_ID)
+}
+
 when TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
 	terrain_decoration_debug_material_id :: proc(
 		material_id: world_async.BlockMaterialID,
@@ -3402,16 +3636,56 @@ terrain_block_material_id_from_biome_material :: proc(
 	switch material_id {
 	case .Grass:
 		return world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID)
+	case .Moss:
+		return terrain_material_id_with_color_variant(
+			world_async.BlockMaterialID(TERRAIN_GRASS_MAT_ID),
+			1,
+		)
 	case .Dirt:
 		return world_async.BlockMaterialID(TERRAIN_DIRT_MAT_ID)
+	case .Forest_Litter:
+		return terrain_material_id_with_color_variant(
+			world_async.BlockMaterialID(TERRAIN_DIRT_MAT_ID),
+			3,
+		)
 	case .Stone:
 		return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
+	case .Basalt:
+		return terrain_material_id_with_color_variant(
+			world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID),
+			1,
+		)
 	case .Wet_Marsh:
 		return world_async.BlockMaterialID(TERRAIN_WET_MARSH_MAT_ID)
 	case .Water:
 		return world_async.BlockMaterialID(TERRAIN_WATER_MAT_ID)
+	case .Swamp_Water:
+		return terrain_material_id_with_color_variant(
+			world_async.BlockMaterialID(TERRAIN_WATER_MAT_ID),
+			1,
+		)
+	case .Corrupted_Water:
+		return terrain_material_id_with_color_variant(
+			world_async.BlockMaterialID(TERRAIN_WATER_MAT_ID),
+			2,
+		)
+	case .Lava:
+		return terrain_material_id_with_color_variant(
+			world_async.BlockMaterialID(TERRAIN_WATER_MAT_ID),
+			3,
+		)
 	case .Corrupted_Ash:
 		return world_async.BlockMaterialID(TERRAIN_CORRUPTED_ASH_MAT_ID)
+	case .Corrupt_Mud:
+		return terrain_material_id_with_color_variant(
+			world_async.BlockMaterialID(TERRAIN_CORRUPTED_ASH_MAT_ID),
+			2,
+		)
+	case .Ember_Ash:
+		return terrain_material_id_with_color_variant(
+			world_async.BlockMaterialID(TERRAIN_CORRUPTED_ASH_MAT_ID),
+			3,
+		)
 	case .Aquifer_Wall:
 		return world_async.BlockMaterialID(TERRAIN_AQUIFER_WALL_MAT_ID)
 	case .Crystal:
@@ -3429,7 +3703,13 @@ terrain_biome_surface_material_id :: proc(
 	case .Fungal_Vaults, .Crystal_Geode_Network, .Buried_Aquifer_Caves:
 		log.assert(false, "surface terrain fill received subterranean biome identity")
 		return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
-	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+	case .Temperate_Hills,
+	     .Old_Growth_Forest,
+	     .Basalt_Spire_Highlands,
+	     .Emberglass_Badlands,
+	     .Wet_Lowland_Marsh,
+	     .Corrupted_Ash_Forest,
+	     .Corrupted_Fen:
 		profile := biomes.biome_material_profile_for(biome_id)
 		return terrain_block_material_id_from_biome_material(profile.surface)
 	}
@@ -3445,7 +3725,13 @@ terrain_biome_subsurface_material_id :: proc(
 	case .Fungal_Vaults, .Crystal_Geode_Network, .Buried_Aquifer_Caves:
 		log.assert(false, "surface terrain fill received subterranean biome identity")
 		return world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
-	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+	case .Temperate_Hills,
+	     .Old_Growth_Forest,
+	     .Basalt_Spire_Highlands,
+	     .Emberglass_Badlands,
+	     .Wet_Lowland_Marsh,
+	     .Corrupted_Ash_Forest,
+	     .Corrupted_Fen:
 		profile := biomes.biome_material_profile_for(biome_id)
 		return terrain_block_material_id_from_biome_material(profile.subsurface)
 	}

@@ -231,7 +231,7 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 			// Warm the instruction/data path before taking the timed sample.
 			warmup_temp := mem.begin_arena_temp_memory(transient_arena)
 			warmup_allocator := mem.arena_allocator(transient_arena)
-			warmup_scratch := terrain_binary_greedy_scratch_alloc(warmup_allocator)
+			warmup_scratch := terrain_binary_greedy_scratch_alloc(transient_arena)
 			_ = chunk_mesher_benchmark_count_once(case_data.view, mesher, warmup_scratch)
 			mem.end_arena_temp_memory(warmup_temp)
 
@@ -240,7 +240,7 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 			for _ in 0 ..< iterations {
 				temp := mem.begin_arena_temp_memory(transient_arena)
 				allocator := mem.arena_allocator(transient_arena)
-				scratch := terrain_binary_greedy_scratch_alloc(allocator)
+				scratch := terrain_binary_greedy_scratch_alloc(transient_arena)
 				face_count = chunk_mesher_benchmark_count_once(case_data.view, mesher, scratch)
 				mem.end_arena_temp_memory(temp)
 			}
@@ -267,7 +267,7 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 
 			warmup_temp := mem.begin_arena_temp_memory(transient_arena)
 			warmup_allocator := mem.arena_allocator(transient_arena)
-			warmup_scratch := terrain_binary_greedy_scratch_alloc(warmup_allocator)
+			warmup_scratch := terrain_binary_greedy_scratch_alloc(transient_arena)
 			_ = chunk_mesher_benchmark_build_once(
 				case_data.view,
 				mesher,
@@ -282,7 +282,7 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 			for _ in 0 ..< iterations {
 				temp := mem.begin_arena_temp_memory(transient_arena)
 				allocator := mem.arena_allocator(transient_arena)
-				scratch := terrain_binary_greedy_scratch_alloc(allocator)
+				scratch := terrain_binary_greedy_scratch_alloc(transient_arena)
 				output := chunk_mesher_benchmark_build_once(
 					case_data.view,
 					mesher,
@@ -320,7 +320,7 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 
 			warmup_temp := mem.begin_arena_temp_memory(transient_arena)
 			warmup_allocator := mem.arena_allocator(transient_arena)
-			warmup_scratch := terrain_binary_greedy_scratch_alloc(warmup_allocator)
+			warmup_scratch := terrain_binary_greedy_scratch_alloc(transient_arena)
 			_ = chunk_voxel_view_build_binary_greedy_mesh_in_bounds(
 				view,
 				min_bound,
@@ -337,7 +337,7 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 			for _ in 0 ..< iterations {
 				temp := mem.begin_arena_temp_memory(transient_arena)
 				allocator := mem.arena_allocator(transient_arena)
-				scratch := terrain_binary_greedy_scratch_alloc(allocator)
+				scratch := terrain_binary_greedy_scratch_alloc(transient_arena)
 				output := chunk_voxel_view_build_binary_greedy_mesh_in_bounds(
 					view,
 					min_bound,
@@ -7924,9 +7924,12 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 						satellite_radius_x *= 1.20
 						satellite_radius_z *= 1.08
 					case .Temperate_Hills,
+					     .Old_Growth_Forest,
 					     .Basalt_Spire_Highlands,
+					     .Emberglass_Badlands,
 					     .Wet_Lowland_Marsh,
-					     .Corrupted_Ash_Forest:
+					     .Corrupted_Ash_Forest,
+					     .Corrupted_Fen:
 					}
 
 					satellite_center_x[satellite_index] =
@@ -8601,9 +8604,12 @@ when ODIN_DEBUG || RUN_MESH_BENCHMARK || RUN_TERRAIN_GENERATION_BENCHMARK {
 					camera_y_scale = TERRAIN_AQUIFER_ROOM_SHELF_Y_OFFSET_SCALE * f32(0.62)
 					target_y_scale = TERRAIN_AQUIFER_ROOM_BASIN_Y_OFFSET_SCALE * f32(0.42)
 				case .Temperate_Hills,
+				     .Old_Growth_Forest,
 				     .Basalt_Spire_Highlands,
+				     .Emberglass_Badlands,
 				     .Wet_Lowland_Marsh,
-				     .Corrupted_Ash_Forest:
+				     .Corrupted_Ash_Forest,
+				     .Corrupted_Fen:
 				}
 
 				camera_x :=

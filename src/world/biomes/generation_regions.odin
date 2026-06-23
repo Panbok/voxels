@@ -108,7 +108,7 @@ GENERATION_REGION_DEFAULT_INFLUENCE_MARGINS :: GenerationInfluenceMargins {
 
 GENERATION_REGION_SURFACE_BIOME_CELL_CAPACITY :: 25
 GENERATION_REGION_SUBTERRANEAN_BIOME_CELL_CAPACITY :: 125
-GENERATION_REGION_SURFACE_DECORATION_FEATURE_CAPACITY :: 144
+GENERATION_REGION_SURFACE_DECORATION_FEATURE_CAPACITY :: 1024
 GENERATION_REGION_WATER_FEATURE_NODE_CAPACITY :: 64
 GENERATION_REGION_WATER_FEATURE_SEGMENT_CAPACITY :: 128
 GENERATION_REGION_WATER_FEATURE_ANCHOR_CAPACITY :: 192
@@ -1956,6 +1956,26 @@ when ODIN_DEBUG {
 	generation_region_debug_contract_checks_run :: proc() {
 		key := feature_grid_key_make(0x123456789abcdef0, 1)
 		next_version_key := feature_grid_key_make(key.world_seed, key.generator_version + 1)
+		decoration_owner_range := feature_grid_owner_range_from_block_bounds(
+			generation_region_surface_bounds_from_bounds(
+				BlockBounds3 {
+					min = {},
+					max = {
+						x = GENERATION_REGION_BLOCK_LENGTH,
+						y = GENERATION_REGION_BLOCK_LENGTH,
+						z = GENERATION_REGION_BLOCK_LENGTH,
+					},
+				},
+			),
+			GENERATION_REGION_DEFAULT_INFLUENCE_MARGINS.surface_decoration_blocks,
+			DECORATION_SURFACE_GRID_CONFIG,
+		)
+		decoration_owner_count := feature_grid_owner_range_count(decoration_owner_range)
+		log.assert(
+			decoration_owner_count * u32(DECORATION_SURFACE_SLOT_COUNT_MAX) <=
+			GENERATION_REGION_SURFACE_DECORATION_FEATURE_CAPACITY,
+			"surface decoration capacity must cover all owner slots in a generation region",
+		)
 
 		origin_region := new(GenerationRegion)
 		generation_region_build_with_margins_into(

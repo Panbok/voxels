@@ -33,6 +33,7 @@ AUTO_CAVE_VIEW_Z :: #config(AUTO_CAVE_VIEW_Z, 0)
 AUTO_CAVE_VIEW_YAW_DEGREES :: #config(AUTO_CAVE_VIEW_YAW_DEGREES, 0)
 AUTO_CAVE_VIEW_PITCH_DEGREES :: #config(AUTO_CAVE_VIEW_PITCH_DEGREES, 0)
 PERSISTENT_SLAB_BYTES :: #config(PERSISTENT_SLAB_BYTES, 768 * mem.Megabyte)
+TRANSIENT_SLAB_BYTES :: #config(TRANSIENT_SLAB_BYTES, 64 * mem.Megabyte)
 RESOURCE_GENERATION_WORKER_MAX :: #config(RESOURCE_GENERATION_WORKER_MAX, 6)
 RESOURCE_MESH_WORKER_MAX :: #config(RESOURCE_MESH_WORKER_MAX, 8)
 RESOURCE_MESH_REQUESTS_PER_WORKER :: #config(RESOURCE_MESH_REQUESTS_PER_WORKER, 2)
@@ -46,7 +47,7 @@ RESOURCE_MESH_REQUESTS_PER_WORKER :: #config(RESOURCE_MESH_REQUESTS_PER_WORKER, 
 
 Memory :: struct {
 	persistent_slab:      []u8,
-	transient_slab:       [16 * mem.Megabyte]u8,
+	transient_slab:       [TRANSIENT_SLAB_BYTES]u8,
 	persistent_arena:     mem.Arena,
 	transient_arena:      mem.Arena,
 	persistent_allocator: mem.Allocator,

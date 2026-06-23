@@ -13,6 +13,17 @@ DecorationFamilyID :: enum u8 {
 	Fungal_Tree,
 	Stone_Tree,
 	Crystal_Growth_Cluster,
+	Fern_Thicket,
+	Ash_Bramble,
+	Root_Cluster,
+	Coral_DLA_Cluster,
+	Ruin_Pillar_Set,
+	Ruin_Hamlet,
+	Watchtower_Ruin,
+	Palisade_Fort,
+	Cave_Ruin_Hall,
+	Basalt_Column_Cluster,
+	Lava_Vent,
 }
 
 DecorationPlacementKind :: enum u8 {
@@ -108,15 +119,16 @@ DECORATION_SURFACE_GRID_CONFIG :: FeatureGridConfig {
 	jitter_fraction  = 0.70,
 }
 
-DECORATION_SURFACE_INFLUENCE_MARGIN_BLOCKS :: 8
-DECORATION_FAMILY_COUNT :: 5
-DECORATION_SURFACE_SLOT_COUNT_MAX :: u8(1)
+DECORATION_SURFACE_INFLUENCE_MARGIN_BLOCKS :: 48
+DECORATION_FAMILY_COUNT :: 16
+DECORATION_SURFACE_SLOT_COUNT_MAX :: u8(3)
 DECORATION_TREE_SHAPE_VARIANT_COUNT :: u8(6)
 DECORATION_TREE_SHAPE_SEGMENT_CAPACITY :: 18
 DECORATION_TREE_SHAPE_CROWN_CAPACITY :: 10
 DECORATION_SURFACE_PATCH_CELL_SIZE_BLOCKS :: i32(192)
 DECORATION_SURFACE_FEATURE_SALT :: u64(0x91a7c5d3e42f68b0)
 DECORATION_SURFACE_ROLL_SALT :: u64(0x67c8b4319ad205ef)
+DECORATION_SURFACE_FAMILY_ROLL_SALT :: u64(0x92d7b6814c3ef05a)
 DECORATION_SURFACE_SLOT_SALT :: u64(0xb4f23a8971d6e05c)
 DECORATION_SURFACE_SLOT_JITTER_X_SALT :: u64(0x3278d5ec019ab46f)
 DECORATION_SURFACE_SLOT_JITTER_Z_SALT :: u64(0x8d35a19fc47062be)
@@ -127,7 +139,7 @@ DECORATION_HEIGHT_SALT :: u64(0x2c41a8f73d96e50b)
 DECORATION_SHAPE_VARIANT_SALT :: u64(0x54f7cb2d8319a06e)
 DECORATION_ROTATION_SALT :: u64(0xdd31b8a4720cef59)
 DECORATION_CAVE_ROLL_SALT :: u64(0x7d5a0c3e91b6842f)
-#assert(u32(DecorationFamilyID.Crystal_Growth_Cluster) + 1 == DECORATION_FAMILY_COUNT)
+#assert(u32(DecorationFamilyID.Lava_Vent) + 1 == DECORATION_FAMILY_COUNT)
 
 //////////////////////////////////////
 // Decoration Methods
@@ -180,6 +192,105 @@ decoration_family_profile_for :: proc(family_id: DecorationFamilyID) -> Decorati
 			max_height = 6,
 			radius_blocks = 1,
 		}
+	case .Fern_Thicket:
+		return {
+			placement_kind = .Surface,
+			trunk_material = .Dirt,
+			cap_material = .Moss,
+			min_height = 2,
+			max_height = 4,
+			radius_blocks = 4,
+		}
+	case .Ash_Bramble:
+		return {
+			placement_kind = .Surface_And_Subterranean,
+			trunk_material = .Corrupt_Mud,
+			cap_material = .Corrupted_Ash,
+			min_height = 2,
+			max_height = 5,
+			radius_blocks = 5,
+		}
+	case .Root_Cluster:
+		return {
+			placement_kind = .Subterranean,
+			trunk_material = .Forest_Litter,
+			cap_material = .Moss,
+			min_height = 3,
+			max_height = 7,
+			radius_blocks = 5,
+		}
+	case .Coral_DLA_Cluster:
+		return {
+			placement_kind = .Subterranean,
+			trunk_material = .Aquifer_Wall,
+			cap_material = .Crystal,
+			min_height = 3,
+			max_height = 6,
+			radius_blocks = 4,
+		}
+	case .Ruin_Pillar_Set:
+		return {
+			placement_kind = .Surface_And_Subterranean,
+			trunk_material = .Stone,
+			cap_material = .Aquifer_Wall,
+			min_height = 5,
+			max_height = 9,
+			radius_blocks = 8,
+		}
+	case .Ruin_Hamlet:
+		return {
+			placement_kind = .Surface,
+			trunk_material = .Stone,
+			cap_material = .Dirt,
+			min_height = 5,
+			max_height = 8,
+			radius_blocks = 18,
+		}
+	case .Watchtower_Ruin:
+		return {
+			placement_kind = .Surface_And_Subterranean,
+			trunk_material = .Stone,
+			cap_material = .Aquifer_Wall,
+			min_height = 7,
+			max_height = 11,
+			radius_blocks = 20,
+		}
+	case .Palisade_Fort:
+		return {
+			placement_kind = .Surface,
+			trunk_material = .Forest_Litter,
+			cap_material = .Stone,
+			min_height = 7,
+			max_height = 11,
+			radius_blocks = 18,
+		}
+	case .Cave_Ruin_Hall:
+		return {
+			placement_kind = .Subterranean,
+			trunk_material = .Stone,
+			cap_material = .Aquifer_Wall,
+			min_height = 5,
+			max_height = 9,
+			radius_blocks = 8,
+		}
+	case .Basalt_Column_Cluster:
+		return {
+			placement_kind = .Surface_And_Subterranean,
+			trunk_material = .Basalt,
+			cap_material = .Stone,
+			min_height = 4,
+			max_height = 9,
+			radius_blocks = 5,
+		}
+	case .Lava_Vent:
+		return {
+			placement_kind = .Surface_And_Subterranean,
+			trunk_material = .Basalt,
+			cap_material = .Lava,
+			min_height = 2,
+			max_height = 4,
+			radius_blocks = 4,
+		}
 	}
 
 	log.assertf(false, "unhandled Decoration Family Profile: %v", family_id)
@@ -203,12 +314,25 @@ decoration_surface_placement_profile_for_biome :: proc(
 	case .Temperate_Hills:
 		return {
 				family_id = .Baseline_Tree,
-				chance = 0.82,
-				sparse_chance = 0.40,
+				chance = 0.90,
+				sparse_chance = 0.46,
 				grove_chance = 0.98,
-				slot_count = 1,
-				max_stand_count = 6,
-				stand_radius_blocks = 12,
+				slot_count = 3,
+				max_stand_count = 15,
+				stand_radius_blocks = 19,
+				wet_root_allowed = false,
+				min_root_water_clearance_blocks = 7,
+			},
+			true
+	case .Old_Growth_Forest:
+		return {
+				family_id = .Baseline_Tree,
+				chance = 0.96,
+				sparse_chance = 0.62,
+				grove_chance = 1.00,
+				slot_count = 3,
+				max_stand_count = 24,
+				stand_radius_blocks = 26,
 				wet_root_allowed = false,
 				min_root_water_clearance_blocks = 7,
 			},
@@ -219,9 +343,9 @@ decoration_surface_placement_profile_for_biome :: proc(
 				chance = 0.68,
 				sparse_chance = 0.34,
 				grove_chance = 0.92,
-				slot_count = 1,
-				max_stand_count = 5,
-				stand_radius_blocks = 11,
+				slot_count = 3,
+				max_stand_count = 10,
+				stand_radius_blocks = 17,
 				wet_root_allowed = true,
 				min_root_water_clearance_blocks = 8,
 			},
@@ -232,24 +356,50 @@ decoration_surface_placement_profile_for_biome :: proc(
 				chance = 0.76,
 				sparse_chance = 0.38,
 				grove_chance = 0.96,
-				slot_count = 1,
-				max_stand_count = 5,
-				stand_radius_blocks = 12,
+				slot_count = 3,
+				max_stand_count = 11,
+				stand_radius_blocks = 18,
 				wet_root_allowed = false,
 				min_root_water_clearance_blocks = 7,
+			},
+			true
+	case .Corrupted_Fen:
+		return {
+				family_id = .Dead_Ash_Tree,
+				chance = 0.84,
+				sparse_chance = 0.46,
+				grove_chance = 0.98,
+				slot_count = 3,
+				max_stand_count = 12,
+				stand_radius_blocks = 19,
+				wet_root_allowed = true,
+				min_root_water_clearance_blocks = 8,
 			},
 			true
 	case .Basalt_Spire_Highlands:
 		return {
 				family_id = .Stone_Tree,
-				chance = 0.78,
-				sparse_chance = 0.46,
-				grove_chance = 0.98,
-				slot_count = 1,
-				max_stand_count = 5,
-				stand_radius_blocks = 11,
+				chance = 0.70,
+				sparse_chance = 0.34,
+				grove_chance = 0.88,
+				slot_count = 3,
+				max_stand_count = 6,
+				stand_radius_blocks = 14,
 				wet_root_allowed = false,
 				min_root_water_clearance_blocks = 10,
+			},
+			true
+	case .Emberglass_Badlands:
+		return {
+				family_id = .Stone_Tree,
+				chance = 0.72,
+				sparse_chance = 0.36,
+				grove_chance = 0.90,
+				slot_count = 3,
+				max_stand_count = 6,
+				stand_radius_blocks = 14,
+				wet_root_allowed = false,
+				min_root_water_clearance_blocks = 12,
 			},
 			true
 	case .Fungal_Vaults, .Crystal_Geode_Network, .Buried_Aquifer_Caves:
@@ -284,17 +434,53 @@ decoration_cave_family_for_node :: proc(
 		if node.major_region ||
 		   node.role == .Resource_Chamber ||
 		   node.role == .Water_Linked_Region {
-			return .Fungal_Tree, 0.30, true
+			roll := feature_grid_unit_f32(u64(node.id), DECORATION_SURFACE_FAMILY_ROLL_SALT)
+			if roll < 0.30 {
+				return .Root_Cluster, 1.00, true
+			}
+			if roll < 0.58 {
+				return .Fungal_Tree, 0.42, true
+			}
+			if roll < 0.86 {
+				return .Coral_DLA_Cluster, 1.00, true
+			}
+			return .Cave_Ruin_Hall, 0.32, true
 		}
 	case .Crystal_Geode_Network:
 		if node.kind == .Geode_Chamber || node.role == .Resource_Chamber || node.major_region {
-			return .Crystal_Growth_Cluster, 0.30, true
+			roll := feature_grid_unit_f32(u64(node.id), DECORATION_SURFACE_FAMILY_ROLL_SALT)
+			if roll < 0.50 {
+				return .Crystal_Growth_Cluster, 0.42, true
+			}
+			if roll < 0.62 {
+				return .Ruin_Pillar_Set, 0.34, true
+			}
+			if roll < 0.70 {
+				return .Cave_Ruin_Hall, 0.28, true
+			}
+			return .Coral_DLA_Cluster, 1.00, true
 		}
 	case .Buried_Aquifer_Caves:
 		if node.kind == .Underground_Lake || node.role == .Water_Linked_Region {
-			return .Fungal_Tree, 0.14, true
+			roll := feature_grid_unit_f32(u64(node.id), DECORATION_SURFACE_FAMILY_ROLL_SALT)
+			if roll < 0.38 {
+				return .Coral_DLA_Cluster, 1.00, true
+			}
+			if roll < 0.64 {
+				return .Root_Cluster, 1.00, true
+			}
+			if roll < 0.86 {
+				return .Fungal_Tree, 0.28, true
+			}
+			return .Cave_Ruin_Hall, 0.24, true
 		}
-	case .Temperate_Hills, .Basalt_Spire_Highlands, .Wet_Lowland_Marsh, .Corrupted_Ash_Forest:
+	case .Temperate_Hills,
+	     .Old_Growth_Forest,
+	     .Basalt_Spire_Highlands,
+	     .Emberglass_Badlands,
+	     .Wet_Lowland_Marsh,
+	     .Corrupted_Ash_Forest,
+	     .Corrupted_Fen:
 		return {}, 0, false
 	}
 	return {}, 0, false
@@ -338,7 +524,7 @@ decoration_surface_slot_point_from_owner :: proc(
 
 decoration_tree_shape_count_for :: proc(biome_id: BiomeID, family_id: DecorationFamilyID) -> u8 {
 	switch biome_id {
-	case .Temperate_Hills:
+	case .Temperate_Hills, .Old_Growth_Forest:
 		if family_id == .Baseline_Tree {
 			return DECORATION_TREE_SHAPE_VARIANT_COUNT
 		}
@@ -346,11 +532,11 @@ decoration_tree_shape_count_for :: proc(biome_id: BiomeID, family_id: Decoration
 		if family_id == .Baseline_Tree {
 			return DECORATION_TREE_SHAPE_VARIANT_COUNT
 		}
-	case .Corrupted_Ash_Forest:
+	case .Corrupted_Ash_Forest, .Corrupted_Fen:
 		if family_id == .Dead_Ash_Tree {
 			return DECORATION_TREE_SHAPE_VARIANT_COUNT
 		}
-	case .Basalt_Spire_Highlands:
+	case .Basalt_Spire_Highlands, .Emberglass_Badlands:
 		if family_id == .Stone_Tree {
 			return DECORATION_TREE_SHAPE_VARIANT_COUNT
 		}
@@ -407,12 +593,18 @@ decoration_surface_patch_strength_for_point :: proc(
 	switch biome_id {
 	case .Temperate_Hills:
 		bias = 0.08
+	case .Old_Growth_Forest:
+		bias = 0.18
 	case .Wet_Lowland_Marsh:
 		bias = -0.02
 	case .Corrupted_Ash_Forest:
 		bias = 0.04
+	case .Corrupted_Fen:
+		bias = 0.06
 	case .Basalt_Spire_Highlands:
 		bias = -0.10
+	case .Emberglass_Badlands:
+		bias = -0.14
 	case .Fungal_Vaults, .Crystal_Geode_Network, .Buried_Aquifer_Caves:
 		bias = 0
 	}
@@ -494,6 +686,194 @@ decoration_material_variant_from_id :: proc(id: FeatureID) -> u8 {
 	return index
 }
 
+decoration_surface_family_select :: proc(
+	id: FeatureID,
+	biome_id: BiomeID,
+	default_family_id: DecorationFamilyID,
+	density_class: DecorationSurfaceDensityClass,
+	slot_index: u8,
+) -> DecorationFamilyID {
+	roll := feature_grid_unit_f32(u64(id), DECORATION_SURFACE_FAMILY_ROLL_SALT)
+	grove_bonus := f32(0)
+	if density_class == .Grove {
+		grove_bonus = 0.10
+	} else if density_class == .Sparse {
+		grove_bonus = -0.06
+	}
+
+	if slot_index == 0 {
+		switch biome_id {
+		case .Temperate_Hills:
+			if roll < 0.08 {
+				return .Fern_Thicket
+			}
+		case .Old_Growth_Forest:
+			if roll < 0.14 + grove_bonus {
+				return .Fern_Thicket
+			}
+			if roll < 0.20 + grove_bonus {
+				return .Root_Cluster
+			}
+		case .Wet_Lowland_Marsh:
+			if roll < 0.24 {
+				return .Fern_Thicket
+			}
+		case .Corrupted_Ash_Forest:
+			if roll < 0.20 + grove_bonus {
+				return .Ash_Bramble
+			}
+		case .Corrupted_Fen:
+			if roll < 0.38 {
+				return .Ash_Bramble
+			}
+		case .Basalt_Spire_Highlands:
+			if roll < 0.18 {
+				return .Basalt_Column_Cluster
+			}
+			if roll < 0.28 {
+				return .Crystal_Growth_Cluster
+			}
+		case .Emberglass_Badlands:
+			if roll < 0.24 {
+				return .Lava_Vent
+			}
+			if roll < 0.44 {
+				return .Basalt_Column_Cluster
+			}
+		case .Fungal_Vaults, .Crystal_Geode_Network, .Buried_Aquifer_Caves:
+		}
+		return default_family_id
+	}
+
+	if slot_index == 1 {
+		switch biome_id {
+		case .Temperate_Hills:
+			if roll < 0.72 + grove_bonus {
+				return .Fern_Thicket
+			}
+		case .Old_Growth_Forest:
+			if roll < 0.52 + grove_bonus {
+				return .Fern_Thicket
+			}
+			if roll < 0.84 + grove_bonus {
+				return .Root_Cluster
+			}
+		case .Wet_Lowland_Marsh:
+			if roll < 0.72 {
+				return .Fern_Thicket
+			}
+		case .Corrupted_Ash_Forest:
+			if roll < 0.82 + grove_bonus {
+				return .Ash_Bramble
+			}
+		case .Corrupted_Fen:
+			if roll < 0.88 {
+				return .Ash_Bramble
+			}
+		case .Basalt_Spire_Highlands:
+			if roll < 0.58 {
+				return .Basalt_Column_Cluster
+			}
+			if roll < 0.78 {
+				return .Crystal_Growth_Cluster
+			}
+		case .Emberglass_Badlands:
+			if roll < 0.44 {
+				return .Lava_Vent
+			}
+			if roll < 0.82 {
+				return .Basalt_Column_Cluster
+			}
+		case .Fungal_Vaults, .Crystal_Geode_Network, .Buried_Aquifer_Caves:
+		}
+		return default_family_id
+	}
+
+	switch biome_id {
+	case .Temperate_Hills:
+		if density_class == .Grove && roll < 0.100 {
+			return .Ruin_Hamlet
+		}
+		if roll >= 0.100 && roll < 0.200 {
+			return .Watchtower_Ruin
+		}
+		if roll >= 0.200 && roll < 0.280 {
+			return .Ruin_Pillar_Set
+		}
+	case .Old_Growth_Forest:
+		if density_class == .Grove && roll < 0.085 {
+			return .Ruin_Hamlet
+		}
+		if roll >= 0.085 && roll < 0.170 {
+			return .Watchtower_Ruin
+		}
+		if roll >= 0.170 && roll < 0.250 {
+			return .Ruin_Pillar_Set
+		}
+		if roll < 0.32 {
+			return .Root_Cluster
+		}
+	case .Wet_Lowland_Marsh:
+		if density_class == .Grove && roll < 0.070 {
+			return .Ruin_Hamlet
+		}
+		if roll >= 0.070 && roll < 0.135 {
+			return .Ruin_Pillar_Set
+		}
+		if roll < 0.40 {
+			return .Fern_Thicket
+		}
+	case .Corrupted_Ash_Forest:
+		if roll < 0.105 {
+			return .Palisade_Fort
+		}
+		if roll < 0.220 {
+			return .Ruin_Pillar_Set
+		}
+		if roll < 0.36 {
+			return .Ash_Bramble
+		}
+	case .Corrupted_Fen:
+		if roll < 0.070 {
+			return .Palisade_Fort
+		}
+		if roll < 0.190 {
+			return .Ruin_Pillar_Set
+		}
+		if roll < 0.58 {
+			return .Ash_Bramble
+		}
+	case .Basalt_Spire_Highlands:
+		if roll < 0.150 {
+			return .Palisade_Fort
+		}
+		if roll < 0.290 {
+			return .Ruin_Pillar_Set
+		}
+		if roll < 0.70 {
+			return .Basalt_Column_Cluster
+		}
+		if roll < 0.88 {
+			return .Crystal_Growth_Cluster
+		}
+	case .Emberglass_Badlands:
+		if roll < 0.145 {
+			return .Palisade_Fort
+		}
+		if roll < 0.285 {
+			return .Ruin_Pillar_Set
+		}
+		if roll < 0.52 {
+			return .Lava_Vent
+		}
+		if roll < 0.88 {
+			return .Basalt_Column_Cluster
+		}
+	case .Fungal_Vaults, .Crystal_Geode_Network, .Buried_Aquifer_Caves:
+	}
+	return default_family_id
+}
+
 decoration_surface_feature_make :: proc(
 	point: FeaturePoint2,
 	owner: FeatureGridCoord2,
@@ -502,9 +882,18 @@ decoration_surface_feature_make :: proc(
 	placement: DecorationSurfacePlacementProfile,
 	density_class: DecorationSurfaceDensityClass,
 ) -> DecorationFeature {
-	family_id := placement.family_id
+	family_id := decoration_surface_family_select(
+		point.id,
+		biome_id,
+		placement.family_id,
+		density_class,
+		slot_index,
+	)
 	profile := decoration_family_profile_for(family_id)
 	stand_count := decoration_surface_stand_count_from_id(point.id, placement, density_class)
+	if family_id != .Baseline_Tree && family_id != .Dead_Ash_Tree && family_id != .Stone_Tree {
+		stand_count = 1
+	}
 	return {
 		id = point.id,
 		owner = owner,
@@ -634,7 +1023,7 @@ decoration_tree_shape_for :: proc(
 ) -> DecorationTreeShape {
 	variant := variant_index % DECORATION_TREE_SHAPE_VARIANT_COUNT
 	switch biome_id {
-	case .Temperate_Hills:
+	case .Temperate_Hills, .Old_Growth_Forest:
 		if family_id == .Baseline_Tree {
 			return decoration_tree_shape_temperate(variant)
 		}
@@ -642,11 +1031,11 @@ decoration_tree_shape_for :: proc(
 		if family_id == .Baseline_Tree {
 			return decoration_tree_shape_marsh(variant)
 		}
-	case .Corrupted_Ash_Forest:
+	case .Corrupted_Ash_Forest, .Corrupted_Fen:
 		if family_id == .Dead_Ash_Tree {
 			return decoration_tree_shape_dead_ash(variant)
 		}
-	case .Basalt_Spire_Highlands:
+	case .Basalt_Spire_Highlands, .Emberglass_Badlands:
 		if family_id == .Stone_Tree {
 			return decoration_tree_shape_stone(variant)
 		}
@@ -1768,6 +2157,11 @@ decoration_tree_shape_fungal :: proc(biome_id: BiomeID, variant: u8) -> Decorati
 
 when ODIN_DEBUG {
 	decoration_debug_contract_checks_run :: proc() {
+		log.assert(
+			DECORATION_SURFACE_SLOT_COUNT_MAX >= 3,
+			"surface decoration catalog should keep separate tree, organic, and structure slots",
+		)
+
 		key := feature_grid_key_make(0xdec0de, 1)
 		owner := FeatureGridCoord2 {
 			x = 0,
@@ -1791,8 +2185,12 @@ when ODIN_DEBUG {
 		}
 		family_id, _, found := decoration_cave_family_for_node(fungal_node)
 		log.assert(
-			found && family_id == .Fungal_Tree,
-			"fungal major cave nodes should produce fungal decoration candidates",
+			found &&
+			(family_id == .Fungal_Tree ||
+					family_id == .Root_Cluster ||
+					family_id == .Coral_DLA_Cluster ||
+					family_id == .Cave_Ruin_Hall),
+			"fungal major cave nodes should produce organic decoration candidates",
 		)
 
 		crystal_profile := decoration_family_profile_for(.Crystal_Growth_Cluster)
@@ -1813,9 +2211,12 @@ when ODIN_DEBUG {
 			family_id: DecorationFamilyID,
 		} {
 			{.Temperate_Hills, .Baseline_Tree},
+			{.Old_Growth_Forest, .Baseline_Tree},
 			{.Wet_Lowland_Marsh, .Baseline_Tree},
 			{.Corrupted_Ash_Forest, .Dead_Ash_Tree},
+			{.Corrupted_Fen, .Dead_Ash_Tree},
 			{.Basalt_Spire_Highlands, .Stone_Tree},
+			{.Emberglass_Badlands, .Stone_Tree},
 			{.Fungal_Vaults, .Fungal_Tree},
 		}
 		for tree_profile in tree_profiles {
@@ -1834,5 +2235,47 @@ when ODIN_DEBUG {
 				)
 			}
 		}
+
+		structure_families := [?]DecorationFamilyID {
+			.Ruin_Hamlet,
+			.Watchtower_Ruin,
+			.Palisade_Fort,
+			.Cave_Ruin_Hall,
+		}
+		for structure_family in structure_families {
+			profile := decoration_family_profile_for(structure_family)
+			log.assert(
+				profile.radius_blocks >= 7 && profile.max_height >= 7,
+				"structure decoration families must be large enough to read as structures",
+			)
+		}
+
+		structure_found := false
+		for owner_z := i32(-8); owner_z <= 8 && !structure_found; owner_z += 1 {
+			for owner_x := i32(-8); owner_x <= 8 && !structure_found; owner_x += 1 {
+				point := decoration_surface_slot_point_from_owner(
+					key,
+					FeatureGridCoord2{x = owner_x, z = owner_z},
+					2,
+				)
+				density_class := decoration_surface_density_class_from_strength(
+					decoration_surface_patch_strength_for_point(key, point, .Temperate_Hills),
+				)
+				family := decoration_surface_family_select(
+					point.id,
+					.Temperate_Hills,
+					.Baseline_Tree,
+					density_class,
+					2,
+				)
+				if family == .Ruin_Hamlet ||
+				   family == .Watchtower_Ruin ||
+				   family == .Palisade_Fort ||
+				   family == .Ruin_Pillar_Set {
+					structure_found = true
+				}
+			}
+		}
+		log.assert(structure_found, "surface slot 2 should produce visible structure families")
 	}
 }
