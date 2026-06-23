@@ -1,6 +1,6 @@
 struct TerrainMaterials
 {
-    float4 colors[8];
+    float4 colors[32];
 };
 
 struct FragmentInput
@@ -37,13 +37,15 @@ float face_shade(uint normal_id)
 float4 main(FragmentInput input) : SV_Target0
 {
     uint palette_index = input.material_id & 7u;
+    uint color_variant = (input.material_id >> 5u) & 3u;
+    uint color_index = palette_index + color_variant * 8u;
     bool cave_debug_on = terrain_materials.colors[6].a > 0.5f;
     bool hydrology_debug_on = terrain_materials.colors[7].a > 0.5f;
     bool decoration_debug_on = terrain_materials.colors[5].a > 0.5f;
     bool hydrology_marked = (input.material_id & 8u) != 0u;
     bool cave_network_marked = (input.material_id & 16u) != 0u;
     bool decoration_marked = hydrology_marked && cave_network_marked;
-    float3 color = terrain_materials.colors[palette_index].rgb * face_shade(input.normal_id);
+    float3 color = terrain_materials.colors[color_index].rgb * face_shade(input.normal_id);
 
     if (hydrology_debug_on && hydrology_marked)
     {
