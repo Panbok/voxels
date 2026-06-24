@@ -20,6 +20,7 @@ WORLD_MESH_BENCHMARK_LEGACY_ITERATIONS :: 8
 WORLD_MESH_BENCHMARK_VERSION :: "1"
 TERRAIN_GENERATION_BENCHMARK_VERSION :: "1"
 TERRAIN_GENERATION_DIAGNOSTIC_BENCHMARK_VERSION :: "1"
+TERRAIN_COMPONENT_BENCHMARK_VERSION :: "1"
 TERRAIN_GENERATION_LEGACY_ITERATIONS :: 1
 TERRAIN_GENERATION_LEGACY_RESET_CACHE :: true
 TERRAIN_GENERATION_LEGACY_CAVE_ONLY :: false
@@ -5576,6 +5577,870 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 			)
 		}
 
+		TerrainComponentBenchmarkKind :: enum {
+			Water_Volume_Fill,
+			Surface_Morphology_Columns,
+			Meshing_Generated_Chunk_Build,
+			Density_Math_Core,
+			Decoration_Pass,
+			Cave_Materials_Wall_Neighbors,
+		}
+
+		TerrainComponentBenchmarkFixture :: struct {
+			kind:         TerrainComponentBenchmarkKind,
+			fixture_name: string,
+			seed:         u32,
+			key:          biomes.FeatureGridKey,
+			coords:       TerrainGenerationBenchmarkCoords,
+			coord:        world_async.ChunkCoord,
+			origin:       world_async.BlockCoord,
+			region:       ^biomes.GenerationRegion,
+			columns:      ^[CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH]TerrainBiomeColumn,
+			base_view:    world_async.ChunkVoxelView,
+			work_view:    world_async.ChunkVoxelView,
+			initialized:  bool,
+		}
+
+		TerrainComponentBenchmarkResult :: struct {
+			operation_count:                  u64,
+			column_count:                     u64,
+			sample_count:                     u64,
+			block_count:                      u64,
+			face_count:                       u64,
+			output_bytes:                     u64,
+			surface_candidates:               u64,
+			surface_accepted:                 u64,
+			surface_tree_instances_attempted: u64,
+			surface_tree_instances_accepted:  u64,
+			surface_tree_root_rejected:       u64,
+			surface_tree_shape_rejected:      u64,
+			cave_candidates:                  u64,
+			cave_accepted:                    u64,
+			blocks_written:                   u64,
+			checksum:                         u64,
+		}
+
+		terrain_component_benchmark_metrics := [?]bench.BenchmarkMetricDescriptor {
+			{
+				name = "operation_count",
+				kind = .U64,
+				offset = offset_of(TerrainComponentBenchmarkResult, operation_count),
+				reduce = .Sum,
+				description = "Domain operation count for the component workload",
+			},
+			{
+				name = "column_count",
+				kind = .U64,
+				offset = offset_of(TerrainComponentBenchmarkResult, column_count),
+				reduce = .Sum,
+				unit = "columns",
+			},
+			{
+				name = "sample_count",
+				kind = .U64,
+				offset = offset_of(TerrainComponentBenchmarkResult, sample_count),
+				reduce = .Sum,
+				unit = "samples",
+			},
+			{
+				name = "block_count",
+				kind = .U64,
+				offset = offset_of(TerrainComponentBenchmarkResult, block_count),
+				reduce = .Last,
+				unit = "blocks",
+			},
+			{
+				name = "faces",
+				kind = .U64,
+				offset = offset_of(TerrainComponentBenchmarkResult, face_count),
+				reduce = .Last,
+				unit = "faces",
+			},
+			{
+				name = "output_bytes",
+				kind = .U64,
+				offset = offset_of(TerrainComponentBenchmarkResult, output_bytes),
+				reduce = .Last,
+				unit = "bytes",
+			},
+			{
+				name = "surface_candidates",
+				kind = .U64,
+				offset = offset_of(TerrainComponentBenchmarkResult, surface_candidates),
+				reduce = .Sum,
+			},
+			{
+				name = "surface_accepted",
+				kind = .U64,
+				offset = offset_of(TerrainComponentBenchmarkResult, surface_accepted),
+				reduce = .Sum,
+			},
+			{
+				name = "surface_tree_instances_attempted",
+				kind = .U64,
+				offset = offset_of(
+					TerrainComponentBenchmarkResult,
+					surface_tree_instances_attempted,
+				),
+				reduce = .Sum,
+			},
+			{
+				name = "surface_tree_instances_accepted",
+				kind = .U64,
+				offset = offset_of(
+					TerrainComponentBenchmarkResult,
+					surface_tree_instances_accepted,
+				),
+				reduce = .Sum,
+			},
+			{
+				name = "surface_tree_root_rejected",
+				kind = .U64,
+				offset = offset_of(TerrainComponentBenchmarkResult, surface_tree_root_rejected),
+				reduce = .Sum,
+			},
+			{
+				name = "surface_tree_shape_rejected",
+				kind = .U64,
+				offset = offset_of(TerrainComponentBenchmarkResult, surface_tree_shape_rejected),
+				reduce = .Sum,
+			},
+			{
+				name = "cave_candidates",
+				kind = .U64,
+				offset = offset_of(TerrainComponentBenchmarkResult, cave_candidates),
+				reduce = .Sum,
+			},
+			{
+				name = "cave_accepted",
+				kind = .U64,
+				offset = offset_of(TerrainComponentBenchmarkResult, cave_accepted),
+				reduce = .Sum,
+			},
+			{
+				name = "blocks_written",
+				kind = .U64,
+				offset = offset_of(TerrainComponentBenchmarkResult, blocks_written),
+				reduce = .Sum,
+				unit = "blocks",
+			},
+			{
+				name = "checksum",
+				kind = .U64,
+				offset = offset_of(TerrainComponentBenchmarkResult, checksum),
+				reduce = .Sum,
+			},
+		}
+
+		terrain_component_benchmark_kind_name :: proc(
+			kind: TerrainComponentBenchmarkKind,
+		) -> string {
+			switch kind {
+			case .Water_Volume_Fill:
+				return "water_volume_fill"
+			case .Surface_Morphology_Columns:
+				return "surface_morphology_columns"
+			case .Meshing_Generated_Chunk_Build:
+				return "meshing_generated_chunk_build"
+			case .Density_Math_Core:
+				return "density_math_core"
+			case .Decoration_Pass:
+				return "decoration_pass"
+			case .Cave_Materials_Wall_Neighbors:
+				return "cave_materials_wall_neighbors"
+			}
+			return "unknown"
+		}
+
+		terrain_component_benchmark_coords_for_kind :: proc(
+			kind: TerrainComponentBenchmarkKind,
+			key: biomes.FeatureGridKey,
+		) -> TerrainGenerationBenchmarkCoords {
+			switch kind {
+			case .Water_Volume_Fill:
+				return terrain_generation_benchmark_surface_water_coords_make(key)
+			case .Surface_Morphology_Columns, .Meshing_Generated_Chunk_Build:
+				selection := terrain_generation_benchmark_surface_morphology_feature_selection(key)
+				return terrain_generation_benchmark_surface_morphology_feature_coords_make(
+					selection,
+				)
+			case .Decoration_Pass:
+				selection := terrain_generation_benchmark_surface_fortress_selection(key)
+				return terrain_generation_benchmark_surface_fortress_coords_make(selection)
+			case .Cave_Materials_Wall_Neighbors, .Density_Math_Core:
+				return terrain_generation_registered_coords_for_phase(.Cave_Hot_Region_Cache, key)
+			}
+			return terrain_generation_benchmark_surface_water_coords_make(key)
+		}
+
+		terrain_component_benchmark_surface_columns_prepare :: proc(
+			fixture: ^TerrainComponentBenchmarkFixture,
+		) {
+			fixture.origin = chunk_origin_from_coord(fixture.coord)
+			region_coord := biomes.generation_region_coord_from_block(
+				fixture.origin.x,
+				fixture.origin.y,
+				fixture.origin.z,
+			)
+			fixture.region^ = terrain_generation_region_for_fill(fixture.key, region_coord)
+			water_separator_samples: [CHUNK_BLOCK_LENGTH *
+			CHUNK_BLOCK_LENGTH]TerrainWaterSeparatorSample
+			for z in 0 ..< CHUNK_BLOCK_LENGTH {
+				world_z := fixture.origin.z + i32(z)
+				profile_row_cache := biomes.surface_biome_profile_row_cache_make(
+					fixture.key,
+					world_z,
+				)
+				for x in 0 ..< CHUNK_BLOCK_LENGTH {
+					world_x := fixture.origin.x + i32(x)
+					surface_sample := biomes.surface_biome_field_sample_from_region(
+						fixture.region,
+						world_x,
+						world_z,
+					)
+					hydrology_sample := biomes.hydrology_layer_surface_sample_from_region(
+						fixture.region,
+						world_x,
+						world_z,
+					)
+					evaluation := biomes.surface_biome_profile_evaluate_with_hydrology(
+						fixture.key,
+						surface_sample,
+						hydrology_sample,
+						world_x,
+						world_z,
+						&profile_row_cache,
+					)
+					evaluation = terrain_surface_morphology_apply_feature_envelopes(
+						evaluation,
+						fixture.region.surface_morphology_features[:],
+						fixture.region.surface_morphology_feature_count,
+						world_x,
+						world_z,
+					)
+					column_index := x + z * CHUNK_BLOCK_LENGTH
+					column := terrain_biome_column_from_profile_evaluation(
+						fixture.key,
+						evaluation,
+						world_x,
+						world_z,
+					)
+					fixture.columns^[column_index] = column
+					water_separator_samples[column_index] =
+						terrain_water_separator_sample_from_column_and_hydrology(
+							column,
+							evaluation.hydrology_sample,
+						)
+				}
+			}
+			terrain_surface_water_separators_apply(
+				fixture.key,
+				fixture.region,
+				fixture.origin,
+				fixture.columns^[:],
+				water_separator_samples[:],
+			)
+			terrain_decoration_surface_structure_pads_apply(
+				fixture.region,
+				fixture.origin,
+				fixture.columns^[:],
+			)
+		}
+
+		terrain_component_benchmark_view_fill_solid :: proc(view: ^world_async.ChunkVoxelView) {
+			mem.set(
+				rawptr(view.blocks.occupancy),
+				u8(world_async.BlockOccupancy.Solid),
+				CHUNK_BLOCK_COUNT,
+			)
+			mem.set(
+				rawptr(view.blocks.material_id),
+				u8(world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)),
+				CHUNK_BLOCK_COUNT,
+			)
+		}
+
+		terrain_component_benchmark_active_water_columns_count :: proc(
+			fixture: ^TerrainComponentBenchmarkFixture,
+		) -> u64 {
+			active_columns := u64(0)
+			for column in fixture.columns^ {
+				if column.water_fill_active {
+					active_columns += 1
+				}
+			}
+			return active_columns
+		}
+
+		terrain_component_benchmark_fixture_init :: proc(
+			fixture: ^TerrainComponentBenchmarkFixture,
+			allocator: mem.Allocator,
+		) {
+			if fixture.initialized {
+				return
+			}
+
+			fixture.seed = 0
+			fixture.key = terrain_generation_key_make(fixture.seed)
+			fixture.fixture_name = terrain_component_benchmark_kind_name(fixture.kind)
+			fixture.coords = terrain_component_benchmark_coords_for_kind(fixture.kind, fixture.key)
+			fixture.coord = fixture.coords[0]
+
+			terrain_generation_chunk_cache_init(allocator)
+			terrain_generation_cave_overlay_cache_init(allocator)
+			terrain_generation_benchmark_cache_clear()
+
+			if fixture.kind != .Density_Math_Core &&
+			   fixture.kind != .Cave_Materials_Wall_Neighbors {
+				fixture.region = new(biomes.GenerationRegion, allocator)
+				fixture.columns = new(
+					[CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH]TerrainBiomeColumn,
+					allocator,
+				)
+			}
+
+			if fixture.kind != .Surface_Morphology_Columns && fixture.kind != .Density_Math_Core {
+				chunk_voxel_view_alloc(&fixture.base_view, allocator)
+				chunk_voxel_view_alloc(&fixture.work_view, allocator)
+			}
+
+			switch fixture.kind {
+			case .Water_Volume_Fill:
+				for coord in fixture.coords {
+					fixture.coord = coord
+					terrain_component_benchmark_surface_columns_prepare(fixture)
+					if terrain_component_benchmark_active_water_columns_count(fixture) > 0 {
+						break
+					}
+				}
+				chunk_voxel_view_fill_empty(&fixture.base_view)
+			case .Surface_Morphology_Columns:
+				for coord in fixture.coords {
+					origin := chunk_origin_from_coord(coord)
+					region_coord := biomes.generation_region_coord_from_block(
+						origin.x,
+						origin.y,
+						origin.z,
+					)
+					_ = terrain_generation_region_for_fill(fixture.key, region_coord)
+				}
+			case .Meshing_Generated_Chunk_Build, .Decoration_Pass:
+				terrain_component_benchmark_surface_columns_prepare(fixture)
+				terrain_heightfield_voxel_view_fill_quality(
+					&fixture.base_view,
+					fixture.coord,
+					fixture.seed,
+					.Full,
+				)
+			case .Cave_Materials_Wall_Neighbors:
+				fixture.origin = chunk_origin_from_coord(fixture.coord)
+				terrain_component_benchmark_view_fill_solid(&fixture.base_view)
+			case .Density_Math_Core:
+				fixture.origin = {
+					x = -64,
+					y = -32,
+					z = 96,
+				}
+			}
+			if len(fixture.work_view.blocks) == CHUNK_BLOCK_COUNT &&
+			   len(fixture.base_view.blocks) == CHUNK_BLOCK_COUNT {
+				chunk_voxel_view_copy(&fixture.work_view, &fixture.base_view)
+			}
+			fixture.initialized = true
+		}
+
+		terrain_component_benchmark_setup :: proc(
+			ctx: ^bench.BenchmarkContext,
+			data: rawptr,
+		) -> bench.BenchmarkStatus {
+			fixture := (^TerrainComponentBenchmarkFixture)(data)
+			terrain_component_benchmark_fixture_init(fixture, ctx.allocator)
+			return bench.status_pass()
+		}
+
+		terrain_component_benchmark_abs_scaled_u64 :: proc(value: f32) -> u64 {
+			scaled_value := value
+			if scaled_value < 0 {
+				scaled_value = -scaled_value
+			}
+			return u64(scaled_value * 1000)
+		}
+
+		terrain_component_benchmark_density_math_core_run :: proc(
+			fixture: ^TerrainComponentBenchmarkFixture,
+			out: ^TerrainComponentBenchmarkResult,
+			iteration_index: u64,
+		) {
+			origin := fixture.origin
+			key := fixture.key
+			checksum := u64(iteration_index + 1)
+			operation_count := u64(0)
+			sample_count := u64(0)
+
+			for row := i32(0); row < 64; row += 1 {
+				world_y := f32(origin.y + (row & 31)) + 0.5
+				world_z := f32(origin.z + ((row * 7) & 31)) + 0.5
+				from_x := f32(origin.x - 19) + f32(row & 7) * 0.5
+				from_y := f32(origin.y - 7)
+				from_z := f32(origin.z + 9)
+				to_x := f32(origin.x + 77)
+				to_y := f32(origin.y + 52)
+				to_z := f32(origin.z + 37)
+				nearest_x, nearest_y, nearest_z, distance :=
+					terrain_density_closest_segment_point_3(
+						f32(origin.x + row),
+						world_y,
+						world_z,
+						from_x,
+						from_y,
+						from_z,
+						to_x,
+						to_y,
+						to_z,
+					)
+				checksum =
+					checksum * 1099511628211 ~
+					terrain_component_benchmark_abs_scaled_u64(
+						nearest_x + nearest_y + nearest_z + distance,
+					)
+				operation_count += 1
+
+				t_min, t_max, segment_intersects := terrain_density_segment_chunk_overlap(
+					origin,
+					from_x,
+					from_y,
+					from_z,
+					to_x,
+					to_y,
+					to_z,
+					12.0,
+				)
+				if segment_intersects {
+					checksum =
+						checksum * 1099511628211 ~
+						terrain_component_benchmark_abs_scaled_u64(t_min + t_max)
+				}
+				operation_count += 1
+
+				row_min_x, row_max_x, row_intersects := terrain_density_ellipsoid_row_x_bounds(
+					origin,
+					0,
+					CHUNK_BLOCK_LENGTH - 1,
+					f32(origin.x + 16),
+					22.0,
+					f32((row & 15) - 8) * f32((row & 15) - 8) / 80.0,
+					1.0,
+				)
+				if row_intersects {
+					checksum =
+						checksum * 1099511628211 ~ u64(row_min_x + row_max_x + CHUNK_BLOCK_LENGTH)
+				}
+				operation_count += 1
+
+				row_min_x, row_max_x, row_intersects =
+					terrain_density_segment_capsule_row_x_bounds(
+						origin,
+						0,
+						CHUNK_BLOCK_LENGTH - 1,
+						world_y,
+						world_z,
+						from_x,
+						from_y,
+						from_z,
+						0.72,
+						0.43,
+						0.54,
+						8.5,
+					)
+				if row_intersects {
+					checksum =
+						checksum * 1099511628211 ~
+						u64(row_min_x * 17 + row_max_x + CHUNK_BLOCK_LENGTH)
+				}
+				operation_count += 1
+
+				row_min_x, row_max_x, row_intersects =
+					terrain_density_dual_axis_ellipse_row_x_bounds(
+						origin,
+						0,
+						CHUNK_BLOCK_LENGTH - 1,
+						world_y,
+						world_z,
+						f32(origin.x + 10),
+						f32(origin.y + 6),
+						f32(origin.z + 12),
+						0.86,
+						0.16,
+						0.48,
+						-0.32,
+						0.88,
+						0.34,
+						18.0,
+						7.0,
+						1.0,
+					)
+				if row_intersects {
+					checksum =
+						checksum * 1099511628211 ~
+						u64(row_min_x * 31 + row_max_x + CHUNK_BLOCK_LENGTH)
+				}
+				operation_count += 1
+
+				ranges: [8]TerrainDensityRowRange
+				range_count := u32(0)
+				terrain_density_row_range_add_merged(&ranges, &range_count, row & 15, 24)
+				terrain_density_row_range_add_merged(&ranges, &range_count, 12, 31)
+				terrain_density_route_pocket_row_range_add_component(
+					&ranges,
+					&range_count,
+					0,
+					CHUNK_BLOCK_LENGTH - 1,
+					-8.0 + f32(row & 7),
+					0.7,
+					f32(row & 11),
+					3.5,
+					-0.35,
+					0.4,
+					0.0,
+					8.0,
+					11.0,
+					6.0,
+					1.0,
+					1.0,
+				)
+				checksum = checksum * 1099511628211 ~ u64(range_count + 1)
+				operation_count += 3
+
+				noise_cache := terrain_value_noise3_row_cache_make(
+					key,
+					0x6e9174d5a2c34811,
+					16,
+					origin.y + row,
+					origin.z + row * 3,
+				)
+				for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+					value := terrain_value_noise3_row_cache_sample(&noise_cache, origin.x + x)
+					checksum =
+						checksum * 1099511628211 ~
+						terrain_component_benchmark_abs_scaled_u64(value)
+					sample_count += 1
+				}
+				operation_count += u64(CHUNK_BLOCK_LENGTH)
+			}
+
+			out.operation_count += operation_count
+			out.sample_count += sample_count
+			out.checksum += checksum
+		}
+
+		terrain_component_benchmark_cave_materials_run :: proc(
+			fixture: ^TerrainComponentBenchmarkFixture,
+			out: ^TerrainComponentBenchmarkResult,
+			iteration_index: u64,
+		) {
+			chunk_voxel_view_copy(&fixture.work_view, &fixture.base_view)
+			biome_ids := [?]biomes.BiomeID {
+				.Fungal_Vaults,
+				.Crystal_Geode_Network,
+				.Buried_Aquifer_Caves,
+			}
+			operation_count := u64(0)
+			wall_neighbor_calls := u64(0)
+			checksum := u64(iteration_index + 1)
+			for z := i32(2); z < CHUNK_BLOCK_LENGTH - 2; z += 5 {
+				for y := i32(2); y < CHUNK_BLOCK_LENGTH - 2; y += 5 {
+					for x := i32(2); x < CHUNK_BLOCK_LENGTH - 2; x += 5 {
+						center_index := chunk_block_index(u32(x), u32(y), u32(z))
+						fixture.work_view.blocks.occupancy[center_index] = .Empty
+						biome_index := int(
+							(iteration_index + wall_neighbor_calls) % u64(len(biome_ids)),
+						)
+						biome_id := biome_ids[biome_index]
+						wall_material_id, floor_material_id, ceiling_material_id :=
+							terrain_cave_material_profile(biome_id)
+						checksum = checksum * 1099511628211 ~ u64(wall_material_id)
+						checksum = checksum * 1099511628211 ~ u64(floor_material_id)
+						checksum = checksum * 1099511628211 ~ u64(ceiling_material_id)
+						terrain_density_mark_cave_wall_neighbors(
+							&fixture.work_view,
+							x,
+							y,
+							z,
+							biome_id,
+							true,
+						)
+						operation_count += 1
+						wall_neighbor_calls += 1
+					}
+				}
+			}
+			face_materials := [?]u32 {
+				TERRAIN_STONE_MAT_ID,
+				TERRAIN_AQUIFER_WALL_MAT_ID,
+				TERRAIN_CRYSTAL_MAT_ID,
+			}
+			for normal_id := u32(0); normal_id < 6; normal_id += 1 {
+				for material_id in face_materials {
+					face_material := terrain_binary_cave_face_material_index(
+						normal_id,
+						material_id,
+					)
+					checksum = checksum * 1099511628211 ~ u64(face_material + normal_id)
+					operation_count += 1
+				}
+			}
+			out.operation_count += operation_count
+			out.blocks_written += wall_neighbor_calls * 6
+			out.checksum += checksum
+		}
+
+		terrain_component_benchmark_run :: proc(
+			ctx: ^bench.BenchmarkContext,
+			data: rawptr,
+			result: rawptr,
+		) -> bench.BenchmarkStatus {
+			fixture := (^TerrainComponentBenchmarkFixture)(data)
+			out := (^TerrainComponentBenchmarkResult)(result)
+
+			switch fixture.kind {
+			case .Water_Volume_Fill:
+				chunk_voxel_view_copy(&fixture.work_view, &fixture.base_view)
+				active_columns := terrain_component_benchmark_active_water_columns_count(fixture)
+				terrain_water_volume_fill(&fixture.work_view, fixture.origin, fixture.columns^[:])
+				out.operation_count += u64(CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH)
+				out.column_count += active_columns
+			case .Surface_Morphology_Columns:
+				stats := terrain_generation_benchmark_surface_morphology_stats_from_coords(
+					fixture.coords,
+					fixture.seed,
+				)
+				out.operation_count += stats.sample_count
+				out.column_count += stats.active_column_count
+				out.sample_count += stats.sample_count
+				out.block_count = stats.morphology_solid_count
+				out.blocks_written += stats.added_solid_count + stats.removed_solid_count
+				out.checksum +=
+					stats.base_solid_count * 131 +
+					stats.morphology_solid_count * 197 +
+					stats.feature_column_count * 17 +
+					u64(ctx.iteration_index + 1)
+			case .Meshing_Generated_Chunk_Build:
+				if ctx.temp_arena == nil {
+					return bench.status_fail("terrain component meshing requires a temp arena")
+				}
+				temp := mem.begin_arena_temp_memory(ctx.temp_arena)
+				defer mem.end_arena_temp_memory(temp)
+				allocator := mem.arena_allocator(ctx.temp_arena)
+				scratch := terrain_binary_greedy_scratch_alloc(ctx.temp_arena)
+				mesh_output := chunk_mesher_benchmark_build_once(
+					fixture.base_view,
+					.Greedy_Binary,
+					allocator,
+					scratch,
+				)
+				out.face_count = u64(mesh_output.face_count)
+				out.output_bytes =
+					u64(len(mesh_output.vertices) * size_of(world_async.TerrainPackedVertex)) +
+					u64(len(mesh_output.indices) * size_of(u32))
+				out.checksum +=
+					out.face_count * 131 + out.output_bytes * 17 + u64(ctx.iteration_index + 1)
+			case .Density_Math_Core:
+				terrain_component_benchmark_density_math_core_run(
+					fixture,
+					out,
+					ctx.iteration_index,
+				)
+			case .Decoration_Pass:
+				chunk_voxel_view_copy(&fixture.work_view, &fixture.base_view)
+				stats := terrain_decoration_pass_apply(
+					&fixture.work_view,
+					fixture.region,
+					fixture.origin,
+					fixture.columns^[:],
+				)
+				out.operation_count += u64(stats.surface_candidates + stats.cave_candidates)
+				out.surface_candidates += u64(stats.surface_candidates)
+				out.surface_accepted += u64(stats.surface_accepted)
+				out.surface_tree_instances_attempted += u64(stats.surface_tree_instances_attempted)
+				out.surface_tree_instances_accepted += u64(stats.surface_tree_instances_accepted)
+				out.surface_tree_root_rejected += u64(stats.surface_tree_root_rejected)
+				out.surface_tree_shape_rejected += u64(stats.surface_tree_shape_rejected)
+				out.cave_candidates += u64(stats.cave_candidates)
+				out.cave_accepted += u64(stats.cave_accepted)
+				out.blocks_written += u64(stats.blocks_written)
+				out.checksum +=
+					u64(stats.surface_candidates) * 131 +
+					u64(stats.surface_accepted) * 197 +
+					u64(stats.cave_candidates) * 251 +
+					u64(stats.blocks_written) * 17 +
+					u64(ctx.iteration_index + 1)
+			case .Cave_Materials_Wall_Neighbors:
+				terrain_component_benchmark_cave_materials_run(fixture, out, ctx.iteration_index)
+			}
+
+			return bench.status_pass()
+		}
+
+		terrain_component_benchmark_finalize :: proc(
+			ctx: ^bench.BenchmarkContext,
+			data: rawptr,
+			result: rawptr,
+		) -> bench.BenchmarkStatus {
+			fixture := (^TerrainComponentBenchmarkFixture)(data)
+			out := (^TerrainComponentBenchmarkResult)(result)
+			switch fixture.kind {
+			case .Water_Volume_Fill, .Decoration_Pass, .Cave_Materials_Wall_Neighbors:
+				if len(fixture.work_view.blocks) == CHUNK_BLOCK_COUNT {
+					view_checksum, material_stats := terrain_generation_benchmark_checksum(
+						fixture.work_view,
+					)
+					out.checksum = out.checksum * 1099511628211 ~ view_checksum
+					#partial switch fixture.kind {
+					case .Water_Volume_Fill:
+						out.block_count = material_stats.water_count
+					case .Decoration_Pass, .Cave_Materials_Wall_Neighbors:
+						out.block_count = material_stats.solid_count
+					}
+				}
+			case .Meshing_Generated_Chunk_Build, .Surface_Morphology_Columns, .Density_Math_Core:
+			}
+			_ = ctx
+			return bench.status_pass()
+		}
+
+		terrain_component_benchmark_fixture_write :: proc(
+			ctx: ^bench.BenchmarkContext,
+			data: rawptr,
+			writer: ^bench.BenchmarkMetadataWriter,
+		) -> bench.BenchmarkStatus {
+			fixture := (^TerrainComponentBenchmarkFixture)(data)
+			bench.metadata_string(writer, "fixture_name", fixture.fixture_name)
+			bench.metadata_string(
+				writer,
+				"component",
+				terrain_component_benchmark_kind_name(fixture.kind),
+			)
+			bench.metadata_u64(writer, "seed", u64(fixture.seed))
+			bench.metadata_string(
+				writer,
+				"coord",
+				fmt.aprintf(
+					"(%d,%d,%d)",
+					fixture.coord.x,
+					fixture.coord.y,
+					fixture.coord.z,
+					allocator = writer.allocator,
+				),
+			)
+			bench.metadata_u64(
+				writer,
+				"chunk_columns",
+				u64(CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH),
+				"columns",
+			)
+			bench.metadata_u64(writer, "chunk_blocks", u64(CHUNK_BLOCK_COUNT), "blocks")
+			bench.metadata_bool(writer, "reset_view_each_iteration", true)
+			bench.metadata_string(writer, "cache_ownership_mode", "global_serial")
+			_ = ctx
+			return bench.status_pass()
+		}
+
+		terrain_component_benchmark_case_flags :: proc(
+			kind: TerrainComponentBenchmarkKind,
+		) -> bench.BenchmarkCaseFlags {
+			switch kind {
+			case .Surface_Morphology_Columns:
+				return {.Serial_Only, .Uses_Shared_Caches}
+			case .Water_Volume_Fill, .Meshing_Generated_Chunk_Build, .Decoration_Pass:
+				return {.Serial_Only, .Uses_Shared_Caches}
+			case .Density_Math_Core, .Cave_Materials_Wall_Neighbors:
+				return {.Serial_Only}
+			}
+			return {.Serial_Only}
+		}
+
+		terrain_component_benchmark_case_register :: proc(
+			registry: ^bench.BenchmarkRegistry,
+			name: string,
+			kind: TerrainComponentBenchmarkKind,
+			iterations: u32,
+			warmup_iterations: u32,
+		) {
+			fixture := TerrainComponentBenchmarkFixture {
+				kind         = kind,
+				fixture_name = terrain_component_benchmark_kind_name(kind),
+			}
+			bench.register(
+				registry,
+				name,
+				terrain_component_benchmark_run,
+				rawptr(&fixture),
+				nil,
+				{
+					iterations = iterations,
+					warmup_iterations = warmup_iterations,
+					workers = 1,
+					result_size = size_of(TerrainComponentBenchmarkResult),
+					result_align = align_of(TerrainComponentBenchmarkResult),
+					data_size = size_of(TerrainComponentBenchmarkFixture),
+					data_align = align_of(TerrainComponentBenchmarkFixture),
+					metrics = terrain_component_benchmark_metrics[:],
+					flags = terrain_component_benchmark_case_flags(kind),
+					warmup_mode = .Serial,
+					setup = terrain_component_benchmark_setup,
+					finalize = terrain_component_benchmark_finalize,
+					write_fixture = terrain_component_benchmark_fixture_write,
+					category = "world.terrain_component",
+					version = TERRAIN_COMPONENT_BENCHMARK_VERSION,
+				},
+			)
+		}
+
+		terrain_component_benchmarks_register :: proc(registry: ^bench.BenchmarkRegistry) {
+			terrain_component_benchmark_case_register(
+				registry,
+				"world.terrain_component.water.volume_fill",
+				.Water_Volume_Fill,
+				200,
+				10,
+			)
+			terrain_component_benchmark_case_register(
+				registry,
+				"world.terrain_component.surface_morphology.columns",
+				.Surface_Morphology_Columns,
+				1,
+				0,
+			)
+			terrain_component_benchmark_case_register(
+				registry,
+				"world.terrain_component.meshing.generated_chunk.build",
+				.Meshing_Generated_Chunk_Build,
+				500,
+				10,
+			)
+			terrain_component_benchmark_case_register(
+				registry,
+				"world.terrain_component.density_math.core",
+				.Density_Math_Core,
+				300,
+				10,
+			)
+			terrain_component_benchmark_case_register(
+				registry,
+				"world.terrain_component.decoration.pass",
+				.Decoration_Pass,
+				20,
+				2,
+			)
+			terrain_component_benchmark_case_register(
+				registry,
+				"world.terrain_component.cave_materials.wall_neighbors",
+				.Cave_Materials_Wall_Neighbors,
+				200,
+				10,
+			)
+		}
+
 		TerrainGenerationDiagnosticKind :: enum {
 			Cave_Slice,
 			Surface_Morphology_Capture,
@@ -5744,6 +6609,7 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 		}
 
 		terrain_generation_benchmarks_register :: proc(registry: ^bench.BenchmarkRegistry) {
+			terrain_component_benchmarks_register(registry)
 			terrain_generation_registered_case_register(
 				registry,
 				"world.terrain_generation.cave_hot_region_cache",

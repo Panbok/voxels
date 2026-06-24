@@ -572,6 +572,17 @@ terrain_generation_key_make :: proc(seed: u32) -> biomes.FeatureGridKey {
 	return biomes.feature_grid_key_make(u64(seed), TERRAIN_GENERATOR_VERSION)
 }
 
+terrain_generation_region_cache_clear :: proc() {
+	cache := &state.terrain_generation_region_cache
+	sync.lock(&cache.mutex)
+	defer sync.unlock(&cache.mutex)
+
+	for i := u32(0); i < TERRAIN_GENERATION_REGION_CACHE_CAPACITY; i += 1 {
+		cache.slots[i].valid = false
+	}
+	cache.clock = 0
+}
+
 terrain_generation_region_for_fill :: proc(
 	key: biomes.FeatureGridKey,
 	coord: biomes.GenerationRegionCoord,
