@@ -15,6 +15,10 @@ $ExePath = Join-Path $BuildDir "release_build.exe"
 $AsyncCollectionDir = Join-Path $SourceDir "async"
 $GfxCollectionDir = Join-Path $SourceDir "gfx"
 $WorldCollectionDir = Join-Path $SourceDir "world"
+$OdinExtraFlags = @()
+if ($env:ODIN_EXTRA_FLAGS) {
+	$OdinExtraFlags = $env:ODIN_EXTRA_FLAGS -split "\s+" | Where-Object { $_ }
+}
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 
@@ -69,7 +73,7 @@ if (Test-Path $ShaderSourceDir) {
 		}
 }
 
-odin build $SourceDir -collection:app=$SourceDir -collection:async=$AsyncCollectionDir -collection:gfx=$GfxCollectionDir -collection:world=$WorldCollectionDir -out:$ExePath -o:speed
+odin build $SourceDir -collection:app=$SourceDir -collection:async=$AsyncCollectionDir -collection:gfx=$GfxCollectionDir -collection:world=$WorldCollectionDir -out:$ExePath -o:speed @OdinExtraFlags
 if ($LASTEXITCODE -ne 0) {
 	exit $LASTEXITCODE
 }

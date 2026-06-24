@@ -74,6 +74,14 @@ if [[ -n "${ODIN_EXTRA_FLAGS:-}" ]]; then
 	read -r -a ODIN_EXTRA_FLAGS_ARRAY <<< "$ODIN_EXTRA_FLAGS"
 fi
 
+ODIN_DEBUG_VET_FLAGS=(
+	-vet
+	-vet-unused
+	-vet-unused-procedures
+	-vet-packages:main,async,world,world_async,gfx,camera,biomes,bench,vdebug
+	-warnings-as-errors
+)
+
 if [[ ${#ODIN_EXTRA_FLAGS_ARRAY[@]} -gt 0 ]]; then
 	odin build "$SOURCE_DIR" \
 		"-collection:app=$SOURCE_DIR" \
@@ -82,6 +90,7 @@ if [[ ${#ODIN_EXTRA_FLAGS_ARRAY[@]} -gt 0 ]]; then
 		"-collection:world=$WORLD_COLLECTION_DIR" \
 		"-out:$EXE_PATH" \
 		-debug \
+		"${ODIN_DEBUG_VET_FLAGS[@]}" \
 		"${ODIN_EXTRA_FLAGS_ARRAY[@]}" \
 		"-extra-linker-flags:-L$BUILD_DIR -F$FRAMEWORKS_DIR -framework SDL3 -rpath @executable_path/Frameworks"
 else
@@ -92,6 +101,7 @@ else
 		"-collection:world=$WORLD_COLLECTION_DIR" \
 		"-out:$EXE_PATH" \
 		-debug \
+		"${ODIN_DEBUG_VET_FLAGS[@]}" \
 		"-extra-linker-flags:-L$BUILD_DIR -F$FRAMEWORKS_DIR -framework SDL3 -rpath @executable_path/Frameworks"
 fi
 

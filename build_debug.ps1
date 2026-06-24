@@ -16,6 +16,10 @@ $PdbPath = Join-Path $BuildDir "debug_build.pdb"
 $AsyncCollectionDir = Join-Path $SourceDir "async"
 $GfxCollectionDir = Join-Path $SourceDir "gfx"
 $WorldCollectionDir = Join-Path $SourceDir "world"
+$OdinExtraFlags = @()
+if ($env:ODIN_EXTRA_FLAGS) {
+	$OdinExtraFlags = $env:ODIN_EXTRA_FLAGS -split "\s+" | Where-Object { $_ }
+}
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 
@@ -70,7 +74,7 @@ if (Test-Path $ShaderSourceDir) {
 		}
 }
 
-odin build $SourceDir -collection:app=$SourceDir -collection:async=$AsyncCollectionDir -collection:gfx=$GfxCollectionDir -collection:world=$WorldCollectionDir -out:$ExePath -pdb-name:$PdbPath -debug -vet -vet-packages:main,async,world,world_async,gfx,camera,biomes -vet-unused-procedures -warnings-as-errors
+odin build $SourceDir -collection:app=$SourceDir -collection:async=$AsyncCollectionDir -collection:gfx=$GfxCollectionDir -collection:world=$WorldCollectionDir -out:$ExePath -pdb-name:$PdbPath -debug -vet -vet-packages:main,async,world,world_async,gfx,camera,biomes,bench,vdebug -vet-unused-procedures -warnings-as-errors @OdinExtraFlags
 if ($LASTEXITCODE -ne 0) {
 	exit $LASTEXITCODE
 }
