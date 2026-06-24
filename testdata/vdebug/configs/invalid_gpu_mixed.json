@@ -1,0 +1,22 @@
+{
+  "schema": "voxels.visual_debug.config.v1",
+  "run_id": "invalid-gpu-mixed",
+  "captures": [
+    {
+      "id": "gpu_runtime_terrain_window",
+      "case": "gfx.capture.terrain_window",
+      "version": "1",
+      "modes": [
+        {"id": "frame", "kind": "gpu_camera", "width": 64, "height": 64}
+      ]
+    },
+    {
+      "id": "surface_cpu_companion",
+      "case": "world.surface_morphology.feature",
+      "version": "1",
+      "modes": [
+        {"id": "plan", "kind": "orthographic_pixels", "plane": "xz", "width": 32, "height": 32}
+      ]
+    }
+  ]
+}

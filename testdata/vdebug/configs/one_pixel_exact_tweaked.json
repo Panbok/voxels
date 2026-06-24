@@ -1,0 +1,29 @@
+{
+  "schema": "voxels.visual_debug.config.v1",
+  "run_id": "one-pixel-exact-tweaked",
+  "defaults": {
+    "seed": 20260624,
+    "quality": "Full",
+    "compare": true
+  },
+  "captures": [
+    {
+      "id": "one_pixel_exact",
+      "case": "world.surface_morphology.feature",
+      "version": "1",
+      "params": {
+        "cache_mode": "cold",
+        "layer": "surface_height",
+        "debug_tweak": 1,
+        "chunk": {"x": 11, "y": 0, "z": 9}
+      },
+      "modes": [
+        {"id": "pixel", "kind": "orthographic_pixels", "plane": "xz", "width": 1, "height": 1}
+      ],
+      "snapshot": {
+        "baseline": "one_pixel_exact",
+        "tolerance": {"mode": "exact"}
+      }
+    }
+  ]
+}

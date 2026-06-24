@@ -1,0 +1,22 @@
+{
+  "schema": "voxels.visual_debug.config.v1",
+  "run_id": "invalid-duplicate-ids",
+  "captures": [
+    {
+      "id": "duplicate_capture",
+      "case": "world.surface_morphology.feature",
+      "version": "1",
+      "modes": [
+        {"id": "plan", "kind": "orthographic_pixels", "plane": "xz", "width": 32, "height": 32}
+      ]
+    },
+    {
+      "id": "duplicate_capture",
+      "case": "world.cave.view",
+      "version": "1",
+      "modes": [
+        {"id": "ray", "kind": "cpu_raycast", "width": 32, "height": 32}
+      ]
+    }
+  ]
+}

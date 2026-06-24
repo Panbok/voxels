@@ -1,0 +1,95 @@
+{
+  "schema": "voxels.visual_debug.config.v1",
+  "run_id": "multi-component-smoke",
+  "defaults": {
+    "seed": 20260624,
+    "quality": "Full",
+    "compare": false
+  },
+  "output": {
+    "artifact_dir": "artifacts"
+  },
+  "captures": [
+    {
+      "id": "surface_spire_feature_plan",
+      "case": "world.surface_morphology.feature",
+      "version": "1",
+      "params": {
+        "cache_mode": "cold",
+        "layer": "surface_height",
+        "chunk": {"x": 11, "y": 0, "z": 9}
+      },
+      "modes": [
+        {"id": "plan", "kind": "orthographic_pixels", "plane": "xz", "width": 128, "height": 128},
+        {"id": "section", "kind": "orthographic_pixels", "plane": "xy", "width": 128, "height": 96}
+      ]
+    },
+    {
+      "id": "cave_slice_material",
+      "case": "world.cave.slice",
+      "version": "1",
+      "params": {
+        "cache_mode": "disabled",
+        "layer": "material",
+        "chunk": {"x": 0, "y": -2, "z": 0}
+      },
+      "modes": [
+        {"id": "slice", "kind": "orthographic_pixels", "plane": "yz", "width": 128, "height": 128}
+      ]
+    },
+    {
+      "id": "cave_cpu_view",
+      "case": "world.cave.view",
+      "version": "1",
+      "params": {
+        "cache_mode": "cold",
+        "layer": "material",
+        "chunk": {"x": 0, "y": -2, "z": 0}
+      },
+      "modes": [
+        {"id": "ray", "kind": "cpu_raycast", "width": 128, "height": 96}
+      ]
+    },
+    {
+      "id": "water_volume_fill",
+      "case": "world.water.volume_fill",
+      "version": "1",
+      "params": {
+        "cache_mode": "cold",
+        "layer": "water_fill",
+        "chunk": {"x": 3, "y": 0, "z": 4}
+      },
+      "modes": [
+        {"id": "plan", "kind": "orthographic_pixels", "plane": "xz", "width": 128, "height": 128},
+        {"id": "bank_section", "kind": "orthographic_pixels", "plane": "xy", "width": 128, "height": 96}
+      ]
+    },
+    {
+      "id": "decoration_delta_frames",
+      "case": "world.decoration.delta",
+      "version": "1",
+      "params": {
+        "cache_mode": "cold",
+        "layer": "decoration_delta",
+        "chunk": {"x": 8, "y": 0, "z": 8}
+      },
+      "modes": [
+        {"id": "turntable", "kind": "frame_sequence", "frames": 4, "width": 96, "height": 96}
+      ]
+    },
+    {
+      "id": "mesh_face_mask_row_cache",
+      "case": "world.mesh.face_masks",
+      "version": "1",
+      "params": {
+        "cache_mode": "warm",
+        "layer": "mesh_face_mask",
+        "chunk": {"x": 0, "y": 0, "z": 0}
+      },
+      "modes": [
+        {"id": "plan", "kind": "orthographic_pixels", "plane": "xz", "width": 128, "height": 128},
+        {"id": "cross_section", "kind": "orthographic_pixels", "plane": "yz", "width": 128, "height": 96}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "schema": "voxels.visual_debug.baseline.v1",
+  "baseline": "one_pixel_exact",
+  "request_id": "one_pixel_exact",
+  "mode_id": "pixel",
+  "case": "world.surface_morphology.feature",
+  "case_version": "1",
+  "platform_key": "cpu",
+  "created_unix_nano": "1782305616230857000",
+  "artifact":   {
+    "label": "actual",
+    "kind": "image",
+    "path": "artifacts/one_pixel_exact/pixel/actual.bmp",
+    "content_type": "image/bmp",
+    "byte_size": 58,
+    "width": 1,
+    "height": 1,
+    "pixel_format": "rgba8",
+    "color_space": "linear",
+    "orientation": "top_left",
+    "palette": "terrain_debug.v1",
+    "encoder": "bmp.v1",
+    "hash": "sha256:11c69e5b5ad7fe7bd7819277d8f61f78b577e6e993cec6e672b872f7c6a2b797"
+  }
+}

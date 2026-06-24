@@ -1,0 +1,30 @@
+{
+  "schema": "voxels.visual_debug.config.v1",
+  "run_id": "optional-missing-baseline",
+  "defaults": {
+    "seed": 20260624,
+    "quality": "Full",
+    "compare": true
+  },
+  "captures": [
+    {
+      "id": "optional_missing_surface",
+      "case": "world.surface_morphology.feature",
+      "version": "1",
+      "required": true,
+      "params": {
+        "cache_mode": "cold",
+        "layer": "surface_height",
+        "chunk": {"x": 11, "y": 0, "z": 9}
+      },
+      "modes": [
+        {"id": "plan", "kind": "orthographic_pixels", "plane": "xz", "width": 64, "height": 64}
+      ],
+      "snapshot": {
+        "baseline": "optional_missing_surface",
+        "required": false,
+        "tolerance": {"mode": "exact"}
+      }
+    }
+  ]
+}

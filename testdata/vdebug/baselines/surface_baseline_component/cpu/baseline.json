@@ -1,0 +1,25 @@
+{
+  "schema": "voxels.visual_debug.baseline.v1",
+  "baseline": "surface_baseline_component",
+  "request_id": "surface_baseline_component",
+  "mode_id": "section",
+  "case": "world.surface_morphology.feature",
+  "case_version": "1",
+  "platform_key": "cpu",
+  "created_unix_nano": "1782305546996390000",
+  "artifact":   {
+    "label": "actual",
+    "kind": "image",
+    "path": "artifacts/surface_baseline_component/section/actual.bmp",
+    "content_type": "image/bmp",
+    "byte_size": 36918,
+    "width": 96,
+    "height": 96,
+    "pixel_format": "rgba8",
+    "color_space": "linear",
+    "orientation": "top_left",
+    "palette": "terrain_debug.v1",
+    "encoder": "bmp.v1",
+    "hash": "sha256:fac32d92cbd66a32be4f326793ffb9b8639ff3d365e25941709a8435fd5f226e"
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "schema": "voxels.visual_debug.config.v1",
+  "run_id": "baseline-world-components-tweaked",
+  "defaults": {
+    "seed": 20260624,
+    "quality": "Full",
+    "compare": true
+  },
+  "captures": [
+    {
+      "id": "surface_baseline_component",
+      "case": "world.surface_morphology.feature",
+      "version": "1",
+      "params": {
+        "cache_mode": "cold",
+        "layer": "surface_height",
+        "debug_tweak": 9,
+        "chunk": {"x": 11, "y": 0, "z": 9}
+      },
+      "modes": [
+        {"id": "plan", "kind": "orthographic_pixels", "plane": "xz", "width": 96, "height": 96},
+        {"id": "section", "kind": "orthographic_pixels", "plane": "xy", "width": 96, "height": 96}
+      ],
+      "snapshot": {
+        "baseline": "surface_baseline_component",
+        "tolerance": {"mode": "exact"}
+      }
+    },
+    {
+      "id": "cave_baseline_component",
+      "case": "world.cave.view",
+      "version": "1",
+      "params": {
+        "cache_mode": "disabled",
+        "layer": "material",
+        "debug_tweak": 11,
+        "chunk": {"x": 0, "y": -2, "z": 0}
+      },
+      "modes": [
+        {"id": "ray", "kind": "cpu_raycast", "width": 96, "height": 72}
+      ],
+      "snapshot": {
+        "baseline": "cave_baseline_component",
+        "tolerance": {"mode": "exact"}
+      }
+    },
+    {
+      "id": "water_metric_component",
+      "case": "world.water.volume_fill",
+      "version": "1",
+      "params": {
+        "cache_mode": "cold",
+        "layer": "material",
+        "debug_tweak": 5,
+        "chunk": {"x": 3, "y": 0, "z": 4}
+      },
+      "modes": [
+        {"id": "plan", "kind": "orthographic_pixels", "plane": "xz", "width": 96, "height": 96}
+      ],
+      "snapshot": {
+        "baseline": "water_metric_component",
+        "tolerance": {
+          "mode": "metric_threshold",
+          "max_channel_delta": 0,
+          "mean_abs_error": 0.0,
+          "rms_error": 0.0,
+          "changed_pixel_ratio": 0.0
+        }
+      }
+    },
+    {
+      "id": "mesh_pixel_component",
+      "case": "world.mesh.face_masks",
+      "version": "1",
+      "params": {
+        "cache_mode": "warm",
+        "layer": "mesh_face_mask",
+        "debug_tweak": 7,
+        "chunk": {"x": 0, "y": 0, "z": 0}
+      },
+      "modes": [
+        {"id": "plan", "kind": "orthographic_pixels", "plane": "xz", "width": 96, "height": 96}
+      ],
+      "snapshot": {
+        "baseline": "mesh_pixel_component",
+        "tolerance": {
+          "mode": "pixel_threshold",
+          "max_channel_delta": 0,
+          "changed_pixel_ratio": 0.0
+        }
+      }
+    }
+  ]
+}

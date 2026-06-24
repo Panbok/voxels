@@ -1,0 +1,14 @@
+{
+  "schema": "voxels.visual_debug.config.v1",
+  "run_id": "invalid-unknown-case",
+  "captures": [
+    {
+      "id": "unknown_case_capture",
+      "case": "world.not_registered",
+      "version": "1",
+      "modes": [
+        {"id": "plan", "kind": "orthographic_pixels", "plane": "xz", "width": 32, "height": 32}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "schema": "voxels.visual_debug.config.v1",
+  "run_id": "gpu-object-pipeline",
+  "captures": [
+    {
+      "id": "gpu_object_pipeline",
+      "case": "gfx.capture.object_turntable",
+      "version": "1",
+      "modes": [
+        {"id": "frame", "kind": "gpu_object", "width": 64, "height": 64}
+      ]
+    }
+  ]
+}

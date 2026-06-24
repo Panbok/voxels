@@ -1,0 +1,25 @@
+{
+  "schema": "voxels.visual_debug.baseline.v1",
+  "baseline": "cave_baseline_component",
+  "request_id": "cave_baseline_component",
+  "mode_id": "ray",
+  "case": "world.cave.view",
+  "case_version": "1",
+  "platform_key": "cpu",
+  "created_unix_nano": "1782305552150882000",
+  "artifact":   {
+    "label": "actual",
+    "kind": "image",
+    "path": "artifacts/cave_baseline_component/ray/actual.bmp",
+    "content_type": "image/bmp",
+    "byte_size": 27702,
+    "width": 96,
+    "height": 72,
+    "pixel_format": "rgba8",
+    "color_space": "linear",
+    "orientation": "top_left",
+    "palette": "terrain_debug.v1",
+    "encoder": "bmp.v1",
+    "hash": "sha256:d6bf3bb7a16c2669d6b3c4bcc21f3c7565381fc56e09533e78fc1e35b47a4fe1"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "schema": "voxels.visual_debug.baseline.v1",
+  "baseline": "mesh_pixel_component",
+  "request_id": "mesh_pixel_component",
+  "mode_id": "plan",
+  "case": "world.mesh.face_masks",
+  "case_version": "1",
+  "platform_key": "cpu",
+  "created_unix_nano": "1782305557442651000",
+  "artifact":   {
+    "label": "actual",
+    "kind": "image",
+    "path": "artifacts/mesh_pixel_component/plan/actual.bmp",
+    "content_type": "image/bmp",
+    "byte_size": 36918,
+    "width": 96,
+    "height": 96,
+    "pixel_format": "rgba8",
+    "color_space": "linear",
+    "orientation": "top_left",
+    "palette": "terrain_debug.v1",
+    "encoder": "bmp.v1",
+    "hash": "sha256:22dcba78c56175d82a61733e2120a670b56f4eec7f813512e3b45422feb0cada"
+  }
+}
