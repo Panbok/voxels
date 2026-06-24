@@ -1,6 +1,7 @@
 package main
 
 import bench "app:bench"
+import vdebug "app:vdebug"
 import world "app:world"
 import async "async"
 import gfx "gfx"
@@ -196,6 +197,55 @@ benchmark_debug_preflight_run :: proc() {
 		gfx.benchmarks_debug_contracts_run(state.persistent_allocator, &state.transient_arena)
 		world.chunk_mesher_benchmarks_debug_contracts_run(&state.transient_arena)
 	}
+}
+
+visual_debug_build_metadata_write :: proc(writer: ^vdebug.VisualDebugMetadataWriter) {
+	optimization := "speed"
+	when ODIN_DEBUG {
+		optimization = "debug"
+	}
+	os_name := "unknown"
+	when ODIN_OS == .Darwin {
+		os_name = "darwin"
+	} else when ODIN_OS == .Windows {
+		os_name = "windows"
+	} else when ODIN_OS == .Linux {
+		os_name = "linux"
+	}
+	renderer_driver := "unknown"
+	when ODIN_OS == .Darwin {
+		renderer_driver = "metal"
+	} else when ODIN_OS == .Windows {
+		renderer_driver = "direct3d12"
+	}
+
+	vdebug.metadata_bool(writer, "odin_debug", ODIN_DEBUG)
+	vdebug.metadata_string(writer, "optimization", optimization)
+	vdebug.metadata_string(writer, "os", os_name)
+	vdebug.metadata_string(writer, "renderer", "not_initialized_for_cpu_vdebug")
+	vdebug.metadata_string(writer, "gpu_driver", renderer_driver)
+	vdebug.metadata_u64(writer, "terrain_generator_version", u64(world.TERRAIN_GENERATOR_VERSION))
+	vdebug.metadata_bool(
+		writer,
+		"terrain_bake_debug_material_flags",
+		world.TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS,
+	)
+	vdebug.metadata_bool(writer, "terrain_decoration_enabled", world.TERRAIN_DECORATION_ENABLED)
+	vdebug.metadata_u64(
+		writer,
+		"terrain_generation_chunk_cache_capacity",
+		u64(world.TERRAIN_GENERATION_CHUNK_CACHE_CAPACITY),
+	)
+	vdebug.metadata_u64(
+		writer,
+		"terrain_generation_column_cache_capacity",
+		u64(world.TERRAIN_GENERATION_COLUMN_CACHE_CAPACITY),
+	)
+	vdebug.metadata_u64(
+		writer,
+		"terrain_generation_region_cache_capacity",
+		u64(world.TERRAIN_GENERATION_REGION_CACHE_CAPACITY),
+	)
 }
 
 RuntimeAutoMoveBenchmarkData :: struct {
@@ -538,6 +588,17 @@ benchmarks_run_from_cli :: proc(cli: bench.BenchmarkCLIParseResult) -> bool {
 		}
 		return bench.run(&registry, options)
 	}
+}
+
+visual_debug_run_from_cli :: proc(cli: vdebug.VisualDebugCLIParseResult) -> bool {
+	registry := vdebug.VisualDebugRegistry{}
+	vdebug.registry_init(&registry, state.persistent_allocator)
+	world.visual_debug_register(&registry)
+	gfx.visual_debug_register(&registry)
+
+	options := cli.options
+	options.write_build_metadata = visual_debug_build_metadata_write
+	return vdebug.run(&registry, options)
 }
 
 //////////////////////////////////////
@@ -1069,14 +1130,36 @@ main :: proc() {
 	context.allocator = state.persistent_allocator
 	context.temp_allocator = state.transient_allocator
 
-	cli := bench.parse_cli_args(os.args)
-	if !cli.ok {
-		log.errorf("Benchmark CLI error: %s", cli.error)
+	vdebug_cli := vdebug.parse_cli_args(os.args)
+	if !vdebug_cli.ok {
+		log.errorf("Visual debug CLI error: %s", vdebug_cli.error)
+		os.exit(1)
+	}
+	bench_cli := bench.parse_cli_args(os.args)
+	if !bench_cli.ok {
+		log.errorf("Benchmark CLI error: %s", bench_cli.error)
 		os.exit(1)
 	}
 
-	if cli.options.bench_requested {
-		if !benchmarks_run_from_cli(cli) {
+	if (vdebug_cli.options.list_requested ||
+		   vdebug_cli.options.run_requested ||
+		   vdebug_cli.options.merge_requested) &&
+	   bench_cli.options.bench_requested {
+		log.error("--bench and --vdebug entry modes are mutually exclusive")
+		os.exit(1)
+	}
+
+	if vdebug_cli.options.list_requested ||
+	   vdebug_cli.options.run_requested ||
+	   vdebug_cli.options.merge_requested {
+		if !visual_debug_run_from_cli(vdebug_cli) {
+			os.exit(1)
+		}
+		return
+	}
+
+	if bench_cli.options.bench_requested {
+		if !benchmarks_run_from_cli(bench_cli) {
 			os.exit(1)
 		}
 		return

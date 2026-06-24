@@ -63,6 +63,7 @@ InitConfig :: struct {
 	enable_vsync:         bool,
 	window_width:         i32,
 	window_height:        i32,
+	capture_mode:         bool,
 }
 
 RenderStats :: struct {
@@ -161,14 +162,29 @@ init :: proc(config: InitConfig) {
 	log.assertf(state.device != nil, "Failed to create GPU device: %s", sdl.GetError())
 	log.debugf("SDL GPU driver: %s", sdl.GetGPUDeviceDriver(state.device))
 
-	state.window = sdl.CreateWindow("Voxels Engine", window_width, window_height, {.RESIZABLE})
+	window_flags := sdl.WindowFlags{.RESIZABLE}
+	if config.capture_mode {
+		window_flags = {.HIDDEN}
+	}
+	if config.capture_mode {
+		state.window = sdl.CreateWindow(
+			"Voxels Visual Capture",
+			window_width,
+			window_height,
+			window_flags,
+		)
+	} else {
+		state.window = sdl.CreateWindow("Voxels Engine", window_width, window_height, window_flags)
+	}
 	log.assertf(state.window != nil, "Failed to create window: %s", sdl.GetError())
-	relative_mouse_mode_set := sdl.SetWindowRelativeMouseMode(state.window, true)
-	log.assertf(
-		relative_mouse_mode_set,
-		"Failed to enable relative mouse mode: %s",
-		sdl.GetError(),
-	)
+	if !config.capture_mode {
+		relative_mouse_mode_set := sdl.SetWindowRelativeMouseMode(state.window, true)
+		log.assertf(
+			relative_mouse_mode_set,
+			"Failed to enable relative mouse mode: %s",
+			sdl.GetError(),
+		)
+	}
 
 	window_claimed := sdl.ClaimWindowForGPUDevice(state.device, state.window)
 	log.assertf(window_claimed, "Failed to claim window for GPU device: %s", sdl.GetError())
