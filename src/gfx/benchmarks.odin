@@ -1,9 +1,11 @@
 package gfx
 
+import bench "app:bench"
 import world "app:world"
 import world_async "async:world"
 import camera "gfx:camera"
 
+import "base:runtime"
 import "core:log"
 import math "core:math"
 import "core:mem"
@@ -14,10 +16,10 @@ import time "core:time"
 // Benchmarking Constants
 /////////////////////////////////////
 
-when ODIN_DEBUG {
+when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 
-	RUN_CULLING_BENCHMARK :: #config(RUN_CULLING_BENCHMARK, false)
-	CULLING_BENCHMARK_ITERATIONS :: #config(CULLING_BENCHMARK_ITERATIONS, 10_000)
+	GFX_CULLING_BENCHMARK_DEFAULT_ITERATIONS :: 10_000
+	GFX_CULLING_BENCHMARK_VERSION :: "1"
 
 	benchmarks_debug_contracts_run :: proc(
 		persistent_allocator: mem.Allocator,
@@ -39,7 +41,7 @@ when ODIN_DEBUG {
 		return a < b
 	}
 
-	when RUN_CULLING_BENCHMARK {
+	when bench.BENCHMARKS_ENABLED {
 
 		//////////////////////////////////////
 		// Culling Benchmark Types
@@ -375,6 +377,270 @@ when ODIN_DEBUG {
 			}
 		}
 
+		CullingRegisteredFixture :: struct {
+			kind:                 CullingBenchmarkCaseKind,
+			mode:                 string,
+			sort_visible:         bool,
+			persistent_allocator: mem.Allocator,
+			benchmark_camera:     camera.Camera,
+			frustum:              camera.Frustum,
+		}
+
+		CullingRegisteredResult :: struct {
+			chunks_total:                u64,
+			chunks_without_geometry:     u64,
+			chunks_frustum_culled:       u64,
+			chunks_drawn:                u64,
+			draw_units_tested:           u64,
+			draw_units_frustum_culled:   u64,
+			draw_units_occlusion_culled: u64,
+			draw_units_drawn:            u64,
+			checksum:                    u64,
+		}
+
+		culling_registered_metrics := [?]bench.BenchmarkMetricDescriptor {
+			{
+				name = "chunks_total",
+				kind = .U64,
+				offset = offset_of(CullingRegisteredResult, chunks_total),
+				reduce = .Last,
+			},
+			{
+				name = "chunks_without_geometry",
+				kind = .U64,
+				offset = offset_of(CullingRegisteredResult, chunks_without_geometry),
+				reduce = .Last,
+			},
+			{
+				name = "chunks_frustum_culled",
+				kind = .U64,
+				offset = offset_of(CullingRegisteredResult, chunks_frustum_culled),
+				reduce = .Last,
+			},
+			{
+				name = "chunks_drawn",
+				kind = .U64,
+				offset = offset_of(CullingRegisteredResult, chunks_drawn),
+				reduce = .Last,
+			},
+			{
+				name = "draw_units_tested",
+				kind = .U64,
+				offset = offset_of(CullingRegisteredResult, draw_units_tested),
+				reduce = .Last,
+			},
+			{
+				name = "draw_units_frustum_culled",
+				kind = .U64,
+				offset = offset_of(CullingRegisteredResult, draw_units_frustum_culled),
+				reduce = .Last,
+			},
+			{
+				name = "draw_units_occlusion_culled",
+				kind = .U64,
+				offset = offset_of(CullingRegisteredResult, draw_units_occlusion_culled),
+				reduce = .Last,
+			},
+			{
+				name = "draw_units_drawn",
+				kind = .U64,
+				offset = offset_of(CullingRegisteredResult, draw_units_drawn),
+				reduce = .Last,
+			},
+			{
+				name = "checksum",
+				kind = .U64,
+				offset = offset_of(CullingRegisteredResult, checksum),
+				reduce = .Sum,
+			},
+		}
+
+		culling_registered_setup :: proc(
+			ctx: ^bench.BenchmarkContext,
+			data: rawptr,
+		) -> bench.BenchmarkStatus {
+			fixture := (^CullingRegisteredFixture)(data)
+			world.init(
+				{
+					persistent_allocator = fixture.persistent_allocator,
+					generation_request = culling_benchmark_generation_request,
+					generation_poll_results = culling_benchmark_generation_poll_results,
+					mesh_request = culling_benchmark_mesh_request,
+					mesh_poll_results = culling_benchmark_mesh_poll_results,
+					mesh_release_result = culling_benchmark_mesh_release_result,
+					chunk_mesh_upload = culling_benchmark_chunk_mesh_upload,
+					chunk_geometry_release = culling_benchmark_chunk_geometry_release,
+				},
+			)
+			culling_benchmark_case_setup(fixture.kind)
+			fixture.benchmark_camera = culling_benchmark_camera_setup()
+			fixture.frustum = camera.frustum_from_camera(
+				fixture.benchmark_camera,
+				math.to_radians_f32(FOV),
+				ASPECT_RATIO,
+			)
+			_ = ctx
+			return bench.status_pass()
+		}
+
+		culling_registered_teardown :: proc(
+			ctx: ^bench.BenchmarkContext,
+			data: rawptr,
+		) -> bench.BenchmarkStatus {
+			world.shutdown()
+			_ = ctx
+			_ = data
+			return bench.status_pass()
+		}
+
+		culling_registered_fixture_write :: proc(
+			ctx: ^bench.BenchmarkContext,
+			data: rawptr,
+			writer: ^bench.BenchmarkMetadataWriter,
+		) -> bench.BenchmarkStatus {
+			fixture := (^CullingRegisteredFixture)(data)
+			bench.metadata_string(
+				writer,
+				"fixture_name",
+				culling_benchmark_case_name(fixture.kind),
+			)
+			bench.metadata_string(writer, "mode", fixture.mode)
+			bench.metadata_bool(writer, "sort_visible", fixture.sort_visible)
+			bench.metadata_u64(writer, "chunk_store_capacity", u64(world.CHUNK_STORE_CAPACITY))
+			_ = ctx
+			return bench.status_pass()
+		}
+
+		culling_registered_run :: proc(
+			ctx: ^bench.BenchmarkContext,
+			data: rawptr,
+			result: rawptr,
+		) -> bench.BenchmarkStatus {
+			fixture := (^CullingRegisteredFixture)(data)
+			out := (^CullingRegisteredResult)(result)
+			stats := culling_benchmark_current_once(
+				fixture.frustum,
+				fixture.benchmark_camera,
+				ctx.temp_arena,
+				fixture.sort_visible,
+			)
+			out.chunks_total = stats.chunks_total
+			out.chunks_without_geometry = stats.chunks_without_geometry
+			out.chunks_frustum_culled = stats.chunks_frustum_culled
+			out.chunks_drawn = stats.chunks_drawn
+			out.draw_units_tested = stats.draw_units_tested
+			out.draw_units_frustum_culled = stats.draw_units_frustum_culled
+			out.draw_units_occlusion_culled = stats.draw_units_occlusion_culled
+			out.draw_units_drawn = stats.draw_units_drawn
+			out.checksum += culling_benchmark_stats_checksum(stats)
+			return bench.status_pass()
+		}
+
+		culling_registered_case_register :: proc(
+			registry: ^bench.BenchmarkRegistry,
+			name: string,
+			kind: CullingBenchmarkCaseKind,
+			mode: string,
+			sort_visible: bool,
+			persistent_allocator: mem.Allocator,
+		) {
+			fixture := CullingRegisteredFixture {
+				kind                 = kind,
+				mode                 = mode,
+				sort_visible         = sort_visible,
+				persistent_allocator = runtime.heap_allocator(),
+			}
+			_ = persistent_allocator
+			bench.register(
+				registry,
+				name,
+				culling_registered_run,
+				rawptr(&fixture),
+				nil,
+				{
+					iterations = 10_000,
+					warmup_iterations = 10,
+					workers = 1,
+					result_size = size_of(CullingRegisteredResult),
+					result_align = align_of(CullingRegisteredResult),
+					data_size = size_of(CullingRegisteredFixture),
+					data_align = align_of(CullingRegisteredFixture),
+					metrics = culling_registered_metrics[:],
+					flags = {.Serial_Only, .Exclusive_World_State},
+					warmup_mode = .Serial,
+					setup = culling_registered_setup,
+					teardown = culling_registered_teardown,
+					write_fixture = culling_registered_fixture_write,
+					category = "gfx.culling",
+					version = GFX_CULLING_BENCHMARK_VERSION,
+				},
+			)
+		}
+
+		culling_benchmarks_register :: proc(
+			registry: ^bench.BenchmarkRegistry,
+			persistent_allocator: mem.Allocator,
+		) {
+			culling_registered_case_register(
+				registry,
+				"gfx.culling.full_chunks.no_sort",
+				.Full_Chunks,
+				"no_sort",
+				false,
+				persistent_allocator,
+			)
+			culling_registered_case_register(
+				registry,
+				"gfx.culling.full_chunks.visible_sorted",
+				.Full_Chunks,
+				"visible_sorted",
+				true,
+				persistent_allocator,
+			)
+			culling_registered_case_register(
+				registry,
+				"gfx.culling.sparse_subchunks.no_sort",
+				.Sparse_Subchunks,
+				"no_sort",
+				false,
+				persistent_allocator,
+			)
+			culling_registered_case_register(
+				registry,
+				"gfx.culling.sparse_subchunks.visible_sorted",
+				.Sparse_Subchunks,
+				"visible_sorted",
+				true,
+				persistent_allocator,
+			)
+			culling_registered_case_register(
+				registry,
+				"gfx.culling.dense_subchunks.no_sort",
+				.Dense_Subchunks,
+				"no_sort",
+				false,
+				persistent_allocator,
+			)
+			culling_registered_case_register(
+				registry,
+				"gfx.culling.dense_subchunks.visible_sorted",
+				.Dense_Subchunks,
+				"visible_sorted",
+				true,
+				persistent_allocator,
+			)
+		}
+
+	}
+
+	benchmarks_register :: proc(
+		registry: ^bench.BenchmarkRegistry,
+		persistent_allocator: mem.Allocator,
+	) {
+		when bench.BENCHMARKS_ENABLED {
+			_ = culling_benchmark_runs_run
+			culling_benchmarks_register(registry, persistent_allocator)
+		}
 	}
 
 }

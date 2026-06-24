@@ -49,8 +49,8 @@ terrain_density_mark_cave_wall_neighbors :: proc(
 		base_index := chunk_block_index(u32(local_x), u32(local_y), u32(local_z))
 		y_stride := u32(CHUNK_BLOCK_LENGTH)
 		z_stride := u32(CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH)
-		when TERRAIN_GENERATION_PROFILE_PHASES {
-			terrain_generation_profile_stats.wall_neighbor_checks += 6
+		if terrain_generation_profile_active() {
+			terrain_generation_profile_context.profile.wall_neighbor_checks += 6
 		}
 		terrain_density_mark_cave_wall_neighbor_index(view, base_index + 1, wall_material_id)
 		terrain_density_mark_cave_wall_neighbor_index(view, base_index - 1, wall_material_id)
@@ -102,8 +102,8 @@ terrain_density_mark_cave_wall_neighbor_index :: proc(
 		return
 	}
 	view.blocks.material_id[index] = material_id
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.wall_neighbor_writes += 1
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.wall_neighbor_writes += 1
 	}
 }
 
@@ -112,8 +112,8 @@ terrain_density_mark_cave_wall_neighbor :: proc(
 	local_x, local_y, local_z: i32,
 	material_id: world_async.BlockMaterialID,
 ) {
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.wall_neighbor_checks += 1
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.wall_neighbor_checks += 1
 	}
 	if !chunk_block_coord_is_inside(local_x, local_y, local_z) {
 		return

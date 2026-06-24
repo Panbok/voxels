@@ -174,10 +174,10 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 
 				world_x := chunk_origin.x + x
 				cave_field_profile_start: time.Tick
-				when TERRAIN_GENERATION_PROFILE_PHASES {
+				if terrain_generation_profile_active() {
 					cave_field_profile_start = time.tick_now()
 				}
-				when !TERRAIN_GENERATION_PROFILE_PHASES {
+				if !terrain_generation_profile_active() {
 					_ = cave_field_profile_start
 				}
 				field_sample := terrain_density_subterranean_cave_field_sample(
@@ -191,10 +191,9 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 					field_sample,
 					vertical_support,
 				) {
-					when TERRAIN_GENERATION_PROFILE_PHASES {
-						terrain_generation_profile_stats.cave_field_scan += time.tick_since(
-							cave_field_profile_start,
-						)
+					if terrain_generation_profile_active() {
+						terrain_generation_profile_context.profile.cave_field_scan +=
+							time.tick_since(cave_field_profile_start)
 					}
 					continue
 				}
@@ -219,8 +218,8 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 				} else if biome_id == .Buried_Aquifer_Caves {
 					radius *= 1.05
 				}
-				when TERRAIN_GENERATION_PROFILE_PHASES {
-					terrain_generation_profile_stats.cave_field_scan += time.tick_since(
+				if terrain_generation_profile_active() {
+					terrain_generation_profile_context.profile.cave_field_scan += time.tick_since(
 						cave_field_profile_start,
 					)
 					cave_field_profile_start = time.tick_now()
@@ -243,10 +242,9 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 					path_candidate,
 					edge_route_bounds[:],
 				)
-				when TERRAIN_GENERATION_PROFILE_PHASES {
-					terrain_generation_profile_stats.cave_field_network += time.tick_since(
-						cave_field_profile_start,
-					)
+				if terrain_generation_profile_active() {
+					terrain_generation_profile_context.profile.cave_field_network +=
+						time.tick_since(cave_field_profile_start)
 				}
 				if !network_sample.found ||
 				   (!network_sample.connected && !network_sample.bridgeable) {
@@ -286,7 +284,7 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 						field_sample,
 						network_sample,
 					)
-					when TERRAIN_GENERATION_PROFILE_PHASES {
+					if terrain_generation_profile_active() {
 						cave_field_profile_start = time.tick_now()
 					}
 					terrain_density_carve_rough_segment_shaped(
@@ -306,10 +304,9 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 						biome_id,
 						false,
 					)
-					when TERRAIN_GENERATION_PROFILE_PHASES {
-						terrain_generation_profile_stats.cave_field_path += time.tick_since(
-							cave_field_profile_start,
-						)
+					if terrain_generation_profile_active() {
+						terrain_generation_profile_context.profile.cave_field_path +=
+							time.tick_since(cave_field_profile_start)
 					}
 					stamp_count += 1
 					continue
@@ -336,7 +333,7 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 							network_sample.route_radius * f32(0.76),
 						),
 					)
-					when TERRAIN_GENERATION_PROFILE_PHASES {
+					if terrain_generation_profile_active() {
 						cave_field_profile_start = time.tick_now()
 					}
 					terrain_density_carve_rough_segment_shaped(
@@ -356,8 +353,8 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 						biome_id,
 						false,
 					)
-					when TERRAIN_GENERATION_PROFILE_PHASES {
-						terrain_generation_profile_stats.cave_field_pocket_throat +=
+					if terrain_generation_profile_active() {
+						terrain_generation_profile_context.profile.cave_field_pocket_throat +=
 							time.tick_since(cave_field_profile_start)
 						cave_field_profile_start = time.tick_now()
 					}
@@ -380,14 +377,14 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 						TERRAIN_CAVE_FIELD_DETAIL_SALT,
 						biome_id,
 					)
-					when TERRAIN_GENERATION_PROFILE_PHASES {
-						terrain_generation_profile_stats.cave_field_pocket_cluster +=
+					if terrain_generation_profile_active() {
+						terrain_generation_profile_context.profile.cave_field_pocket_cluster +=
 							time.tick_since(cave_field_profile_start)
 					}
 					stamp_count += 1
 					continue
 				}
-				when TERRAIN_GENERATION_PROFILE_PHASES {
+				if terrain_generation_profile_active() {
 					cave_field_profile_start = time.tick_now()
 				}
 				terrain_density_carve_cave_room_lobed_ellipsoid(
@@ -405,10 +402,9 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 					biome_id,
 					true,
 				)
-				when TERRAIN_GENERATION_PROFILE_PHASES {
-					terrain_generation_profile_stats.cave_field_chamber += time.tick_since(
-						cave_field_profile_start,
-					)
+				if terrain_generation_profile_active() {
+					terrain_generation_profile_context.profile.cave_field_chamber +=
+						time.tick_since(cave_field_profile_start)
 				}
 				if network_sample.bridgeable && !network_sample.connected {
 					bridge_shape := terrain_density_cave_passage_shape(.Collapsed_Corridor)
@@ -425,7 +421,7 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 							network_sample.route_radius * f32(0.82),
 						),
 					)
-					when TERRAIN_GENERATION_PROFILE_PHASES {
+					if terrain_generation_profile_active() {
 						cave_field_profile_start = time.tick_now()
 					}
 					terrain_density_carve_rough_segment_shaped(
@@ -445,10 +441,9 @@ terrain_density_subterranean_biome_caves_apply :: proc(
 						biome_id,
 						false,
 					)
-					when TERRAIN_GENERATION_PROFILE_PHASES {
-						terrain_generation_profile_stats.cave_field_bridge += time.tick_since(
-							cave_field_profile_start,
-						)
+					if terrain_generation_profile_active() {
+						terrain_generation_profile_context.profile.cave_field_bridge +=
+							time.tick_since(cave_field_profile_start)
 					}
 				}
 				stamp_count += 1
@@ -812,8 +807,8 @@ terrain_density_carve_cave_field_route_pocket_cluster :: proc(
 		world_z := f32(chunk_origin.z + z) + 0.5
 		for y := local_min_y; y <= local_max_y; y += 1 {
 			world_y := f32(chunk_origin.y + y) + 0.5
-			when TERRAIN_GENERATION_PROFILE_PHASES {
-				terrain_generation_profile_stats.route_pocket_cluster_rows_scanned += 1
+			if terrain_generation_profile_active() {
+				terrain_generation_profile_context.profile.route_pocket_cluster_rows_scanned += 1
 			}
 			row_min_x, row_max_x, row_intersects := terrain_density_local_box_row_x_bounds(
 				chunk_origin,
@@ -839,8 +834,8 @@ terrain_density_carve_cave_field_route_pocket_cluster :: proc(
 			if !row_intersects {
 				continue
 			}
-			when TERRAIN_GENERATION_PROFILE_PHASES {
-				terrain_generation_profile_stats.route_pocket_cluster_rows_box += 1
+			if terrain_generation_profile_active() {
+				terrain_generation_profile_context.profile.route_pocket_cluster_rows_box += 1
 			}
 			row_ranges: [8]TerrainDensityRowRange
 			row_range_count: u32
@@ -968,14 +963,14 @@ terrain_density_carve_cave_field_route_pocket_cluster :: proc(
 			for row_range_i := u32(0); row_range_i < row_range_count; row_range_i += 1 {
 				row_range := row_ranges[row_range_i]
 				for x := row_range.min_x; x <= row_range.max_x; x += 1 {
-					when TERRAIN_GENERATION_PROFILE_PHASES {
-						terrain_generation_profile_stats.route_pocket_cluster_voxel_candidates += 1
+					if terrain_generation_profile_active() {
+						terrain_generation_profile_context.profile.route_pocket_cluster_voxel_candidates += 1
 					}
 					if !terrain_density_local_block_can_carve(view, x, y, z) {
 						continue
 					}
-					when TERRAIN_GENERATION_PROFILE_PHASES {
-						terrain_generation_profile_stats.route_pocket_cluster_carveable_candidates += 1
+					if terrain_generation_profile_active() {
+						terrain_generation_profile_context.profile.route_pocket_cluster_carveable_candidates += 1
 					}
 					world_x := f32(chunk_origin.x + x) + 0.5
 					dx := world_x - center_x
@@ -994,8 +989,8 @@ terrain_density_carve_cave_field_route_pocket_cluster :: proc(
 					if shape > f32(1.240001) {
 						continue
 					}
-					when TERRAIN_GENERATION_PROFILE_PHASES {
-						terrain_generation_profile_stats.route_pocket_cluster_shape_candidates += 1
+					if terrain_generation_profile_active() {
+						terrain_generation_profile_context.profile.route_pocket_cluster_shape_candidates += 1
 					}
 
 					when TERRAIN_CAVE_ROUTE_POCKET_CORE_BYPASS {
@@ -1047,8 +1042,8 @@ terrain_density_carve_cave_field_route_pocket_cluster :: proc(
 					if shape > threshold_without_cellular + f32(0.060001) {
 						continue
 					}
-					when TERRAIN_GENERATION_PROFILE_PHASES {
-						terrain_generation_profile_stats.route_pocket_cluster_worley_candidates += 1
+					if terrain_generation_profile_active() {
+						terrain_generation_profile_context.profile.route_pocket_cluster_worley_candidates += 1
 					}
 					cell_gap := terrain_density_cave_room_worley_gap(
 						key,
@@ -1865,10 +1860,10 @@ terrain_density_cave_network_apply :: proc(
 	columns: []TerrainBiomeColumn,
 ) {
 	profile_stage_start: time.Tick
-	when TERRAIN_GENERATION_PROFILE_PHASES {
+	if terrain_generation_profile_active() {
 		profile_stage_start = time.tick_now()
 	}
-	when !TERRAIN_GENERATION_PROFILE_PHASES {
+	if !terrain_generation_profile_active() {
 		_ = profile_stage_start
 	}
 	log.assertf(
@@ -1898,8 +1893,8 @@ terrain_density_cave_network_apply :: proc(
 		chunk_query,
 		&node_connectivity,
 	)
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.network_connectivity += time.tick_since(
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.network_connectivity += time.tick_since(
 			profile_stage_start,
 		)
 		profile_stage_start = time.tick_now()
@@ -1921,8 +1916,10 @@ terrain_density_cave_network_apply :: proc(
 			&carveable_row_mask,
 		)
 	}
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.network_edges += time.tick_since(profile_stage_start)
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.network_edges += time.tick_since(
+			profile_stage_start,
+		)
 		profile_stage_start = time.tick_now()
 	}
 
@@ -1931,21 +1928,23 @@ terrain_density_cave_network_apply :: proc(
 		node := region.cave_network_nodes[i]
 		terrain_density_carve_cave_node(view, region.key, chunk_origin, columns, node)
 		node_portal_profile_start: time.Tick
-		when TERRAIN_GENERATION_PROFILE_PHASES {
+		if terrain_generation_profile_active() {
 			node_portal_profile_start = time.tick_now()
 		}
-		when !TERRAIN_GENERATION_PROFILE_PHASES {
+		if !terrain_generation_profile_active() {
 			_ = node_portal_profile_start
 		}
 		terrain_density_carve_cave_node_edge_portals(view, region, chunk_origin, columns, node)
-		when TERRAIN_GENERATION_PROFILE_PHASES {
-			terrain_generation_profile_stats.node_portals += time.tick_since(
+		if terrain_generation_profile_active() {
+			terrain_generation_profile_context.profile.node_portals += time.tick_since(
 				node_portal_profile_start,
 			)
 		}
 	}
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.network_nodes += time.tick_since(profile_stage_start)
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.network_nodes += time.tick_since(
+			profile_stage_start,
+		)
 		profile_stage_start = time.tick_now()
 	}
 
@@ -1987,8 +1986,10 @@ terrain_density_cave_network_apply :: proc(
 			false,
 		)
 	}
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.network_bridges += time.tick_since(profile_stage_start)
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.network_bridges += time.tick_since(
+			profile_stage_start,
+		)
 		profile_stage_start = time.tick_now()
 	}
 
@@ -2004,8 +2005,10 @@ terrain_density_cave_network_apply :: proc(
 			&node_connectivity,
 		)
 	}
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.network_anchors += time.tick_since(profile_stage_start)
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.network_anchors += time.tick_since(
+			profile_stage_start,
+		)
 	}
 }
 
@@ -2042,8 +2045,8 @@ terrain_density_proxy_carve_local_block :: proc(
 	view: ^world_async.ChunkVoxelView,
 	local_x, local_y, local_z: i32,
 ) -> bool {
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.carve_attempts += 1
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.carve_attempts += 1
 	}
 	if !terrain_density_local_block_can_carve(view, local_x, local_y, local_z) {
 		return false
@@ -2051,8 +2054,8 @@ terrain_density_proxy_carve_local_block :: proc(
 	index := chunk_block_index(u32(local_x), u32(local_y), u32(local_z))
 	view.blocks.occupancy[index] = .Empty
 	view.blocks.material_id[index] = world_async.BlockMaterialID(0)
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.carve_successes += 1
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.carve_successes += 1
 	}
 	return true
 }
@@ -2479,10 +2482,10 @@ terrain_density_carve_cave_node :: proc(
 			node,
 		)
 		profile_stage_start: time.Tick
-		when TERRAIN_GENERATION_PROFILE_PHASES {
+		if terrain_generation_profile_active() {
 			profile_stage_start = time.tick_now()
 		}
-		when !TERRAIN_GENERATION_PROFILE_PHASES {
+		if !terrain_generation_profile_active() {
 			_ = profile_stage_start
 		}
 		terrain_density_carve_cave_room(
@@ -2499,8 +2502,10 @@ terrain_density_carve_cave_node :: proc(
 			node.kind,
 			node.biome_id,
 		)
-		when TERRAIN_GENERATION_PROFILE_PHASES {
-			terrain_generation_profile_stats.node_rooms += time.tick_since(profile_stage_start)
+		if terrain_generation_profile_active() {
+			terrain_generation_profile_context.profile.node_rooms += time.tick_since(
+				profile_stage_start,
+			)
 			profile_stage_start = time.tick_now()
 		}
 		if node.major_region {
@@ -2514,8 +2519,8 @@ terrain_density_carve_cave_node :: proc(
 				room_radius_y,
 				room_radius_z,
 			)
-			when TERRAIN_GENERATION_PROFILE_PHASES {
-				terrain_generation_profile_stats.node_perimeter += time.tick_since(
+			if terrain_generation_profile_active() {
+				terrain_generation_profile_context.profile.node_perimeter += time.tick_since(
 					profile_stage_start,
 				)
 				profile_stage_start = time.tick_now()
@@ -2530,8 +2535,8 @@ terrain_density_carve_cave_node :: proc(
 				room_radius_y,
 				room_radius_z,
 			)
-			when TERRAIN_GENERATION_PROFILE_PHASES {
-				terrain_generation_profile_stats.node_satellites += time.tick_since(
+			if terrain_generation_profile_active() {
+				terrain_generation_profile_context.profile.node_satellites += time.tick_since(
 					profile_stage_start,
 				)
 			}
@@ -2540,10 +2545,10 @@ terrain_density_carve_cave_node :: proc(
 	}
 
 	profile_stage_start: time.Tick
-	when TERRAIN_GENERATION_PROFILE_PHASES {
+	if terrain_generation_profile_active() {
 		profile_stage_start = time.tick_now()
 	}
-	when !TERRAIN_GENERATION_PROFILE_PHASES {
+	if !terrain_generation_profile_active() {
 		_ = profile_stage_start
 	}
 	terrain_density_carve_rough_ellipsoid(
@@ -2561,8 +2566,10 @@ terrain_density_carve_cave_node :: proc(
 		node.biome_id,
 		false,
 	)
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.node_rooms += time.tick_since(profile_stage_start)
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.node_rooms += time.tick_since(
+			profile_stage_start,
+		)
 	}
 }
 
@@ -3187,10 +3194,10 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 	    satellite_index < TERRAIN_CAVE_NODE_MACRO_SATELLITE_COUNT;
 	    satellite_index += 1 {
 		satellite_profile_start: time.Tick
-		when TERRAIN_GENERATION_PROFILE_PHASES {
+		if terrain_generation_profile_active() {
 			satellite_profile_start = time.tick_now()
 		}
-		when !TERRAIN_GENERATION_PROFILE_PHASES {
+		if !terrain_generation_profile_active() {
 			_ = satellite_profile_start
 		}
 		dir_x := satellite_dir_x[satellite_index]
@@ -3238,8 +3245,8 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 			node.biome_id,
 			true,
 		)
-		when TERRAIN_GENERATION_PROFILE_PHASES {
-			terrain_generation_profile_stats.node_satellite_direct += time.tick_since(
+		if terrain_generation_profile_active() {
+			terrain_generation_profile_context.profile.node_satellite_direct += time.tick_since(
 				satellite_profile_start,
 			)
 			satellite_profile_start = time.tick_now()
@@ -3262,8 +3269,8 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 			TERRAIN_CAVE_FIELD_CHAMBER_SALT ~ u64(satellite_index + 919),
 			satellite_index,
 		)
-		when TERRAIN_GENERATION_PROFILE_PHASES {
-			terrain_generation_profile_stats.node_satellite_apron += time.tick_since(
+		if terrain_generation_profile_active() {
+			terrain_generation_profile_context.profile.node_satellite_apron += time.tick_since(
 				satellite_profile_start,
 			)
 		}
@@ -3273,10 +3280,10 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 	    satellite_index < TERRAIN_CAVE_NODE_MACRO_SATELLITE_COUNT;
 	    satellite_index += 1 {
 		satellite_cluster_profile_start: time.Tick
-		when TERRAIN_GENERATION_PROFILE_PHASES {
+		if terrain_generation_profile_active() {
 			satellite_cluster_profile_start = time.tick_now()
 		}
-		when !TERRAIN_GENERATION_PROFILE_PHASES {
+		if !terrain_generation_profile_active() {
 			_ = satellite_cluster_profile_start
 		}
 		next_index := (satellite_index + 1) % TERRAIN_CAVE_NODE_MACRO_SATELLITE_COUNT
@@ -3513,8 +3520,8 @@ terrain_density_carve_cave_node_macro_satellites :: proc(
 			TERRAIN_CAVE_FIELD_CHAMBER_SALT ~ u64(satellite_index + 1009),
 			node.biome_id,
 		)
-		when TERRAIN_GENERATION_PROFILE_PHASES {
-			terrain_generation_profile_stats.node_satellite_cluster += time.tick_since(
+		if terrain_generation_profile_active() {
+			terrain_generation_profile_context.profile.node_satellite_cluster += time.tick_since(
 				satellite_cluster_profile_start,
 			)
 		}
@@ -5520,15 +5527,15 @@ terrain_density_carve_cave_edge :: proc(
 		terrain_density_cave_passage_shape_apply_regional_seam(&to_shape)
 	}
 	edge_profile_start: time.Tick
-	when TERRAIN_GENERATION_PROFILE_PHASES {
+	if terrain_generation_profile_active() {
 		edge_profile_start = time.tick_now()
 	}
-	when !TERRAIN_GENERATION_PROFILE_PHASES {
+	if !terrain_generation_profile_active() {
 		_ = edge_profile_start
 	}
 	prev_x, prev_y, prev_z := terrain_density_cave_edge_route_point(edge, 0)
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_edge_core_active = true
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.edge_core_active = true
 	}
 	for segment_index := u32(1);
 	    segment_index <= TERRAIN_CAVE_EDGE_ROUTE_SEGMENT_COUNT;
@@ -5576,11 +5583,11 @@ terrain_density_carve_cave_edge :: proc(
 		prev_y = next_y
 		prev_z = next_z
 	}
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_edge_core_active = false
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.edge_core_active = false
 	}
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.edge_core += time.tick_since(edge_profile_start)
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.edge_core += time.tick_since(edge_profile_start)
 		edge_profile_start = time.tick_now()
 	}
 
@@ -5593,8 +5600,10 @@ terrain_density_carve_cave_edge :: proc(
 		edge,
 		feature_radius,
 	)
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.edge_approach += time.tick_since(edge_profile_start)
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.edge_approach += time.tick_since(
+			edge_profile_start,
+		)
 		edge_profile_start = time.tick_now()
 	}
 	terrain_density_carve_cave_edge_braids(
@@ -5605,8 +5614,10 @@ terrain_density_carve_cave_edge :: proc(
 		edge,
 		feature_radius,
 	)
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.edge_braids += time.tick_since(edge_profile_start)
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.edge_braids += time.tick_since(
+			edge_profile_start,
+		)
 		edge_profile_start = time.tick_now()
 	}
 	terrain_density_carve_cave_edge_route_bypasses(
@@ -5617,8 +5628,10 @@ terrain_density_carve_cave_edge :: proc(
 		edge,
 		feature_radius,
 	)
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.edge_bypasses += time.tick_since(edge_profile_start)
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.edge_bypasses += time.tick_since(
+			edge_profile_start,
+		)
 		edge_profile_start = time.tick_now()
 	}
 	terrain_density_carve_cave_edge_alcoves(
@@ -5629,8 +5642,10 @@ terrain_density_carve_cave_edge :: proc(
 		edge,
 		feature_radius,
 	)
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.edge_alcoves += time.tick_since(edge_profile_start)
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.edge_alcoves += time.tick_since(
+			edge_profile_start,
+		)
 		edge_profile_start = time.tick_now()
 	}
 	terrain_density_carve_cave_edge_chamberlets(
@@ -5641,8 +5656,10 @@ terrain_density_carve_cave_edge :: proc(
 		edge,
 		feature_radius,
 	)
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.edge_chamberlets += time.tick_since(edge_profile_start)
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.edge_chamberlets += time.tick_since(
+			edge_profile_start,
+		)
 		edge_profile_start = time.tick_now()
 	}
 	terrain_density_carve_cave_edge_seam_bays(
@@ -5693,8 +5710,10 @@ terrain_density_carve_cave_edge :: proc(
 		edge,
 		feature_radius,
 	)
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.edge_seams += time.tick_since(edge_profile_start)
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.edge_seams += time.tick_since(
+			edge_profile_start,
+		)
 	}
 }
 
@@ -10397,9 +10416,9 @@ terrain_density_carve_rough_segment_shaped :: proc(
 ) {
 	radius := math.max(f32(1), radius_blocks)
 	max_radius := radius * 1.45 + 2
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		if terrain_generation_profile_edge_core_active {
-			terrain_generation_profile_stats.edge_core_segment_calls += 1
+	if terrain_generation_profile_active() {
+		if terrain_generation_profile_context.edge_core_active {
+			terrain_generation_profile_context.profile.edge_core_segment_calls += 1
 		}
 	}
 	t_min, t_max, intersects := terrain_density_segment_chunk_overlap(
@@ -10415,9 +10434,9 @@ terrain_density_carve_rough_segment_shaped :: proc(
 	if !intersects {
 		return
 	}
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		if terrain_generation_profile_edge_core_active {
-			terrain_generation_profile_stats.edge_core_segment_bounds_hits += 1
+	if terrain_generation_profile_active() {
+		if terrain_generation_profile_context.edge_core_active {
+			terrain_generation_profile_context.profile.edge_core_segment_bounds_hits += 1
 		}
 	}
 
@@ -10555,9 +10574,9 @@ terrain_density_carve_rough_segment_shaped :: proc(
 			row_full_vertical_support :=
 				f32(row_block_y) >= TERRAIN_CAVE_BOTTOM_CUSHION_END_BLOCKS &&
 				f32(row_block_y) <= TERRAIN_CAVE_TOP_CUSHION_START_BLOCKS
-			when TERRAIN_GENERATION_PROFILE_PHASES {
-				if terrain_generation_profile_edge_core_active {
-					terrain_generation_profile_stats.edge_core_rows_scanned += 1
+			if terrain_generation_profile_active() {
+				if terrain_generation_profile_context.edge_core_active {
+					terrain_generation_profile_context.profile.edge_core_rows_scanned += 1
 				}
 			}
 			row_min_x, row_max_x, row_intersects :=
@@ -10580,9 +10599,9 @@ terrain_density_carve_rough_segment_shaped :: proc(
 			if !row_intersects {
 				continue
 			}
-			when TERRAIN_GENERATION_PROFILE_PHASES {
-				if terrain_generation_profile_edge_core_active {
-					terrain_generation_profile_stats.edge_core_rows_projected += 1
+			if terrain_generation_profile_active() {
+				if terrain_generation_profile_context.edge_core_active {
+					terrain_generation_profile_context.profile.edge_core_rows_projected += 1
 				}
 			}
 			row_min_x, row_max_x, row_intersects = terrain_density_segment_capsule_row_x_bounds(
@@ -10678,9 +10697,9 @@ terrain_density_carve_rough_segment_shaped :: proc(
 			if !row_intersects {
 				continue
 			}
-			when TERRAIN_GENERATION_PROFILE_PHASES {
-				if terrain_generation_profile_edge_core_active {
-					terrain_generation_profile_stats.edge_core_rows_capsule += 1
+			if terrain_generation_profile_active() {
+				if terrain_generation_profile_context.edge_core_active {
+					terrain_generation_profile_context.profile.edge_core_rows_capsule += 1
 				}
 			}
 			noise_row_cache: TerrainValueNoise3RowCache
@@ -10703,9 +10722,9 @@ terrain_density_carve_rough_segment_shaped :: proc(
 				if use_carveable_row_mask && (row_carveable_bits & (u64(1) << u32(x))) == 0 {
 					continue
 				}
-				when TERRAIN_GENERATION_PROFILE_PHASES {
-					if terrain_generation_profile_edge_core_active {
-						terrain_generation_profile_stats.edge_core_voxel_candidates += 1
+				if terrain_generation_profile_active() {
+					if terrain_generation_profile_context.edge_core_active {
+						terrain_generation_profile_context.profile.edge_core_voxel_candidates += 1
 					}
 				}
 				if !terrain_density_local_block_can_carve(view, x, y, z) {
@@ -10714,9 +10733,9 @@ terrain_density_carve_rough_segment_shaped :: proc(
 					}
 					continue
 				}
-				when TERRAIN_GENERATION_PROFILE_PHASES {
-					if terrain_generation_profile_edge_core_active {
-						terrain_generation_profile_stats.edge_core_carveable_candidates += 1
+				if terrain_generation_profile_active() {
+					if terrain_generation_profile_context.edge_core_active {
+						terrain_generation_profile_context.profile.edge_core_carveable_candidates += 1
 					}
 				}
 				world_x := f32(chunk_origin.x + x) + 0.5
@@ -10767,9 +10786,9 @@ terrain_density_carve_rough_segment_shaped :: proc(
 				if shape_value > 1.42 {
 					continue
 				}
-				when TERRAIN_GENERATION_PROFILE_PHASES {
-					if terrain_generation_profile_edge_core_active {
-						terrain_generation_profile_stats.edge_core_shape_candidates += 1
+				if terrain_generation_profile_active() {
+					if terrain_generation_profile_context.edge_core_active {
+						terrain_generation_profile_context.profile.edge_core_shape_candidates += 1
 					}
 				}
 				core_support := math.clamp((f32(1.0) - shape_value) * 1.389, f32(0), f32(1))
@@ -10787,9 +10806,9 @@ terrain_density_carve_rough_segment_shaped :: proc(
 					shape.wall_lip_relief_scale * f32(0.46)
 				if shape_value <=
 				   1.0 + wall_delta_lower_bound - rough_scale * negative_rough_profile_scale {
-					when TERRAIN_GENERATION_PROFILE_PHASES {
-						if terrain_generation_profile_edge_core_active {
-							terrain_generation_profile_stats.edge_core_threshold_candidates += 1
+					if terrain_generation_profile_active() {
+						if terrain_generation_profile_context.edge_core_active {
+							terrain_generation_profile_context.profile.edge_core_threshold_candidates += 1
 						}
 					}
 					carved := false
@@ -10891,9 +10910,9 @@ terrain_density_carve_rough_segment_shaped :: proc(
 					lip_relief
 				if shape_value <=
 				   threshold_without_noise - rough_scale * negative_rough_profile_scale {
-					when TERRAIN_GENERATION_PROFILE_PHASES {
-						if terrain_generation_profile_edge_core_active {
-							terrain_generation_profile_stats.edge_core_threshold_candidates += 1
+					if terrain_generation_profile_active() {
+						if terrain_generation_profile_context.edge_core_active {
+							terrain_generation_profile_context.profile.edge_core_threshold_candidates += 1
 						}
 					}
 					carved := false
@@ -10931,9 +10950,9 @@ terrain_density_carve_rough_segment_shaped :: proc(
 				   threshold_without_noise + rough_scale * f32(1.34) + f32(0.000001) {
 					continue
 				}
-				when TERRAIN_GENERATION_PROFILE_PHASES {
-					if terrain_generation_profile_edge_core_active {
-						terrain_generation_profile_stats.edge_core_noise_candidates += 1
+				if terrain_generation_profile_active() {
+					if terrain_generation_profile_context.edge_core_active {
+						terrain_generation_profile_context.profile.edge_core_noise_candidates += 1
 					}
 				}
 				if !noise_row_cache_ready {
@@ -10960,9 +10979,9 @@ terrain_density_carve_rough_segment_shaped :: proc(
 							center_bulge,
 						)
 				if shape_value <= threshold {
-					when TERRAIN_GENERATION_PROFILE_PHASES {
-						if terrain_generation_profile_edge_core_active {
-							terrain_generation_profile_stats.edge_core_threshold_candidates += 1
+					if terrain_generation_profile_active() {
+						if terrain_generation_profile_context.edge_core_active {
+							terrain_generation_profile_context.profile.edge_core_threshold_candidates += 1
 						}
 					}
 					carved := false
@@ -11030,8 +11049,8 @@ terrain_density_carve_checked_local_block_with_material_full_vertical_support ::
 	biome_id: biomes.BiomeID,
 	directional_material_profile: bool = false,
 ) -> bool {
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.carve_attempts += 1
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.carve_attempts += 1
 	}
 	world_y := chunk_origin.y + local_y
 	column := columns[local_x + local_z * CHUNK_BLOCK_LENGTH]
@@ -11042,8 +11061,8 @@ terrain_density_carve_checked_local_block_with_material_full_vertical_support ::
 	index := chunk_block_index(u32(local_x), u32(local_y), u32(local_z))
 	view.blocks.occupancy[index] = .Empty
 	view.blocks.material_id[index] = world_async.BlockMaterialID(0)
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.carve_successes += 1
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.carve_successes += 1
 	}
 	terrain_density_mark_cave_wall_neighbors(
 		view,
@@ -11097,8 +11116,8 @@ terrain_density_carve_checked_local_block_with_material_result :: proc(
 	biome_id: biomes.BiomeID,
 	directional_material_profile: bool = false,
 ) -> bool {
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.carve_attempts += 1
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.carve_attempts += 1
 	}
 	world_y := chunk_origin.y + local_y
 	vertical_support := terrain_density_cave_vertical_support(f32(world_y))
@@ -11127,8 +11146,8 @@ terrain_density_carve_checked_local_block_with_material_result :: proc(
 	index := chunk_block_index(u32(local_x), u32(local_y), u32(local_z))
 	view.blocks.occupancy[index] = .Empty
 	view.blocks.material_id[index] = world_async.BlockMaterialID(0)
-	when TERRAIN_GENERATION_PROFILE_PHASES {
-		terrain_generation_profile_stats.carve_successes += 1
+	if terrain_generation_profile_active() {
+		terrain_generation_profile_context.profile.carve_successes += 1
 	}
 	terrain_density_mark_cave_wall_neighbors(
 		view,

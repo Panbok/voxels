@@ -1,5 +1,6 @@
 package main
 
+import bench "app:bench"
 import world "app:world"
 import async "async"
 import gfx "gfx"
@@ -19,19 +20,9 @@ import "core:os"
 DEFAULT_ACCELERATION :: f32(1.5)
 MAX_ACCELERATION :: f32(20.0)
 MOUSE_SENSITIVITY :: f32(0.0025)
-AUTO_MOVE_STRESS_TEST :: #config(AUTO_MOVE_STRESS_TEST, false)
-AUTO_TEST_FRAME_LIMIT :: #config(AUTO_TEST_FRAME_LIMIT, 0)
-AUTO_TEST_DURATION_MS :: #config(AUTO_TEST_DURATION_MS, 0)
-LOG_FRAME_METRICS :: #config(LOG_FRAME_METRICS, false)
-FRAME_METRICS_LOG_INTERVAL_MS :: #config(FRAME_METRICS_LOG_INTERVAL_MS, 1000)
-AUTO_TEST_DISABLE_VSYNC :: #config(AUTO_TEST_DISABLE_VSYNC, false)
-AUTO_CAVE_VIEW :: #config(AUTO_CAVE_VIEW, false)
-AUTO_CAVE_VIEW_DEBUG_MATERIALS :: #config(AUTO_CAVE_VIEW_DEBUG_MATERIALS, false)
-AUTO_CAVE_VIEW_X :: #config(AUTO_CAVE_VIEW_X, 0)
-AUTO_CAVE_VIEW_Y :: #config(AUTO_CAVE_VIEW_Y, 0)
-AUTO_CAVE_VIEW_Z :: #config(AUTO_CAVE_VIEW_Z, 0)
-AUTO_CAVE_VIEW_YAW_DEGREES :: #config(AUTO_CAVE_VIEW_YAW_DEGREES, 0)
-AUTO_CAVE_VIEW_PITCH_DEGREES :: #config(AUTO_CAVE_VIEW_PITCH_DEGREES, 0)
+RUNTIME_AUTO_MOVE_BENCH_VERSION :: "1"
+RUNTIME_AUTO_MOVE_BENCH_DURATION_MS :: u32(5_000)
+RUNTIME_AUTO_MOVE_BENCH_WINDOW_MS :: u32(1_000)
 PERSISTENT_SLAB_BYTES :: #config(PERSISTENT_SLAB_BYTES, 768 * mem.Megabyte)
 TRANSIENT_SLAB_BYTES :: #config(TRANSIENT_SLAB_BYTES, 64 * mem.Megabyte)
 RESOURCE_GENERATION_WORKER_MAX :: #config(RESOURCE_GENERATION_WORKER_MAX, 6)
@@ -154,31 +145,429 @@ RuntimeResourceConfig :: struct {
 }
 
 //////////////////////////////////////
+// Benchmark Methods
+/////////////////////////////////////
+
+benchmark_build_metadata_write :: proc(writer: ^bench.BenchmarkMetadataWriter) {
+	optimization := "speed"
+	when ODIN_DEBUG {
+		optimization = "debug"
+	}
+	bench.metadata_bool(writer, "odin_debug", ODIN_DEBUG)
+	bench.metadata_string(writer, "optimization", optimization)
+	bench.metadata_u64(writer, "terrain_generator_version", u64(world.TERRAIN_GENERATOR_VERSION))
+	bench.metadata_bool(
+		writer,
+		"terrain_bake_debug_material_flags",
+		world.TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS,
+	)
+	bench.metadata_bool(writer, "terrain_decoration_enabled", world.TERRAIN_DECORATION_ENABLED)
+	bench.metadata_u64(
+		writer,
+		"resource_generation_worker_max",
+		u64(RESOURCE_GENERATION_WORKER_MAX),
+	)
+	bench.metadata_u64(writer, "resource_mesh_worker_max", u64(RESOURCE_MESH_WORKER_MAX))
+	bench.metadata_u64(
+		writer,
+		"terrain_generation_chunk_cache_capacity",
+		u64(world.TERRAIN_GENERATION_CHUNK_CACHE_CAPACITY),
+	)
+	bench.metadata_u64(
+		writer,
+		"terrain_generation_column_cache_capacity",
+		u64(world.TERRAIN_GENERATION_COLUMN_CACHE_CAPACITY),
+	)
+	bench.metadata_u64(
+		writer,
+		"terrain_generation_region_cache_capacity",
+		u64(world.TERRAIN_GENERATION_REGION_CACHE_CAPACITY),
+	)
+}
+
+benchmark_debug_preflight_run :: proc() {
+	when ODIN_DEBUG {
+		camera.debug_frustum_contract_checks_run()
+		camera_debug_temp := mem.begin_arena_temp_memory(&state.transient_arena)
+		camera.debug_terrain_collision_checks_run(state.transient_allocator)
+		mem.end_arena_temp_memory(camera_debug_temp)
+		world.debug_chunk_mesher_contract_checks_run(&state.transient_arena)
+		world.debug_chunk_visibility_contract_checks_run(&state.transient_arena)
+		gfx.benchmarks_debug_contracts_run(state.persistent_allocator, &state.transient_arena)
+		world.chunk_mesher_benchmarks_debug_contracts_run(&state.transient_arena)
+	}
+}
+
+RuntimeAutoMoveBenchmarkData :: struct {
+	duration_ms:              u32,
+	window_ms:                u32,
+	disable_vsync:            bool,
+	auto_move:                bool,
+	sprint:                   bool,
+	start_position:           [3]f32,
+	yaw_degrees:              f32,
+	pitch_degrees:            f32,
+	cave_debug_visualization: bool,
+}
+
+runtime_auto_move_benchmark_metrics := [?]bench.BenchmarkMetricDescriptor {
+	{
+		name = "completed_windows",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, completed_windows),
+		reduce = .Last,
+	},
+	{
+		name = "total_samples",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, total_samples),
+		reduce = .Last,
+	},
+	{
+		name = "weighted_avg_frame_ms",
+		kind = .F64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, weighted_avg_frame_ms),
+		reduce = .Last,
+		unit = "ms",
+	},
+	{
+		name = "weighted_fps",
+		kind = .F64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, weighted_fps),
+		reduce = .Last,
+		unit = "fps",
+	},
+	{
+		name = "max_frame_ms",
+		kind = .F64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, max_frame_ms),
+		reduce = .Last,
+		unit = "ms",
+	},
+	{
+		name = "chunks_generated",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, chunks_generated),
+		reduce = .Last,
+	},
+	{
+		name = "chunks_generated_full",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, chunks_generated_full),
+		reduce = .Last,
+	},
+	{
+		name = "chunks_generated_proxy",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, chunks_generated_proxy),
+		reduce = .Last,
+	},
+	{
+		name = "chunks_refined_full",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, chunks_refined_full),
+		reduce = .Last,
+	},
+	{
+		name = "chunks_prewarmed",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, chunks_prewarmed),
+		reduce = .Last,
+	},
+	{
+		name = "chunks_evicted",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, chunks_evicted),
+		reduce = .Last,
+	},
+	{
+		name = "mesh_submitted",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_submitted),
+		reduce = .Last,
+	},
+	{
+		name = "mesh_committed",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_committed),
+		reduce = .Last,
+	},
+	{
+		name = "mesh_uploaded",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_uploaded),
+		reduce = .Last,
+	},
+	{
+		name = "dirty_remaining_max",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, dirty_remaining_max),
+		reduce = .Last,
+	},
+	{
+		name = "draw_units_tested",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, draw_units_tested),
+		reduce = .Last,
+	},
+	{
+		name = "draw_units_frustum_culled",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, draw_units_frustum_culled),
+		reduce = .Last,
+	},
+	{
+		name = "draw_units_occlusion_culled",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, draw_units_occlusion_culled),
+		reduce = .Last,
+	},
+	{
+		name = "draw_units_drawn",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, draw_units_drawn),
+		reduce = .Last,
+	},
+	{
+		name = "terrain_triangles_drawn",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, terrain_triangles_drawn),
+		reduce = .Last,
+	},
+	{
+		name = "deferred_geometry",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, deferred_geometry),
+		reduce = .Last,
+	},
+	{
+		name = "deferred_enqueued",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, deferred_enqueued),
+		reduce = .Last,
+	},
+	{
+		name = "deferred_completed",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, deferred_completed),
+		reduce = .Last,
+	},
+}
+
+runtime_auto_move_benchmark_fixture_write :: proc(
+	ctx: ^bench.BenchmarkContext,
+	data: rawptr,
+	writer: ^bench.BenchmarkMetadataWriter,
+) -> bench.BenchmarkStatus {
+	fixture := (^RuntimeAutoMoveBenchmarkData)(data)
+	resource_config := runtime_resource_config_make()
+	bench.metadata_u64(writer, "duration_ms", u64(fixture.duration_ms), "ms")
+	bench.metadata_u64(writer, "frame_window_ms", u64(fixture.window_ms), "ms")
+	bench.metadata_bool(writer, "disable_vsync", fixture.disable_vsync)
+	bench.metadata_bool(writer, "auto_move", fixture.auto_move)
+	bench.metadata_bool(writer, "sprint", fixture.sprint)
+	bench.metadata_f64(writer, "start_x", f64(fixture.start_position[0]))
+	bench.metadata_f64(writer, "start_y", f64(fixture.start_position[1]))
+	bench.metadata_f64(writer, "start_z", f64(fixture.start_position[2]))
+	bench.metadata_f64(writer, "yaw_degrees", f64(fixture.yaw_degrees))
+	bench.metadata_f64(writer, "pitch_degrees", f64(fixture.pitch_degrees))
+	bench.metadata_bool(writer, "cave_debug_visualization", fixture.cave_debug_visualization)
+	bench.metadata_u64(
+		writer,
+		"runtime_generation_workers",
+		u64(resource_config.generation_worker_count),
+	)
+	bench.metadata_u64(writer, "runtime_mesh_workers", u64(resource_config.mesh_worker_count))
+	bench.metadata_u64(writer, "chunk_streaming_radius_xz", u64(world.CHUNK_STREAMING_RADIUS_XZ))
+	bench.metadata_u64(
+		writer,
+		"chunk_streaming_radius_y_down",
+		u64(world.CHUNK_STREAMING_RADIUS_Y_DOWN),
+	)
+	bench.metadata_u64(
+		writer,
+		"chunk_streaming_radius_y_up",
+		u64(world.CHUNK_STREAMING_RADIUS_Y_UP),
+	)
+	bench.metadata_bool(
+		writer,
+		"underground_prewarm_enabled",
+		world.TERRAIN_STREAMING_UNDERGROUND_PREWARM_ENABLED,
+	)
+	bench.metadata_bool(
+		writer,
+		"underground_proxy_lod_enabled",
+		world.TERRAIN_STREAMING_UNDERGROUND_PROXY_LOD_ENABLED,
+	)
+	_ = ctx
+	return bench.status_pass()
+}
+
+runtime_auto_move_camera_apply :: proc(fixture: ^RuntimeAutoMoveBenchmarkData) {
+	cam := gfx.camera_get()
+	cam.position = fixture.start_position
+	cam.yaw = math.to_radians_f32(fixture.yaw_degrees)
+	cam.pitch = math.to_radians_f32(fixture.pitch_degrees)
+	camera.vectors_update(cam)
+	gfx.view_projection_update()
+	if fixture.cave_debug_visualization {
+		gfx.cave_debug_visualization_toggle()
+	}
+}
+
+runtime_auto_move_benchmark_run :: proc(
+	ctx: ^bench.BenchmarkContext,
+	data: rawptr,
+	result: rawptr,
+) -> bench.BenchmarkStatus {
+	fixture := (^RuntimeAutoMoveBenchmarkData)(data)
+	out := (^bench.RuntimeAutoMoveResult)(result)
+	if fixture.duration_ms == 0 {
+		return bench.status_fail("runtime auto-move duration must be greater than zero")
+	}
+	if fixture.window_ms == 0 {
+		return bench.status_fail("runtime auto-move frame window must be greater than zero")
+	}
+
+	state.metrics = {}
+	state.auto_move_on = fixture.auto_move
+	state.sprint_on = fixture.sprint
+	state.enable_vsync = !fixture.disable_vsync
+	state.is_window_open = true
+	state.capture_frame_windows = true
+	defer state.capture_frame_windows = false
+	metrics_frame_window_reset()
+
+	init()
+	defer shutdown()
+	setup_resources()
+	defer destroy_resources()
+	runtime_auto_move_camera_apply(fixture)
+	world.streaming_update_for_observer(gfx.camera_get().position)
+
+	performance_frequency := f64(sdl.GetPerformanceFrequency())
+	current_time := sdl.GetPerformanceCounter()
+	for state.is_window_open && state.auto_test_elapsed_ms < f32(fixture.duration_ms) {
+		now := sdl.GetPerformanceCounter()
+		dt := f32(f64(now - current_time) / performance_frequency)
+		current_time = now
+
+		process_events()
+		update_camera_vectors()
+		handle_input(dt)
+		update()
+		render_stats := gfx.render()
+		metrics_render_stats_apply(render_stats)
+		metrics_record_frame(dt)
+
+		if state.frame_metrics_elapsed_ms >= f32(fixture.window_ms) {
+			window := metrics_frame_window_sample_make()
+			bench.runtime_auto_move_result_add_window(out, window)
+			metrics_frame_window_reset()
+		}
+	}
+
+	if out.completed_windows == 0 {
+		return bench.status_fail("runtime auto-move completed zero frame metric windows")
+	}
+	_ = ctx
+	return bench.status_pass()
+}
+
+runtime_benchmarks_register :: proc(registry: ^bench.BenchmarkRegistry) {
+	fixture := RuntimeAutoMoveBenchmarkData {
+		duration_ms              = RUNTIME_AUTO_MOVE_BENCH_DURATION_MS,
+		window_ms                = RUNTIME_AUTO_MOVE_BENCH_WINDOW_MS,
+		disable_vsync            = true,
+		auto_move                = true,
+		sprint                   = true,
+		start_position           = {0.0, 0.0, -5.0},
+		yaw_degrees              = 0.0,
+		pitch_degrees            = 0.0,
+		cave_debug_visualization = false,
+	}
+	bench.register(
+		registry,
+		"runtime.auto_move.streaming",
+		runtime_auto_move_benchmark_run,
+		rawptr(&fixture),
+		nil,
+		{
+			iterations = 1,
+			workers = 1,
+			result_size = size_of(bench.RuntimeAutoMoveResult),
+			result_align = align_of(bench.RuntimeAutoMoveResult),
+			data_size = size_of(RuntimeAutoMoveBenchmarkData),
+			data_align = align_of(RuntimeAutoMoveBenchmarkData),
+			metrics = runtime_auto_move_benchmark_metrics[:],
+			flags = {.Runtime_Owns_Main_Loop, .Requires_Gfx, .Serial_Only, .Mutates_Global_State},
+			warmup_mode = .None,
+			write_fixture = runtime_auto_move_benchmark_fixture_write,
+			category = "runtime.auto_move",
+			version = RUNTIME_AUTO_MOVE_BENCH_VERSION,
+			default_in_all = false,
+		},
+	)
+}
+
+benchmarks_run_from_cli :: proc(cli: bench.BenchmarkCLIParseResult) -> bool {
+	if cli.options.graph_requested {
+		registry := bench.BenchmarkRegistry{}
+		bench.registry_init(&registry, state.persistent_allocator)
+		return bench.run(&registry, cli.options)
+	}
+
+	when !bench.BENCHMARKS_ENABLED {
+		_ = cli
+		log.warn(
+			"Benchmarks are disabled in this binary; rebuild with -define:BENCHMARKS_ENABLED=true",
+		)
+		return false
+	} else {
+		registry := bench.BenchmarkRegistry{}
+		bench.registry_init(&registry, state.persistent_allocator)
+		runtime_benchmarks_register(&registry)
+		world.mesh_benchmarks_register(&registry, state.persistent_allocator)
+		gfx.benchmarks_register(&registry, state.persistent_allocator)
+		world.terrain_benchmarks_register(&registry)
+
+		options := cli.options
+		options.write_build = benchmark_build_metadata_write
+		if !options.list_requested {
+			benchmark_debug_preflight_run()
+		}
+		return bench.run(&registry, options)
+	}
+}
+
+//////////////////////////////////////
 // State
 /////////////////////////////////////
 
 state := struct {
 	// Memory
-	using memory:    Memory,
+	using memory:          Memory,
 
 	// Metrics
-	using metrics:   Metrics,
+	using metrics:         Metrics,
 
 	// Player
-	auto_move_on:    bool,
-	sprint_on:       bool,
+	auto_move_on:          bool,
+	sprint_on:             bool,
 
 	// State variables
-	debug_mode:      bool,
-	enable_vsync:    bool,
-	is_window_open:  bool,
-	resource_config: RuntimeResourceConfig,
+	debug_mode:            bool,
+	enable_vsync:          bool,
+	is_window_open:        bool,
+	capture_frame_windows: bool,
+	resource_config:       RuntimeResourceConfig,
 } {
-	auto_move_on   = AUTO_MOVE_STRESS_TEST,
-	sprint_on      = AUTO_MOVE_STRESS_TEST,
-	debug_mode     = true,
-	enable_vsync   = !AUTO_TEST_DISABLE_VSYNC,
-	is_window_open = true,
+	auto_move_on          = false,
+	sprint_on             = false,
+	debug_mode            = true,
+	enable_vsync          = true,
+	is_window_open        = true,
+	capture_frame_windows = false,
 }
 
 //////////////////////////////////////
@@ -289,6 +678,65 @@ metrics_render_stats_apply :: proc(render_stats: gfx.RenderStats) {
 	state.deferred_release_completed_total = render_stats.deferred_release_completed_total
 }
 
+metrics_frame_window_sample_make :: proc() -> bench.RuntimeFrameWindowSample {
+	avg_ms := f64(0)
+	if state.frame_metrics_sample_count > 0 {
+		avg_ms = f64(state.frame_metrics_accum_ms) / f64(state.frame_metrics_sample_count)
+	}
+
+	return {
+		samples = state.frame_metrics_sample_count,
+		avg_ms = avg_ms,
+		min_ms = f64(state.frame_metrics_min_ms),
+		max_ms = f64(state.frame_metrics_max_ms),
+		chunks_generated = state.frame_metrics_chunks_generated,
+		chunks_generated_full = state.frame_metrics_chunks_generated_full,
+		chunks_generated_proxy = state.frame_metrics_chunks_generated_proxy,
+		chunks_refined_full = state.frame_metrics_chunks_refined_full,
+		chunks_prewarmed = state.frame_metrics_chunks_prewarmed,
+		chunks_evicted = state.frame_metrics_chunks_evicted,
+		mesh_submitted = state.frame_metrics_mesh_submitted,
+		mesh_committed = state.frame_metrics_mesh_committed,
+		mesh_uploaded = state.frame_metrics_mesh_uploaded,
+		dirty_remaining_max = state.frame_metrics_dirty_remaining_max,
+		draw_units_tested = state.frame_metrics_draw_units_tested,
+		draw_units_frustum_culled = state.frame_metrics_frustum_culled,
+		draw_units_occlusion_culled = state.frame_metrics_occlusion_culled,
+		draw_units_drawn = state.frame_metrics_draw_units_drawn,
+		terrain_triangles_drawn = state.frame_metrics_triangles_drawn,
+		deferred_geometry = state.prev_deferred_geometry_count,
+		deferred_enqueued = state.prev_deferred_release_enqueued_total,
+		deferred_completed = state.prev_deferred_release_completed_total,
+	}
+}
+
+metrics_frame_window_reset :: proc() {
+	state.frame_metrics_accum_ms = 0
+	state.frame_metrics_elapsed_ms = 0
+	state.frame_metrics_sample_count = 0
+	state.frame_metrics_min_ms = 0
+	state.frame_metrics_max_ms = 0
+	state.frame_metrics_chunks_generated = 0
+	state.frame_metrics_chunks_generated_full = 0
+	state.frame_metrics_chunks_generated_proxy = 0
+	state.frame_metrics_chunks_refined_full = 0
+	state.frame_metrics_chunks_prewarmed = 0
+	state.frame_metrics_generation_full_us = 0
+	state.frame_metrics_generation_proxy_us = 0
+	state.frame_metrics_generation_refined_full_us = 0
+	state.frame_metrics_generation_prewarm_us = 0
+	state.frame_metrics_chunks_evicted = 0
+	state.frame_metrics_mesh_submitted = 0
+	state.frame_metrics_mesh_committed = 0
+	state.frame_metrics_mesh_uploaded = 0
+	state.frame_metrics_dirty_remaining_max = 0
+	state.frame_metrics_draw_units_tested = 0
+	state.frame_metrics_frustum_culled = 0
+	state.frame_metrics_occlusion_culled = 0
+	state.frame_metrics_draw_units_drawn = 0
+	state.frame_metrics_triangles_drawn = 0
+}
+
 metrics_record_frame :: proc(dt: f32) {
 	state.frame_count += 1
 	state.current_frame_ms = dt * 1000.0
@@ -323,125 +771,46 @@ metrics_record_frame :: proc(dt: f32) {
 	state.prev_deferred_release_enqueued_total = state.deferred_release_enqueued_total
 	state.prev_deferred_release_completed_total = state.deferred_release_completed_total
 
-	if state.frame_metrics_sample_count == 0 {
-		state.frame_metrics_min_ms = state.current_frame_ms
-		state.frame_metrics_max_ms = state.current_frame_ms
-	} else {
-		state.frame_metrics_min_ms = math.min(state.frame_metrics_min_ms, state.current_frame_ms)
-		state.frame_metrics_max_ms = math.max(state.frame_metrics_max_ms, state.current_frame_ms)
-	}
-
-	state.frame_metrics_accum_ms += state.current_frame_ms
-	state.frame_metrics_elapsed_ms += state.current_frame_ms
-	state.frame_metrics_sample_count += 1
-	state.frame_metrics_chunks_generated += state.prev_chunks_generated
-	state.frame_metrics_chunks_generated_full += state.prev_chunks_generated_full
-	state.frame_metrics_chunks_generated_proxy += state.prev_chunks_generated_proxy
-	state.frame_metrics_chunks_refined_full += state.prev_chunks_refined_full
-	state.frame_metrics_chunks_prewarmed += state.prev_chunks_prewarmed
-	state.frame_metrics_generation_full_us += state.prev_generation_full_us
-	state.frame_metrics_generation_proxy_us += state.prev_generation_proxy_us
-	state.frame_metrics_generation_refined_full_us += state.prev_generation_refined_full_us
-	state.frame_metrics_generation_prewarm_us += state.prev_generation_prewarm_us
-	state.frame_metrics_chunks_evicted += state.prev_chunks_evicted
-	state.frame_metrics_mesh_submitted += state.prev_chunk_mesh_jobs_submitted
-	state.frame_metrics_mesh_committed += state.prev_chunk_mesh_results_committed
-	state.frame_metrics_mesh_uploaded += state.prev_chunk_mesh_results_uploaded
-	state.frame_metrics_draw_units_tested += state.prev_terrain_draw_units_tested
-	state.frame_metrics_frustum_culled += state.prev_terrain_draw_units_frustum_culled
-	state.frame_metrics_occlusion_culled += state.prev_terrain_draw_units_occlusion_culled
-	state.frame_metrics_draw_units_drawn += state.prev_terrain_draw_units_drawn
-	state.frame_metrics_triangles_drawn += state.prev_terrain_triangles_drawn
-	state.frame_metrics_dirty_remaining_max = math.max(
-		state.frame_metrics_dirty_remaining_max,
-		state.prev_chunks_dirty_remaining,
-	)
-
-	when LOG_FRAME_METRICS {
-		if state.frame_metrics_elapsed_ms >= f32(FRAME_METRICS_LOG_INTERVAL_MS) {
-			avg_ms := state.frame_metrics_accum_ms / f32(state.frame_metrics_sample_count)
-			avg_fps := avg_ms > 0 ? 1000.0 / avg_ms : 0.0
-			generation_full_avg_us := f64(0)
-			if state.frame_metrics_chunks_generated_full > 0 {
-				generation_full_avg_us =
-					f64(state.frame_metrics_generation_full_us) /
-					f64(state.frame_metrics_chunks_generated_full)
-			}
-			generation_proxy_avg_us := f64(0)
-			if state.frame_metrics_chunks_generated_proxy > 0 {
-				generation_proxy_avg_us =
-					f64(state.frame_metrics_generation_proxy_us) /
-					f64(state.frame_metrics_chunks_generated_proxy)
-			}
-			generation_refined_full_avg_us := f64(0)
-			if state.frame_metrics_chunks_refined_full > 0 {
-				generation_refined_full_avg_us =
-					f64(state.frame_metrics_generation_refined_full_us) /
-					f64(state.frame_metrics_chunks_refined_full)
-			}
-			generation_prewarm_avg_us := f64(0)
-			if state.frame_metrics_chunks_prewarmed > 0 {
-				generation_prewarm_avg_us =
-					f64(state.frame_metrics_generation_prewarm_us) /
-					f64(state.frame_metrics_chunks_prewarmed)
-			}
-			log.infof(
-				"Frame metrics: frame=%d samples=%d avg_ms=%.3f min_ms=%.3f max_ms=%.3f avg_fps=%.1f chunks_generated=%d chunks_generated_full=%d chunks_generated_proxy=%d chunks_refined_full=%d chunks_prewarmed=%d generation_full_avg_us=%.1f generation_proxy_avg_us=%.1f generation_refined_full_avg_us=%.1f generation_prewarm_avg_us=%.1f chunks_evicted=%d mesh_submitted=%d mesh_committed=%d mesh_uploaded=%d dirty_remaining_max=%d draw_units_tested=%d draw_units_frustum_culled=%d draw_units_occlusion_culled=%d draw_units_drawn=%d terrain_triangles_drawn=%d deferred_geometry=%d deferred_enqueued=%d deferred_completed=%d",
-				state.frame_count,
-				state.frame_metrics_sample_count,
-				avg_ms,
+	if state.capture_frame_windows {
+		if state.frame_metrics_sample_count == 0 {
+			state.frame_metrics_min_ms = state.current_frame_ms
+			state.frame_metrics_max_ms = state.current_frame_ms
+		} else {
+			state.frame_metrics_min_ms = math.min(
 				state.frame_metrics_min_ms,
-				state.frame_metrics_max_ms,
-				avg_fps,
-				state.frame_metrics_chunks_generated,
-				state.frame_metrics_chunks_generated_full,
-				state.frame_metrics_chunks_generated_proxy,
-				state.frame_metrics_chunks_refined_full,
-				state.frame_metrics_chunks_prewarmed,
-				generation_full_avg_us,
-				generation_proxy_avg_us,
-				generation_refined_full_avg_us,
-				generation_prewarm_avg_us,
-				state.frame_metrics_chunks_evicted,
-				state.frame_metrics_mesh_submitted,
-				state.frame_metrics_mesh_committed,
-				state.frame_metrics_mesh_uploaded,
-				state.frame_metrics_dirty_remaining_max,
-				state.frame_metrics_draw_units_tested,
-				state.frame_metrics_frustum_culled,
-				state.frame_metrics_occlusion_culled,
-				state.frame_metrics_draw_units_drawn,
-				state.frame_metrics_triangles_drawn,
-				state.prev_deferred_geometry_count,
-				state.prev_deferred_release_enqueued_total,
-				state.prev_deferred_release_completed_total,
+				state.current_frame_ms,
 			)
-
-			state.frame_metrics_accum_ms = 0
-			state.frame_metrics_elapsed_ms = 0
-			state.frame_metrics_sample_count = 0
-			state.frame_metrics_min_ms = 0
-			state.frame_metrics_max_ms = 0
-			state.frame_metrics_chunks_generated = 0
-			state.frame_metrics_chunks_generated_full = 0
-			state.frame_metrics_chunks_generated_proxy = 0
-			state.frame_metrics_chunks_refined_full = 0
-			state.frame_metrics_chunks_prewarmed = 0
-			state.frame_metrics_generation_full_us = 0
-			state.frame_metrics_generation_proxy_us = 0
-			state.frame_metrics_generation_refined_full_us = 0
-			state.frame_metrics_generation_prewarm_us = 0
-			state.frame_metrics_chunks_evicted = 0
-			state.frame_metrics_mesh_submitted = 0
-			state.frame_metrics_mesh_committed = 0
-			state.frame_metrics_mesh_uploaded = 0
-			state.frame_metrics_dirty_remaining_max = 0
-			state.frame_metrics_draw_units_tested = 0
-			state.frame_metrics_frustum_culled = 0
-			state.frame_metrics_occlusion_culled = 0
-			state.frame_metrics_draw_units_drawn = 0
-			state.frame_metrics_triangles_drawn = 0
+			state.frame_metrics_max_ms = math.max(
+				state.frame_metrics_max_ms,
+				state.current_frame_ms,
+			)
 		}
+
+		state.frame_metrics_accum_ms += state.current_frame_ms
+		state.frame_metrics_elapsed_ms += state.current_frame_ms
+		state.frame_metrics_sample_count += 1
+		state.frame_metrics_chunks_generated += state.prev_chunks_generated
+		state.frame_metrics_chunks_generated_full += state.prev_chunks_generated_full
+		state.frame_metrics_chunks_generated_proxy += state.prev_chunks_generated_proxy
+		state.frame_metrics_chunks_refined_full += state.prev_chunks_refined_full
+		state.frame_metrics_chunks_prewarmed += state.prev_chunks_prewarmed
+		state.frame_metrics_generation_full_us += state.prev_generation_full_us
+		state.frame_metrics_generation_proxy_us += state.prev_generation_proxy_us
+		state.frame_metrics_generation_refined_full_us += state.prev_generation_refined_full_us
+		state.frame_metrics_generation_prewarm_us += state.prev_generation_prewarm_us
+		state.frame_metrics_chunks_evicted += state.prev_chunks_evicted
+		state.frame_metrics_mesh_submitted += state.prev_chunk_mesh_jobs_submitted
+		state.frame_metrics_mesh_committed += state.prev_chunk_mesh_results_committed
+		state.frame_metrics_mesh_uploaded += state.prev_chunk_mesh_results_uploaded
+		state.frame_metrics_draw_units_tested += state.prev_terrain_draw_units_tested
+		state.frame_metrics_frustum_culled += state.prev_terrain_draw_units_frustum_culled
+		state.frame_metrics_occlusion_culled += state.prev_terrain_draw_units_occlusion_culled
+		state.frame_metrics_draw_units_drawn += state.prev_terrain_draw_units_drawn
+		state.frame_metrics_triangles_drawn += state.prev_terrain_triangles_drawn
+		state.frame_metrics_dirty_remaining_max = math.max(
+			state.frame_metrics_dirty_remaining_max,
+			state.prev_chunks_dirty_remaining,
+		)
 	}
 
 	state.chunks_total = 0
@@ -539,9 +908,6 @@ setup_resources :: proc() {
 			chunk_geometry_release = gfx.chunk_geometry_release,
 		},
 	)
-	when AUTO_CAVE_VIEW {
-		auto_cave_view_camera_apply()
-	}
 	when ODIN_DEBUG {
 		world.debug_chunk_edit_contract_checks_run(&state.transient_arena)
 	}
@@ -549,28 +915,6 @@ setup_resources :: proc() {
 	world.streaming_update_for_observer(cam.position)
 
 	log.debug("Resources initialized")
-}
-
-when AUTO_CAVE_VIEW {
-	auto_cave_view_camera_apply :: proc() {
-		cam := gfx.camera_get()
-		cam.position = {f32(AUTO_CAVE_VIEW_X), f32(AUTO_CAVE_VIEW_Y), f32(AUTO_CAVE_VIEW_Z)}
-		cam.yaw = math.to_radians_f32(f32(AUTO_CAVE_VIEW_YAW_DEGREES))
-		cam.pitch = math.to_radians_f32(f32(AUTO_CAVE_VIEW_PITCH_DEGREES))
-		camera.vectors_update(cam)
-		when AUTO_CAVE_VIEW_DEBUG_MATERIALS {
-			gfx.cave_debug_visualization_toggle()
-		}
-		log.debugf(
-			"Auto cave view camera: position=(%.2f,%.2f,%.2f) yaw=%d pitch=%d cave_debug=%v",
-			cam.position[0],
-			cam.position[1],
-			cam.position[2],
-			AUTO_CAVE_VIEW_YAW_DEGREES,
-			AUTO_CAVE_VIEW_PITCH_DEGREES,
-			AUTO_CAVE_VIEW_DEBUG_MATERIALS,
-		)
-	}
 }
 
 destroy_resources :: proc() {
@@ -725,50 +1069,20 @@ main :: proc() {
 	context.allocator = state.persistent_allocator
 	context.temp_allocator = state.transient_allocator
 
-	when ODIN_DEBUG {
-		camera.debug_frustum_contract_checks_run()
-		camera_debug_temp := mem.begin_arena_temp_memory(&state.transient_arena)
-		camera.debug_terrain_collision_checks_run(state.transient_allocator)
-		mem.end_arena_temp_memory(camera_debug_temp)
-		world.debug_chunk_mesher_contract_checks_run(&state.transient_arena)
-		world.debug_chunk_visibility_contract_checks_run(&state.transient_arena)
-		gfx.benchmarks_debug_contracts_run(state.persistent_allocator, &state.transient_arena)
-		world.chunk_mesher_benchmarks_debug_contracts_run(&state.transient_arena)
-
-		when world.RUN_MESH_BENCHMARK {
-			world.chunk_mesher_benchmark_runs_run(
-				&state.transient_arena,
-				world.MESH_BENCHMARK_ITERATIONS,
-			)
-			return
-		}
-
-		when world.RUN_TERRAIN_GENERATION_BENCHMARK {
-			world.terrain_generation_benchmark_runs_run(
-				&state.transient_arena,
-				world.TERRAIN_GENERATION_BENCHMARK_ITERATIONS,
-			)
-			return
-		}
-
-		when gfx.RUN_CULLING_BENCHMARK {
-			gfx.culling_benchmark_runs_run(
-				gfx.CULLING_BENCHMARK_ITERATIONS,
-				state.persistent_allocator,
-				&state.transient_arena,
-			)
-			return
-		}
+	cli := bench.parse_cli_args(os.args)
+	if !cli.ok {
+		log.errorf("Benchmark CLI error: %s", cli.error)
+		os.exit(1)
 	}
-	when !ODIN_DEBUG {
-		when world.RUN_TERRAIN_GENERATION_BENCHMARK {
-			world.terrain_generation_benchmark_runs_run(
-				&state.transient_arena,
-				world.TERRAIN_GENERATION_BENCHMARK_ITERATIONS,
-			)
-			return
+
+	if cli.options.bench_requested {
+		if !benchmarks_run_from_cli(cli) {
+			os.exit(1)
 		}
+		return
 	}
+
+	benchmark_debug_preflight_run()
 
 	init()
 	defer shutdown()
@@ -790,23 +1104,5 @@ main :: proc() {
 		render_stats := gfx.render()
 		metrics_render_stats_apply(render_stats)
 		metrics_record_frame(dt)
-
-		when AUTO_TEST_DURATION_MS > 0 {
-			if state.auto_test_elapsed_ms >= f32(AUTO_TEST_DURATION_MS) {
-				log.infof(
-					"Auto test duration reached: frame=%d elapsed_ms=%.3f",
-					state.frame_count,
-					state.auto_test_elapsed_ms,
-				)
-				state.is_window_open = false
-			}
-		} else {
-			when AUTO_TEST_FRAME_LIMIT > 0 {
-				if state.frame_count >= AUTO_TEST_FRAME_LIMIT {
-					log.infof("Auto test frame limit reached: frame=%d", state.frame_count)
-					state.is_window_open = false
-				}
-			}
-		}
 	}
 }
