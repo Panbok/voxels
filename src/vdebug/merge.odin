@@ -3,7 +3,6 @@ package vdebug
 import json "core:encoding/json"
 import "core:fmt"
 import "core:os"
-import "core:strings"
 
 merge_manifests :: proc(options: VisualDebugRunnerOptions) -> bool {
 	if !prepare_output_file_create_only(options.merge_out_path) {

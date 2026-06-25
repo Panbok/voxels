@@ -1831,7 +1831,12 @@ when ODIN_DEBUG {
 		id_3 := feature_id_from_grid_coord(key, subterranean_config, owner_3)
 		log.assert(id_3 != id_a, "2D and 3D feature grids must have separate ID spaces")
 
-		owner_from_block_3 := feature_grid_owner_from_block(-385, -1, 384, subterranean_config)
+		owner_from_block_3 := feature_grid_owner_from_block(
+			-subterranean_config.cell_size_blocks - 1,
+			-1,
+			subterranean_config.cell_size_blocks,
+			subterranean_config,
+		)
 		log.assert(
 			owner_from_block_3 == FeatureGridCoord3{x = -2, y = -1, z = 1},
 			"3D negative block coordinates must use floor division",

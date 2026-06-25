@@ -43,6 +43,7 @@ StreamingState :: struct {
 	next_streaming_target_index:         u32,
 	next_streaming_prewarm_target_index: u32,
 	next_mesh_scan_index:                u32,
+	generation_request_priority:         GenerationRequestPriority,
 }
 
 //////////////////////////////////////
@@ -50,20 +51,32 @@ StreamingState :: struct {
 /////////////////////////////////////
 
 StreamingUpdateStats :: struct {
-	chunks_generated:             u32,
-	chunks_generated_full:        u32,
-	chunks_generated_proxy:       u32,
-	chunks_refined_full:          u32,
-	chunks_prewarmed:             u32,
-	generation_full_us:           u64,
-	generation_proxy_us:          u64,
-	generation_refined_full_us:   u64,
-	generation_prewarm_us:        u64,
-	chunks_evicted:               u32,
-	chunk_mesh_jobs_submitted:    u32,
-	chunk_mesh_results_committed: u32,
-	chunk_mesh_results_uploaded:  u32,
-	chunks_dirty_remaining:       u32,
+	chunks_generated:                u32,
+	chunks_generated_full:           u32,
+	chunks_generated_proxy:          u32,
+	chunks_refined_full:             u32,
+	chunks_prewarmed:                u32,
+	generation_full_us:              u64,
+	generation_proxy_us:             u64,
+	generation_refined_full_us:      u64,
+	generation_prewarm_us:           u64,
+	chunks_evicted:                  u32,
+	chunk_mesh_jobs_submitted:       u32,
+	chunk_mesh_results_committed:    u32,
+	chunk_mesh_results_uploaded:     u32,
+	chunk_mesh_results_empty:        u32,
+	mesh_worker_us:                  u64,
+	chunks_dirty_remaining:          u32,
+	chunks_dirty_meshable:           u32,
+	chunks_dirty_dependency_blocked: u32,
+	chunks_dirty_outside_window:     u32,
+}
+
+StreamingDirtyGeneratedStats :: struct {
+	total:              u32,
+	meshable:           u32,
+	dependency_blocked: u32,
+	outside_window:     u32,
 }
 
 GenerationResultsPollStats :: struct {
@@ -83,6 +96,13 @@ ChunkWorkBudget :: struct {
 	generation_results_per_frame:  u32,
 	mesh_requests_per_frame:       u32,
 	mesh_results_per_frame:        u32,
+}
+
+GenerationRequestPriority :: enum {
+	Default,
+	Missing_First,
+	Mesh_Unblock_First,
+	Mesh_Unblock_Target_Order_First,
 }
 
 //////////////////////////////////////
@@ -147,6 +167,7 @@ state := struct {
 	terrain_generation_cave_overlay_cache: TerrainGenerationCaveOverlayCache,
 	terrain_generation_chunk_cache:        TerrainGenerationChunkCache,
 	terrain_generation_column_cache:       TerrainGenerationColumnCache,
+	terrain_water_separator_sample_cache:  TerrainWaterSeparatorSampleCache,
 
 	// State
 	initialized:                           bool,
@@ -184,6 +205,27 @@ chunk_work_budget_resolve :: proc(budget: ChunkWorkBudget) -> ChunkWorkBudget {
 	return resolved
 }
 
+chunk_work_budget_set :: proc(budget: ChunkWorkBudget) {
+	resolved := chunk_work_budget_resolve(budget)
+	log.assertf(
+		resolved.generation_results_per_frame <= u32(len(state.generation_result_buffer)),
+		"generation result budget exceeds allocated buffer: budget=%d buffer=%d",
+		resolved.generation_results_per_frame,
+		len(state.generation_result_buffer),
+	)
+	log.assertf(
+		resolved.mesh_results_per_frame <= u32(len(state.mesh_result_buffer)),
+		"mesh result budget exceeds allocated buffer: budget=%d buffer=%d",
+		resolved.mesh_results_per_frame,
+		len(state.mesh_result_buffer),
+	)
+	state.chunk_work_budget = resolved
+}
+
+generation_request_priority_set :: proc(priority: GenerationRequestPriority) {
+	state.generation_request_priority = priority
+}
+
 init :: proc(config: InitConfig) {
 	if state.initialized {
 		return
@@ -202,6 +244,7 @@ init :: proc(config: InitConfig) {
 
 	state.persistent_allocator = config.persistent_allocator
 	state.chunk_work_budget = chunk_work_budget_resolve(config.chunk_work_budget)
+	state.generation_request_priority = .Missing_First
 	state.generation_result_buffer = make(
 		[]world_async.ChunkGenerationJobResult,
 		int(state.chunk_work_budget.generation_results_per_frame),
@@ -225,6 +268,7 @@ init :: proc(config: InitConfig) {
 	terrain_generation_cave_overlay_cache_init(state.persistent_allocator)
 	terrain_generation_cave_overlay_cache_clear()
 	terrain_generation_column_cache_clear()
+	terrain_water_separator_sample_cache_clear()
 
 	when ODIN_DEBUG {
 		biomes.debug_contract_checks_run()
@@ -448,6 +492,20 @@ TERRAIN_GENERATION_COLUMN_CACHE_CAPACITY :: #config(
 	CHUNK_STREAMING_TARGET_CAPACITY,
 )
 #assert(TERRAIN_GENERATION_COLUMN_CACHE_CAPACITY > 0)
+TERRAIN_WATER_SEPARATOR_SAMPLE_CACHE_CAPACITY :: #config(
+	TERRAIN_WATER_SEPARATOR_SAMPLE_CACHE_CAPACITY,
+	16384,
+)
+TERRAIN_WATER_SEPARATOR_SAMPLE_CACHE_PROBE_COUNT :: #config(
+	TERRAIN_WATER_SEPARATOR_SAMPLE_CACHE_PROBE_COUNT,
+	8,
+)
+#assert(TERRAIN_WATER_SEPARATOR_SAMPLE_CACHE_CAPACITY > 0)
+#assert(TERRAIN_WATER_SEPARATOR_SAMPLE_CACHE_PROBE_COUNT > 0)
+#assert(
+	TERRAIN_WATER_SEPARATOR_SAMPLE_CACHE_PROBE_COUNT <=
+	TERRAIN_WATER_SEPARATOR_SAMPLE_CACHE_CAPACITY,
+)
 TERRAIN_CAVE_NETWORK_CHUNK_QUERY_ENABLED :: #config(TERRAIN_CAVE_NETWORK_CHUNK_QUERY_ENABLED, true)
 TERRAIN_CAVE_NETWORK_CHUNK_QUERY_MARGIN_BLOCKS :: #config(
 	TERRAIN_CAVE_NETWORK_CHUNK_QUERY_MARGIN_BLOCKS,
@@ -492,6 +550,52 @@ TerrainGenerationProfile :: struct {
 	columns:                                     time.Duration,
 	column_cache:                                time.Duration,
 	base_fill:                                   time.Duration,
+	column_cache_lookup:                         time.Duration,
+	column_miss_profile_eval:                    time.Duration,
+	hydrology_surface_sample:                    time.Duration,
+	surface_feature_envelope:                    time.Duration,
+	water_separator:                             time.Duration,
+	water_separator_column_sample:               time.Duration,
+	water_separator_preflight:                   time.Duration,
+	water_separator_padding_sample:              time.Duration,
+	water_separator_seed_build:                  time.Duration,
+	water_separator_column_scan:                 time.Duration,
+	water_separator_column_apply:                time.Duration,
+	water_separator_padding_samples:             u64,
+	water_separator_seed_count:                  u64,
+	water_separator_columns_applied:             u64,
+	water_separator_sample_cache_hits:           u64,
+	water_separator_sample_cache_misses:         u64,
+	water_separator_sample_cache_stores:         u64,
+	water_separator_sample_cache_evictions:      u64,
+	structure_pad:                               time.Duration,
+	surface_feature_query:                       time.Duration,
+	feature_plan_build:                          time.Duration,
+	surface_shape_make:                          time.Duration,
+	surface_density_sample:                      time.Duration,
+	heightfield_span_write:                      time.Duration,
+	morphology_span_write:                       time.Duration,
+	block_material_write:                        time.Duration,
+	final_chunk_cache_hits:                      u64,
+	final_chunk_cache_misses:                    u64,
+	final_chunk_cache_stores:                    u64,
+	final_chunk_cache_evictions:                 u64,
+	final_chunk_cache_clears:                    u64,
+	column_cache_hits:                           u64,
+	column_cache_misses:                         u64,
+	column_cache_stores:                         u64,
+	column_cache_evictions:                      u64,
+	column_cache_clears:                         u64,
+	region_cache_hits:                           u64,
+	region_cache_misses:                         u64,
+	region_cache_stores:                         u64,
+	region_cache_evictions:                      u64,
+	region_cache_clears:                         u64,
+	cave_overlay_cache_hits:                     u64,
+	cave_overlay_cache_misses:                   u64,
+	cave_overlay_cache_stores:                   u64,
+	cave_overlay_cache_evictions:                u64,
+	cave_overlay_cache_clears:                   u64,
 	cave_field:                                  time.Duration,
 	cave_field_scan:                             time.Duration,
 	cave_field_network:                          time.Duration,
@@ -500,6 +604,20 @@ TerrainGenerationProfile :: struct {
 	cave_field_pocket_cluster:                   time.Duration,
 	cave_field_chamber:                          time.Duration,
 	cave_field_bridge:                           time.Duration,
+	cave_field_sample_points:                    u64,
+	cave_field_depth_rejects:                    u64,
+	cave_field_candidate_rejects:                u64,
+	cave_field_candidates:                       u64,
+	cave_field_network_rejects:                  u64,
+	cave_field_capacity_rejects:                 u64,
+	cave_field_path_candidates:                  u64,
+	cave_field_route_pocket_candidates:          u64,
+	cave_field_chamber_candidates:               u64,
+	cave_field_stamps:                           u64,
+	cave_field_path_stamps:                      u64,
+	cave_field_route_pocket_stamps:              u64,
+	cave_field_chamber_stamps:                   u64,
+	cave_field_bridge_stamps:                    u64,
 	route_pocket_cluster_rows_scanned:           u64,
 	route_pocket_cluster_rows_box:               u64,
 	route_pocket_cluster_voxel_candidates:       u64,
@@ -631,10 +749,36 @@ terrain_generation_profile_log :: proc(phase: string, profile: ^TerrainGeneratio
 		time.duration_milliseconds(stats.network_anchors),
 	)
 	log.infof(
-		"TERRAIN_GENERATION_PROFILE_SURFACE_FILL phase=%s column_cache_ms=%.3f base_fill_ms=%.3f morphology_chunks=%d heightfield_chunks=%d morphology_features=%d morphology_feature_columns=%d",
+		"TERRAIN_GENERATION_PROFILE_SURFACE_FILL phase=%s column_cache_ms=%.3f column_cache_lookup_ms=%.3f column_miss_profile_eval_ms=%.3f hydrology_surface_sample_ms=%.3f surface_feature_envelope_ms=%.3f water_separator_ms=%.3f water_separator_column_sample_ms=%.3f water_separator_preflight_ms=%.3f water_separator_padding_sample_ms=%.3f water_separator_seed_build_ms=%.3f water_separator_column_scan_ms=%.3f water_separator_column_apply_ms=%.3f water_separator_padding_samples=%d water_separator_seed_count=%d water_separator_columns_applied=%d water_separator_sample_cache_hits=%d water_separator_sample_cache_misses=%d water_separator_sample_cache_stores=%d water_separator_sample_cache_evictions=%d structure_pad_ms=%.3f surface_feature_query_ms=%.3f base_fill_ms=%.3f feature_plan_build_ms=%.3f surface_shape_make_ms=%.3f surface_density_sample_ms=%.3f heightfield_span_write_ms=%.3f morphology_span_write_ms=%.3f block_material_write_ms=%.3f morphology_chunks=%d heightfield_chunks=%d morphology_features=%d morphology_feature_columns=%d",
 		phase,
 		time.duration_milliseconds(stats.column_cache),
+		time.duration_milliseconds(stats.column_cache_lookup),
+		time.duration_milliseconds(stats.column_miss_profile_eval),
+		time.duration_milliseconds(stats.hydrology_surface_sample),
+		time.duration_milliseconds(stats.surface_feature_envelope),
+		time.duration_milliseconds(stats.water_separator),
+		time.duration_milliseconds(stats.water_separator_column_sample),
+		time.duration_milliseconds(stats.water_separator_preflight),
+		time.duration_milliseconds(stats.water_separator_padding_sample),
+		time.duration_milliseconds(stats.water_separator_seed_build),
+		time.duration_milliseconds(stats.water_separator_column_scan),
+		time.duration_milliseconds(stats.water_separator_column_apply),
+		stats.water_separator_padding_samples,
+		stats.water_separator_seed_count,
+		stats.water_separator_columns_applied,
+		stats.water_separator_sample_cache_hits,
+		stats.water_separator_sample_cache_misses,
+		stats.water_separator_sample_cache_stores,
+		stats.water_separator_sample_cache_evictions,
+		time.duration_milliseconds(stats.structure_pad),
+		time.duration_milliseconds(stats.surface_feature_query),
 		time.duration_milliseconds(stats.base_fill),
+		time.duration_milliseconds(stats.feature_plan_build),
+		time.duration_milliseconds(stats.surface_shape_make),
+		time.duration_milliseconds(stats.surface_density_sample),
+		time.duration_milliseconds(stats.heightfield_span_write),
+		time.duration_milliseconds(stats.morphology_span_write),
+		time.duration_milliseconds(stats.block_material_write),
 		stats.surface_morphology_chunks,
 		stats.surface_heightfield_chunks,
 		stats.surface_morphology_features,
@@ -852,6 +996,184 @@ streaming_missing_proxy_target_exists :: proc() -> bool {
 	return false
 }
 
+streaming_requestable_missing_target_exists :: proc() -> bool {
+	has_store_capacity := state.chunk_store.chunk_count < u32(len(state.chunk_store.chunks))
+	for i := u32(0); i < state.streaming_target_count; i += 1 {
+		coord := state.streaming_targets[i]
+		if streaming_prewarm_inflight_contains(coord) {
+			continue
+		}
+		chunk_index, ok := chunk_store_find_index_by_coord(coord).?
+		if !ok {
+			if has_store_capacity {
+				return true
+			}
+			continue
+		}
+		chunk := chunk_store_get_by_index(chunk_index)
+		if chunk.generation_state == .Missing {
+			return true
+		}
+	}
+	return false
+}
+
+streaming_requestable_missing_target :: proc(coord: world_async.ChunkCoord) -> bool {
+	if !streaming_coord_inside_window(state.streaming_center_coord, coord, 0) {
+		return false
+	}
+	if streaming_prewarm_inflight_contains(coord) {
+		return false
+	}
+	if chunk_index, ok := chunk_store_find_index_by_coord(coord).?; ok {
+		chunk := chunk_store_get_by_index(chunk_index)
+		return chunk.generation_state == .Missing
+	}
+	return state.chunk_store.chunk_count < u32(len(state.chunk_store.chunks))
+}
+
+streaming_missing_mesh_dependency_for_coord :: proc(
+	coord: world_async.ChunkCoord,
+) -> (
+	dependency: world_async.ChunkCoord,
+	ok: bool,
+) {
+	dependencies := [?]world_async.ChunkCoord {
+		{coord.x + 1, coord.y, coord.z},
+		{coord.x - 1, coord.y, coord.z},
+		{coord.x, coord.y, coord.z + 1},
+		{coord.x, coord.y, coord.z - 1},
+	}
+	for dependency_coord in dependencies {
+		if streaming_requestable_missing_target(dependency_coord) {
+			return dependency_coord, true
+		}
+	}
+
+	if coord.y < state.streaming_center_coord.y {
+		dependency_coord := world_async.ChunkCoord{coord.x, coord.y + 1, coord.z}
+		if streaming_requestable_missing_target(dependency_coord) {
+			return dependency_coord, true
+		}
+	}
+	if coord.y > state.streaming_center_coord.y {
+		dependency_coord := world_async.ChunkCoord{coord.x, coord.y - 1, coord.z}
+		if streaming_requestable_missing_target(dependency_coord) {
+			return dependency_coord, true
+		}
+	}
+	return {}, false
+}
+
+streaming_mesh_unblock_missing_target_find :: proc() -> (coord: world_async.ChunkCoord, ok: bool) {
+	for chunk in state.chunk_store.chunks[:state.chunk_store.chunk_count] {
+		if chunk.generation_state != .Generated || chunk.mesh_state != .Dirty {
+			continue
+		}
+		if state.streaming_target_count > 0 &&
+		   !streaming_coord_inside_window(state.streaming_center_coord, chunk.coord, 0) {
+			continue
+		}
+		if streaming_mesh_dependencies_ready(chunk.coord) {
+			continue
+		}
+		if dependency_coord, found := streaming_missing_mesh_dependency_for_coord(chunk.coord);
+		   found {
+			return dependency_coord, true
+		}
+	}
+	return {}, false
+}
+
+streaming_mesh_unblock_missing_target_find_by_target_order :: proc(
+) -> (
+	coord: world_async.ChunkCoord,
+	ok: bool,
+) {
+	for i := u32(0); i < state.streaming_target_count; i += 1 {
+		target_coord := state.streaming_targets[i]
+		chunk_index, chunk_found := chunk_store_find_index_by_coord(target_coord).?
+		if !chunk_found {
+			continue
+		}
+		chunk := chunk_store_get_by_index(chunk_index)
+		if chunk.generation_state != .Generated || chunk.mesh_state != .Dirty {
+			continue
+		}
+		if streaming_mesh_dependencies_ready(target_coord) {
+			continue
+		}
+		if dependency_coord, found := streaming_missing_mesh_dependency_for_coord(target_coord);
+		   found {
+			return dependency_coord, true
+		}
+	}
+	return {}, false
+}
+
+generation_request_missing_target :: proc(
+	coord: world_async.ChunkCoord,
+) -> (
+	requested, stop: bool,
+) {
+	chunk: ^Chunk
+	if chunk_index, ok := chunk_store_find_index_by_coord(coord).?; ok {
+		chunk = chunk_store_get_by_index(chunk_index)
+	} else {
+		if state.chunk_store.chunk_count >= u32(len(state.chunk_store.chunks)) {
+			return false, true
+		}
+		chunk_id := chunk_store_append_reserved(coord)
+		chunk = chunk_store_get_by_id(chunk_id)
+	}
+
+	if chunk.generation_state != .Missing {
+		return false, false
+	}
+	if streaming_prewarm_inflight_contains(coord) {
+		return false, false
+	}
+
+	quality := world_async.ChunkGenerationQuality.Full
+	if streaming_coord_should_generate_proxy(coord) {
+		quality = .Proxy
+	}
+
+	block_storage := chunk_block_storage_alloc_for_store()
+	if terrain_generation_chunk_cache_try_read(
+		&block_storage.voxel_view,
+		terrain_generation_key_make(0),
+		coord,
+	) {
+		if block_storage.binary_greedy_row_cache != nil {
+			terrain_binary_row_cache_fill(
+				block_storage.binary_greedy_row_cache,
+				block_storage.voxel_view,
+				0,
+			)
+		}
+		chunk_mark_generated(chunk, block_storage, .Full)
+		chunk_store_mark_generated_neighbors_boundary_dirty(coord)
+		return true, false
+	}
+
+	job := world_async.ChunkGenerationJob {
+		coord         = coord,
+		seed          = 0,
+		block_storage = block_storage,
+		quality       = quality,
+	}
+	if !state.generation_request(job) {
+		chunk_block_storage_release(&job.block_storage)
+		return false, true
+	}
+
+	chunk.block_storage = job.block_storage
+	chunk.generation_state = .Queued
+	chunk.generation_quality = quality
+	return true, false
+}
+
 generation_request_budgeted :: proc() -> u32 {
 	if state.streaming_target_count == 0 {
 		return 0
@@ -859,6 +1181,45 @@ generation_request_budgeted :: proc() -> u32 {
 
 	generation_request_count: u32
 	missing_proxy_target_exists := streaming_missing_proxy_target_exists()
+	defer_full_refinement := missing_proxy_target_exists
+	if state.generation_request_priority == .Missing_First ||
+	   state.generation_request_priority == .Mesh_Unblock_First ||
+	   state.generation_request_priority == .Mesh_Unblock_Target_Order_First {
+		defer_full_refinement = streaming_requestable_missing_target_exists()
+	}
+
+	if state.generation_request_priority == .Mesh_Unblock_First {
+		for generation_request_count < state.chunk_work_budget.generation_requests_per_frame {
+			coord, ok := streaming_mesh_unblock_missing_target_find()
+			if !ok {
+				break
+			}
+			requested, stop := generation_request_missing_target(coord)
+			if stop {
+				return generation_request_count
+			}
+			if !requested {
+				break
+			}
+			generation_request_count += 1
+		}
+	}
+	if state.generation_request_priority == .Mesh_Unblock_Target_Order_First {
+		for generation_request_count < state.chunk_work_budget.generation_requests_per_frame {
+			coord, ok := streaming_mesh_unblock_missing_target_find_by_target_order()
+			if !ok {
+				break
+			}
+			requested, stop := generation_request_missing_target(coord)
+			if stop {
+				return generation_request_count
+			}
+			if !requested {
+				break
+			}
+			generation_request_count += 1
+		}
+	}
 
 	scanned_count: u32
 	for generation_request_count < state.chunk_work_budget.generation_requests_per_frame &&
@@ -881,7 +1242,7 @@ generation_request_budgeted :: proc() -> u32 {
 		}
 
 		if chunk.generation_state == .Generated && chunk.generation_quality == .Proxy {
-			if missing_proxy_target_exists ||
+			if defer_full_refinement ||
 			   chunk.full_generation_queued ||
 			   chunk.mesh_state != .Ready ||
 			   chunk.mesh_snapshot_ref_count > 0 {
@@ -911,45 +1272,13 @@ generation_request_budgeted :: proc() -> u32 {
 			continue
 		}
 
-		quality := world_async.ChunkGenerationQuality.Full
-		if streaming_coord_should_generate_proxy(coord) {
-			quality = .Proxy
-		}
-
-		block_storage := chunk_block_storage_alloc_for_store()
-		if terrain_generation_chunk_cache_try_read(
-			&block_storage.voxel_view,
-			terrain_generation_key_make(0),
-			coord,
-		) {
-			if block_storage.binary_greedy_row_cache != nil {
-				terrain_binary_row_cache_fill(
-					block_storage.binary_greedy_row_cache,
-					block_storage.voxel_view,
-					0,
-				)
-			}
-			chunk_mark_generated(chunk, block_storage, .Full)
-			chunk_store_mark_generated_neighbors_boundary_dirty(coord)
-			generation_request_count += 1
-			continue
-		}
-
-		job := world_async.ChunkGenerationJob {
-			coord         = coord,
-			seed          = 0,
-			block_storage = block_storage,
-			quality       = quality,
-		}
-		if !state.generation_request(job) {
-			chunk_block_storage_release(&job.block_storage)
+		requested, stop := generation_request_missing_target(coord)
+		if stop {
 			break
 		}
-
-		chunk.block_storage = job.block_storage
-		chunk.generation_state = .Queued
-		chunk.generation_quality = quality
-		generation_request_count += 1
+		if requested {
+			generation_request_count += 1
+		}
 	}
 
 	return generation_request_count
@@ -1005,7 +1334,13 @@ generation_prewarm_request_budgeted :: proc() -> u32 {
 }
 
 generation_results_poll_budgeted :: proc() -> GenerationResultsPollStats {
-	result_count := state.generation_poll_results(state.generation_result_buffer)
+	generation_result_budget := state.chunk_work_budget.generation_results_per_frame
+	if generation_result_budget > u32(len(state.generation_result_buffer)) {
+		generation_result_budget = u32(len(state.generation_result_buffer))
+	}
+	result_count := state.generation_poll_results(
+		state.generation_result_buffer[:int(generation_result_budget)],
+	)
 	if result_count == 0 {
 		return {}
 	}
@@ -1195,7 +1530,11 @@ mesh_request_budgeted :: proc() -> u32 {
 }
 
 mesh_results_poll_budgeted :: proc() -> ChunkMeshBatchStats {
-	result_count := state.mesh_poll_results(state.mesh_result_buffer)
+	mesh_result_budget := state.chunk_work_budget.mesh_results_per_frame
+	if mesh_result_budget > u32(len(state.mesh_result_buffer)) {
+		mesh_result_budget = u32(len(state.mesh_result_buffer))
+	}
+	result_count := state.mesh_poll_results(state.mesh_result_buffer[:int(mesh_result_budget)])
 	if result_count == 0 {
 		return {}
 	}
@@ -1224,7 +1563,13 @@ streaming_update_budgeted :: proc(observer_world_position: Vec3) -> StreamingUpd
 	stats.chunk_mesh_jobs_submitted = mesh_request_budgeted()
 	stats.chunk_mesh_results_committed = mesh_stats.chunks_committed
 	stats.chunk_mesh_results_uploaded = mesh_stats.chunks_uploaded
-	stats.chunks_dirty_remaining = chunk_store_count_dirty_generated()
+	stats.chunk_mesh_results_empty = mesh_stats.chunks_empty
+	stats.mesh_worker_us = mesh_stats.mesh_duration_us
+	dirty_stats := streaming_dirty_generated_stats()
+	stats.chunks_dirty_remaining = dirty_stats.total
+	stats.chunks_dirty_meshable = dirty_stats.meshable
+	stats.chunks_dirty_dependency_blocked = dirty_stats.dependency_blocked
+	stats.chunks_dirty_outside_window = dirty_stats.outside_window
 	return stats
 }
 
@@ -1343,6 +1688,28 @@ streaming_mesh_dependencies_ready :: proc(coord: world_async.ChunkCoord) -> bool
 		return false
 	}
 	return true
+}
+
+streaming_dirty_generated_stats :: proc() -> StreamingDirtyGeneratedStats {
+	stats := StreamingDirtyGeneratedStats{}
+	for chunk in state.chunk_store.chunks[:state.chunk_store.chunk_count] {
+		if chunk.generation_state != .Generated || chunk.mesh_state != .Dirty {
+			continue
+		}
+
+		stats.total += 1
+		if state.streaming_target_count > 0 &&
+		   !streaming_coord_inside_window(state.streaming_center_coord, chunk.coord, 0) {
+			stats.outside_window += 1
+			continue
+		}
+		if streaming_mesh_dependencies_ready(chunk.coord) {
+			stats.meshable += 1
+		} else {
+			stats.dependency_blocked += 1
+		}
+	}
+	return stats
 }
 
 streaming_window_rebuild_targets :: proc(
@@ -2716,13 +3083,15 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 	seed: u32,
 	quality: world_async.ChunkGenerationQuality,
 ) {
+	profile := terrain_generation_profile_context.profile
+	profile_active := profile != nil
 	profile_total_start: time.Tick
 	profile_stage_start: time.Tick
-	if terrain_generation_profile_active() {
+	if profile_active {
 		profile_total_start = time.tick_now()
 		profile_stage_start = profile_total_start
 	}
-	if !terrain_generation_profile_active() {
+	if !profile_active {
 		_ = profile_total_start
 		_ = profile_stage_start
 	}
@@ -2735,18 +3104,16 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 	origin := chunk_origin_from_coord(chunk)
 	key := terrain_generation_key_make(seed)
 	if quality == .Full && terrain_generation_chunk_cache_try_read(view, key, chunk) {
-		if terrain_generation_profile_active() {
-			terrain_generation_profile_context.profile.total += time.tick_since(
-				profile_total_start,
-			)
-			terrain_generation_profile_context.profile.chunk_count += 1
+		if profile_active {
+			profile.total += time.tick_since(profile_total_start)
+			profile.chunk_count += 1
 		}
 		return
 	}
 
 	chunk_voxel_view_fill_empty(view)
-	if terrain_generation_profile_active() {
-		terrain_generation_profile_context.profile.clear += time.tick_since(profile_stage_start)
+	if profile_active {
+		profile.clear += time.tick_since(profile_stage_start)
 		profile_stage_start = time.tick_now()
 	}
 
@@ -2760,22 +3127,30 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 	if TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
 		terrain_cave_debug_column_mask_build(&cave_debug_columns, &generation_region, origin)
 	}
-	if terrain_generation_profile_active() {
-		terrain_generation_profile_context.profile.region += time.tick_since(profile_stage_start)
+	if profile_active {
+		profile.region += time.tick_since(profile_stage_start)
 		profile_stage_start = time.tick_now()
 	}
 	profile_column_cache_start: time.Tick
 	profile_base_fill_start: time.Tick
-	if terrain_generation_profile_active() {
+	if profile_active {
 		profile_column_cache_start = time.tick_now()
 	}
-	if !terrain_generation_profile_active() {
+	if !profile_active {
 		_ = profile_column_cache_start
 		_ = profile_base_fill_start
 	}
 
 	column_targets: [CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH]TerrainBiomeColumn
-	if !terrain_generation_column_cache_try_read(column_targets[:], key, chunk) {
+	column_cache_hit := false
+	if profile_active {
+		profile_lookup_start := time.tick_now()
+		column_cache_hit = terrain_generation_column_cache_try_read(column_targets[:], key, chunk)
+		profile.column_cache_lookup += time.tick_since(profile_lookup_start)
+	} else {
+		column_cache_hit = terrain_generation_column_cache_try_read(column_targets[:], key, chunk)
+	}
+	if !column_cache_hit {
 		water_separator_samples: [CHUNK_BLOCK_LENGTH *
 		CHUNK_BLOCK_LENGTH]TerrainWaterSeparatorSample
 		for z in 0 ..< CHUNK_BLOCK_LENGTH {
@@ -2783,16 +3158,31 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 			profile_row_cache := biomes.surface_biome_profile_row_cache_make(key, world_z)
 			for x in 0 ..< CHUNK_BLOCK_LENGTH {
 				world_x := origin.x + i32(x)
+				profile_eval_start: time.Tick
+				if profile_active {
+					profile_eval_start = time.tick_now()
+				}
 				surface_sample := biomes.surface_biome_field_sample_from_region(
 					&generation_region,
 					world_x,
 					world_z,
 				)
+				if profile_active {
+					profile.column_miss_profile_eval += time.tick_since(profile_eval_start)
+				}
+				profile_hydrology_start: time.Tick
+				if profile_active {
+					profile_hydrology_start = time.tick_now()
+				}
 				hydrology_sample := biomes.hydrology_layer_surface_sample_from_region(
 					&generation_region,
 					world_x,
 					world_z,
 				)
+				if profile_active {
+					profile.hydrology_surface_sample += time.tick_since(profile_hydrology_start)
+					profile_eval_start = time.tick_now()
+				}
 				evaluation := biomes.surface_biome_profile_evaluate_with_hydrology(
 					key,
 					surface_sample,
@@ -2801,6 +3191,13 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 					world_z,
 					&profile_row_cache,
 				)
+				if profile_active {
+					profile.column_miss_profile_eval += time.tick_since(profile_eval_start)
+				}
+				profile_envelope_start: time.Tick
+				if profile_active {
+					profile_envelope_start = time.tick_now()
+				}
 				evaluation = terrain_surface_morphology_apply_feature_envelopes(
 					evaluation,
 					generation_region.surface_morphology_features[:],
@@ -2808,6 +3205,10 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 					world_x,
 					world_z,
 				)
+				if profile_active {
+					profile.surface_feature_envelope += time.tick_since(profile_envelope_start)
+					profile_eval_start = time.tick_now()
+				}
 				column_index := x + z * CHUNK_BLOCK_LENGTH
 				column := terrain_biome_column_from_profile_evaluation(
 					key,
@@ -2815,24 +3216,64 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 					world_x,
 					world_z,
 				)
+				if profile_active {
+					profile.column_miss_profile_eval += time.tick_since(profile_eval_start)
+				}
 				column_targets[column_index] = column
+				profile_water_separator_start: time.Tick
+				if profile_active {
+					profile_water_separator_start = time.tick_now()
+				}
 				water_separator_samples[column_index] =
 					terrain_water_separator_sample_from_column_and_hydrology(
 						column,
 						evaluation.hydrology_sample,
 					)
+				if profile_active {
+					profile_water_separator_elapsed := time.tick_since(
+						profile_water_separator_start,
+					)
+					profile.water_separator += profile_water_separator_elapsed
+					profile.water_separator_column_sample += profile_water_separator_elapsed
+				}
 			}
 		}
-		terrain_surface_water_separators_apply(
-			key,
+		if profile_active {
+			profile_water_separator_start := time.tick_now()
+			terrain_surface_water_separators_apply(
+				key,
+				&generation_region,
+				origin,
+				column_targets[:],
+				water_separator_samples[:],
+			)
+			profile.water_separator += time.tick_since(profile_water_separator_start)
+		} else {
+			terrain_surface_water_separators_apply(
+				key,
+				&generation_region,
+				origin,
+				column_targets[:],
+				water_separator_samples[:],
+			)
+		}
+		terrain_generation_column_cache_store(column_targets[:], key, chunk)
+	}
+	if profile_active {
+		profile_structure_pad_start := time.tick_now()
+		terrain_decoration_surface_structure_pads_apply(
 			&generation_region,
 			origin,
 			column_targets[:],
-			water_separator_samples[:],
 		)
-		terrain_generation_column_cache_store(column_targets[:], key, chunk)
+		profile.structure_pad += time.tick_since(profile_structure_pad_start)
+	} else {
+		terrain_decoration_surface_structure_pads_apply(
+			&generation_region,
+			origin,
+			column_targets[:],
+		)
 	}
-	terrain_decoration_surface_structure_pads_apply(&generation_region, origin, column_targets[:])
 	block_fill_done := false
 	chunk_bottom_world_y := origin.y
 	chunk_top_world_y := origin.y + CHUNK_BLOCK_LENGTH - 1
@@ -2841,35 +3282,42 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 	surface_morphology_feature_count: u32
 	if surface_morphology_enabled {
 		chunk_bounds := biomes.BlockBounds3 {
-				min = {x = origin.x, y = origin.y, z = origin.z},
-				max = {
-					x = origin.x + CHUNK_BLOCK_LENGTH,
-					y = origin.y + CHUNK_BLOCK_LENGTH,
-					z = origin.z + CHUNK_BLOCK_LENGTH,
-				},
-			}
+			min = {x = origin.x, y = origin.y, z = origin.z},
+			max = {
+				x = origin.x + CHUNK_BLOCK_LENGTH,
+				y = origin.y + CHUNK_BLOCK_LENGTH,
+				z = origin.z + CHUNK_BLOCK_LENGTH,
+			},
+		}
 		query := biomes.generation_region_query_make_default(chunk_bounds)
-		surface_morphology_feature_count =
-			biomes.generation_region_surface_morphology_features_write(
-				&generation_region,
-				query,
-				surface_morphology_features[:],
-			)
-		if terrain_generation_profile_active() {
-			terrain_generation_profile_context.profile.surface_morphology_features += u64(
-				surface_morphology_feature_count,
-			)
+		if profile_active {
+			profile_surface_feature_query_start := time.tick_now()
+			surface_morphology_feature_count =
+				biomes.generation_region_surface_morphology_features_write(
+					&generation_region,
+					query,
+					surface_morphology_features[:],
+				)
+			profile.surface_feature_query += time.tick_since(profile_surface_feature_query_start)
+		} else {
+			surface_morphology_feature_count =
+				biomes.generation_region_surface_morphology_features_write(
+					&generation_region,
+					query,
+					surface_morphology_features[:],
+				)
+		}
+		if profile_active {
+			profile.surface_morphology_features += u64(surface_morphology_feature_count)
 		}
 	}
-	if terrain_generation_profile_active() {
-		terrain_generation_profile_context.profile.column_cache += time.tick_since(
-			profile_column_cache_start,
-		)
+	if profile_active {
+		profile.column_cache += time.tick_since(profile_column_cache_start)
 		profile_base_fill_start = time.tick_now()
 		if surface_morphology_enabled {
-			terrain_generation_profile_context.profile.surface_morphology_chunks += 1
+			profile.surface_morphology_chunks += 1
 		} else {
-			terrain_generation_profile_context.profile.surface_heightfield_chunks += 1
+			profile.surface_heightfield_chunks += 1
 		}
 	}
 	if !TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
@@ -2891,6 +3339,10 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 			}
 		}
 		if all_deep_stone {
+			profile_heightfield_span_start: time.Tick
+			if profile_active {
+				profile_heightfield_span_start = time.tick_now()
+			}
 			mem.set(
 				rawptr(view.blocks.occupancy),
 				u8(world_async.BlockOccupancy.Solid),
@@ -2901,6 +3353,9 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 				u8(world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)),
 				CHUNK_BLOCK_COUNT,
 			)
+			if profile_active {
+				profile.heightfield_span_write += time.tick_since(profile_heightfield_span_start)
+			}
 			block_fill_done = true
 		}
 	}
@@ -2925,6 +3380,10 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 							column.surface_layer_depth + TERRAIN_DIRT_LAYER_BLOCK_DEPTH
 				}
 				if deep_stone_column {
+					profile_material_start: time.Tick
+					if profile_active {
+						profile_material_start = time.tick_now()
+					}
 					material_id := world_async.BlockMaterialID(TERRAIN_STONE_MAT_ID)
 					if TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
 						if column.hydrology_debug_material_active {
@@ -2934,10 +3393,22 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 							material_id = terrain_cave_anchor_debug_material_id(material_id)
 						}
 					}
+					if profile_active {
+						profile.block_material_write += time.tick_since(profile_material_start)
+					}
+					profile_heightfield_span_start: time.Tick
+					if profile_active {
+						profile_heightfield_span_start = time.tick_now()
+					}
 					for y in 0 ..< CHUNK_BLOCK_LENGTH {
 						index := chunk_block_index(u32(x), u32(y), u32(z))
 						view.blocks.occupancy[index] = .Solid
 						view.blocks.material_id[index] = material_id
+					}
+					if profile_active {
+						profile.heightfield_span_write += time.tick_since(
+							profile_heightfield_span_start,
+						)
 					}
 					continue
 				}
@@ -2946,6 +3417,10 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 				if surface_morphology_enabled {
 					world_x := origin.x + i32(x)
 					world_z := origin.z + i32(z)
+					profile_feature_plan_start: time.Tick
+					if profile_active {
+						profile_feature_plan_start = time.tick_now()
+					}
 					terrain_surface_morphology_column_feature_plan_write(
 						surface_morphology_features[:],
 						surface_morphology_feature_count,
@@ -2953,9 +3428,10 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 						world_z,
 						&feature_plan,
 					)
-					if terrain_generation_profile_active() {
+					if profile_active {
+						profile.feature_plan_build += time.tick_since(profile_feature_plan_start)
 						if feature_plan.active {
-							terrain_generation_profile_context.profile.surface_morphology_feature_columns += 1
+							profile.surface_morphology_feature_columns += 1
 						}
 					}
 					column_may_intersect := terrain_surface_density_column_may_intersect_chunk(
@@ -2984,21 +3460,36 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 				if surface_morphology_enabled {
 					world_x := origin.x + i32(x)
 					world_z := origin.z + i32(z)
+					profile_surface_shape_start: time.Tick
+					if profile_active {
+						profile_surface_shape_start = time.tick_now()
+					}
 					surface_shape := terrain_surface_morphology_column_shape_make(
 						key,
 						column,
 						world_x,
 						world_z,
 					)
+					if profile_active {
+						profile.surface_shape_make += time.tick_since(profile_surface_shape_start)
+					}
 					if surface_shape.strength <= 0.001 && !feature_plan.active {
 						heightfield_top_y := math.min(
 							CHUNK_BLOCK_LENGTH - 1,
 							column.surface_height - origin.y,
 						)
 						if heightfield_top_y >= 0 {
+							profile_heightfield_span_start: time.Tick
+							if profile_active {
+								profile_heightfield_span_start = time.tick_now()
+							}
 							for y in 0 ..= heightfield_top_y {
 								world_y := origin.y + i32(y)
 								blocks_below_surface := column.surface_height - world_y
+								profile_material_start: time.Tick
+								if profile_active {
+									profile_material_start = time.tick_now()
+								}
 								material_id := terrain_biome_block_material_id(
 									column,
 									blocks_below_surface,
@@ -3016,10 +3507,20 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 										)
 									}
 								}
+								if profile_active {
+									profile.block_material_write += time.tick_since(
+										profile_material_start,
+									)
+								}
 
 								index := chunk_block_index(u32(x), u32(y), u32(z))
 								view.blocks.occupancy[index] = .Solid
 								view.blocks.material_id[index] = material_id
+							}
+							if profile_active {
+								profile.heightfield_span_write += time.tick_since(
+									profile_heightfield_span_start,
+								)
 							}
 						}
 						continue
@@ -3051,9 +3552,17 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 						prefill_top_y = heightfield_top_y
 					}
 					if prefill_top_y >= 0 {
+						profile_heightfield_span_start: time.Tick
+						if profile_active {
+							profile_heightfield_span_start = time.tick_now()
+						}
 						for y in 0 ..= prefill_top_y {
 							world_y := origin.y + i32(y)
 							blocks_below_surface := column.surface_height - world_y
+							profile_material_start: time.Tick
+							if profile_active {
+								profile_material_start = time.tick_now()
+							}
 							material_id := terrain_biome_block_material_id(
 								column,
 								blocks_below_surface,
@@ -3069,10 +3578,20 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 									)
 								}
 							}
+							if profile_active {
+								profile.block_material_write += time.tick_since(
+									profile_material_start,
+								)
+							}
 
 							index := chunk_block_index(u32(x), u32(y), u32(z))
 							view.blocks.occupancy[index] = .Solid
 							view.blocks.material_id[index] = material_id
+						}
+						if profile_active {
+							profile.heightfield_span_write += time.tick_since(
+								profile_heightfield_span_start,
+							)
 						}
 					}
 
@@ -3083,8 +3602,16 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 						CHUNK_BLOCK_LENGTH - 1,
 					)
 					if sample_min_y <= sample_max_y {
+						profile_morphology_span_start: time.Tick
+						if profile_active {
+							profile_morphology_span_start = time.tick_now()
+						}
 						for y := sample_min_y; y <= sample_max_y; y += 1 {
 							world_y := origin.y + i32(y)
+							profile_density_start: time.Tick
+							if profile_active {
+								profile_density_start = time.tick_now()
+							}
 							density := terrain_surface_density_sample_with_feature_plan(
 								column,
 								surface_shape,
@@ -3093,11 +3620,20 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 								world_y,
 								world_z,
 							)
+							if profile_active {
+								profile.surface_density_sample += time.tick_since(
+									profile_density_start,
+								)
+							}
 							if density < 0 {
 								continue
 							}
 
 							blocks_below_surface := column.surface_height - world_y
+							profile_material_start: time.Tick
+							if profile_active {
+								profile_material_start = time.tick_now()
+							}
 							material_id := terrain_biome_block_material_id(
 								column,
 								blocks_below_surface,
@@ -3113,13 +3649,27 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 									)
 								}
 							}
+							if profile_active {
+								profile.block_material_write += time.tick_since(
+									profile_material_start,
+								)
+							}
 
 							index := chunk_block_index(u32(x), u32(y), u32(z))
 							view.blocks.occupancy[index] = .Solid
 							view.blocks.material_id[index] = material_id
 						}
+						if profile_active {
+							profile.morphology_span_write += time.tick_since(
+								profile_morphology_span_start,
+							)
+						}
 					}
 					continue
+				}
+				profile_heightfield_span_start: time.Tick
+				if profile_active {
+					profile_heightfield_span_start = time.tick_now()
 				}
 				for y in 0 ..< CHUNK_BLOCK_LENGTH {
 					world_y := origin.y + i32(y)
@@ -3129,6 +3679,10 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 					}
 
 					blocks_below_surface := column.surface_height - world_y
+					profile_material_start: time.Tick
+					if profile_active {
+						profile_material_start = time.tick_now()
+					}
 					material_id := terrain_biome_block_material_id(column, blocks_below_surface)
 					if TERRAIN_BAKE_DEBUG_MATERIAL_FLAGS {
 						if column.hydrology_debug_material_active {
@@ -3138,19 +3692,25 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 							material_id = terrain_cave_anchor_debug_material_id(material_id)
 						}
 					}
+					if profile_active {
+						profile.block_material_write += time.tick_since(profile_material_start)
+					}
 
 					index := chunk_block_index(u32(x), u32(y), u32(z))
 					view.blocks.occupancy[index] = .Solid
 					view.blocks.material_id[index] = material_id
 				}
+				if profile_active {
+					profile.heightfield_span_write += time.tick_since(
+						profile_heightfield_span_start,
+					)
+				}
 			}
 		}
 	}
-	if terrain_generation_profile_active() {
-		terrain_generation_profile_context.profile.base_fill += time.tick_since(
-			profile_base_fill_start,
-		)
-		terrain_generation_profile_context.profile.columns += time.tick_since(profile_stage_start)
+	if profile_active {
+		profile.base_fill += time.tick_since(profile_base_fill_start)
+		profile.columns += time.tick_since(profile_stage_start)
 		profile_stage_start = time.tick_now()
 	}
 	if quality == .Proxy {
@@ -3160,30 +3720,22 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 			origin,
 			column_targets[:],
 		)
-		if terrain_generation_profile_active() {
-			terrain_generation_profile_context.profile.cave_network += time.tick_since(
-				profile_stage_start,
-			)
+		if profile_active {
+			profile.cave_network += time.tick_since(profile_stage_start)
 			profile_stage_start = time.tick_now()
 		}
 		terrain_water_volume_fill(view, origin, column_targets[:])
-		if terrain_generation_profile_active() {
-			terrain_generation_profile_context.profile.water += time.tick_since(
-				profile_stage_start,
-			)
-			terrain_generation_profile_context.profile.total += time.tick_since(
-				profile_total_start,
-			)
-			terrain_generation_profile_context.profile.chunk_count += 1
+		if profile_active {
+			profile.water += time.tick_since(profile_stage_start)
+			profile.total += time.tick_since(profile_total_start)
+			profile.chunk_count += 1
 		}
 		return
 	}
 
 	if terrain_generation_cave_overlay_cache_try_apply(view, key, chunk) {
-		if terrain_generation_profile_active() {
-			terrain_generation_profile_context.profile.cave_network += time.tick_since(
-				profile_stage_start,
-			)
+		if profile_active {
+			profile.cave_network += time.tick_since(profile_stage_start)
 			profile_stage_start = time.tick_now()
 		}
 	} else {
@@ -3201,10 +3753,8 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 			origin,
 			column_targets[:],
 		)
-		if terrain_generation_profile_active() {
-			terrain_generation_profile_context.profile.cave_field += time.tick_since(
-				profile_stage_start,
-			)
+		if profile_active {
+			profile.cave_field += time.tick_since(profile_stage_start)
 			profile_stage_start = time.tick_now()
 		}
 		terrain_density_cave_network_apply(view, &generation_region, origin, column_targets[:])
@@ -3213,16 +3763,14 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 			_ = mem.free(rawptr(overlay_base), overlay_scratch_allocator)
 			overlay_base = nil
 		}
-		if terrain_generation_profile_active() {
-			terrain_generation_profile_context.profile.cave_network += time.tick_since(
-				profile_stage_start,
-			)
+		if profile_active {
+			profile.cave_network += time.tick_since(profile_stage_start)
 			profile_stage_start = time.tick_now()
 		}
 	}
 	terrain_water_volume_fill(view, origin, column_targets[:])
-	if terrain_generation_profile_active() {
-		terrain_generation_profile_context.profile.water += time.tick_since(profile_stage_start)
+	if profile_active {
+		profile.water += time.tick_since(profile_stage_start)
 		profile_stage_start = time.tick_now()
 	}
 	decoration_stats := terrain_decoration_pass_apply(
@@ -3231,51 +3779,44 @@ terrain_heightfield_voxel_view_fill_quality :: proc(
 		origin,
 		column_targets[:],
 	)
-	if terrain_generation_profile_active() {
-		terrain_generation_profile_context.profile.decoration += time.tick_since(
-			profile_stage_start,
+	if profile_active {
+		profile.decoration += time.tick_since(profile_stage_start)
+		profile.decoration_surface_candidates += u64(decoration_stats.surface_candidates)
+		profile.decoration_surface_accepted += u64(decoration_stats.surface_accepted)
+		profile.decoration_surface_tree_instances_attempted += u64(
+			decoration_stats.surface_tree_instances_attempted,
 		)
-		terrain_generation_profile_context.profile.decoration_surface_candidates += u64(
-			decoration_stats.surface_candidates,
+		profile.decoration_surface_tree_instances_accepted += u64(
+			decoration_stats.surface_tree_instances_accepted,
 		)
-		terrain_generation_profile_context.profile.decoration_surface_accepted += u64(
-			decoration_stats.surface_accepted,
-		)
-		terrain_generation_profile_context.profile.decoration_surface_tree_instances_attempted +=
-			u64(decoration_stats.surface_tree_instances_attempted)
-		terrain_generation_profile_context.profile.decoration_surface_tree_instances_accepted +=
-			u64(decoration_stats.surface_tree_instances_accepted)
-		terrain_generation_profile_context.profile.decoration_surface_tree_root_rejected += u64(
+		profile.decoration_surface_tree_root_rejected += u64(
 			decoration_stats.surface_tree_root_rejected,
 		)
-		terrain_generation_profile_context.profile.decoration_surface_tree_shape_rejected += u64(
+		profile.decoration_surface_tree_shape_rejected += u64(
 			decoration_stats.surface_tree_shape_rejected,
 		)
-		terrain_generation_profile_context.profile.decoration_cave_candidates += u64(
-			decoration_stats.cave_candidates,
-		)
-		terrain_generation_profile_context.profile.decoration_cave_accepted += u64(
-			decoration_stats.cave_accepted,
-		)
-		terrain_generation_profile_context.profile.decoration_blocks_written += u64(
-			decoration_stats.blocks_written,
-		)
+		profile.decoration_cave_candidates += u64(decoration_stats.cave_candidates)
+		profile.decoration_cave_accepted += u64(decoration_stats.cave_accepted)
+		profile.decoration_blocks_written += u64(decoration_stats.blocks_written)
 		for family_index := 0; family_index < biomes.DECORATION_FAMILY_COUNT; family_index += 1 {
-			terrain_generation_profile_context.profile.decoration_family_candidates[family_index] +=
-				u64(decoration_stats.family_candidates[family_index])
-			terrain_generation_profile_context.profile.decoration_family_accepted[family_index] +=
-				u64(decoration_stats.family_accepted[family_index])
-			terrain_generation_profile_context.profile.decoration_family_blocks[family_index] +=
-				u64(decoration_stats.family_blocks[family_index])
+			profile.decoration_family_candidates[family_index] += u64(
+				decoration_stats.family_candidates[family_index],
+			)
+			profile.decoration_family_accepted[family_index] += u64(
+				decoration_stats.family_accepted[family_index],
+			)
+			profile.decoration_family_blocks[family_index] += u64(
+				decoration_stats.family_blocks[family_index],
+			)
 		}
 	}
-	if !terrain_generation_profile_active() {
+	if !profile_active {
 		_ = decoration_stats
 	}
 	terrain_generation_chunk_cache_store(view, key, chunk)
-	if terrain_generation_profile_active() {
-		terrain_generation_profile_context.profile.total += time.tick_since(profile_total_start)
-		terrain_generation_profile_context.profile.chunk_count += 1
+	if profile_active {
+		profile.total += time.tick_since(profile_total_start)
+		profile.chunk_count += 1
 	}
 }
 
@@ -3417,6 +3958,54 @@ terrain_water_separator_sample_from_column_and_hydrology :: proc(
 	return sample
 }
 
+terrain_water_separator_sample_region_for_block :: proc(
+	key: biomes.FeatureGridKey,
+	region: ^biomes.GenerationRegion,
+	world_x, world_z: i32,
+	cached_region: ^biomes.GenerationRegion,
+	cached_coord: ^biomes.GenerationRegionCoord,
+	cached_valid: ^bool,
+) -> ^biomes.GenerationRegion {
+	if terrain_generation_region_contains_block_xz(region, world_x, world_z) {
+		return region
+	}
+	coord := biomes.generation_region_coord_from_block(world_x, region.bounds.min.y, world_z)
+	if coord == region.coord {
+		return region
+	}
+	if !cached_valid^ || cached_coord^ != coord {
+		cached_region^ = terrain_generation_region_for_fill(key, coord)
+		cached_coord^ = coord
+		cached_valid^ = true
+	}
+	return cached_region
+}
+
+terrain_water_separator_sample_query_cached :: proc(
+	key: biomes.FeatureGridKey,
+	region: ^biomes.GenerationRegion,
+	world_x, world_z: i32,
+	row_cache: ^biomes.SurfaceBiomeProfileRowCache = nil,
+) -> (
+	sample: TerrainWaterSeparatorSample,
+	cache_hit: bool,
+) {
+	if terrain_water_separator_sample_cache_try_read(&sample, key, world_x, world_z) {
+		return sample, true
+	}
+
+	column, hydrology_sample := terrain_water_separator_column_sample(
+		key,
+		region,
+		world_x,
+		world_z,
+		row_cache,
+	)
+	sample = terrain_water_separator_sample_from_column_and_hydrology(column, hydrology_sample)
+	terrain_water_separator_sample_cache_store(key, world_x, world_z, sample)
+	return sample, false
+}
+
 terrain_water_separator_samples_conflict :: proc(a, b: TerrainWaterSeparatorSample) -> bool {
 	return a.flooded && b.flooded && a.water_material_id != b.water_material_id
 }
@@ -3517,93 +4106,6 @@ terrain_water_separator_region_materials_uniform :: proc(
 	return true
 }
 
-terrain_water_separator_samples_need_apply :: proc(
-	key: biomes.FeatureGridKey,
-	region: ^biomes.GenerationRegion,
-	chunk_origin: world_async.BlockCoord,
-	samples: []TerrainWaterSeparatorSample,
-	radius, pad, grid_length: i32,
-) -> bool {
-	water_material_id: world_async.BlockMaterialID
-	water_material_found := false
-	for sample in samples {
-		if sample.conflict_active {
-			return true
-		}
-		if !sample.flooded {
-			continue
-		}
-		if !water_material_found {
-			water_material_id = sample.water_material_id
-			water_material_found = true
-			continue
-		}
-		if sample.water_material_id != water_material_id {
-			return true
-		}
-	}
-
-	if !water_material_found {
-		return false
-	}
-
-	padding_needs := terrain_water_separator_padding_needs_from_samples(samples, radius)
-	if !terrain_water_separator_padding_needs_any(padding_needs) {
-		return false
-	}
-	if terrain_water_separator_region_materials_uniform(
-		region,
-		chunk_origin,
-		pad,
-		water_material_id,
-	) {
-		return false
-	}
-
-	for pz := i32(0); pz < grid_length; pz += 1 {
-		world_z := chunk_origin.z + pz - pad
-		profile_row_cache := biomes.surface_biome_profile_row_cache_make(key, world_z)
-		for px := i32(0); px < grid_length; px += 1 {
-			local_x := px - pad
-			local_z := pz - pad
-			if local_x >= 0 &&
-			   local_z >= 0 &&
-			   local_x < CHUNK_BLOCK_LENGTH &&
-			   local_z < CHUNK_BLOCK_LENGTH {
-				continue
-			}
-			padding_needed :=
-				(local_x < 0 && padding_needs.left) ||
-				(local_x >= CHUNK_BLOCK_LENGTH && padding_needs.right) ||
-				(local_z < 0 && padding_needs.top) ||
-				(local_z >= CHUNK_BLOCK_LENGTH && padding_needs.bottom)
-			if !padding_needed {
-				continue
-			}
-			world_x := chunk_origin.x + px - pad
-			column, hydrology_sample := terrain_water_separator_column_sample(
-				key,
-				region,
-				world_x,
-				world_z,
-				&profile_row_cache,
-			)
-			sample := terrain_water_separator_sample_from_column_and_hydrology(
-				column,
-				hydrology_sample,
-			)
-			if sample.conflict_active {
-				return true
-			}
-			if sample.flooded && sample.water_material_id != water_material_id {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
 terrain_water_separator_padding_needs_from_samples :: proc(
 	samples: []TerrainWaterSeparatorSample,
 	radius: i32,
@@ -3635,6 +4137,35 @@ terrain_water_separator_padding_needs_from_samples :: proc(
 		}
 	}
 	return needs
+}
+
+terrain_water_separator_edge_samples_cache_store :: proc(
+	key: biomes.FeatureGridKey,
+	chunk_origin: world_async.BlockCoord,
+	samples: []TerrainWaterSeparatorSample,
+	pad: i32,
+) {
+	log.assertf(
+		len(samples) == CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH,
+		"terrain water separator edge sample count mismatch: %d",
+		len(samples),
+	)
+	for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
+		for x := i32(0); x < CHUNK_BLOCK_LENGTH; x += 1 {
+			if x >= pad &&
+			   z >= pad &&
+			   x < CHUNK_BLOCK_LENGTH - pad &&
+			   z < CHUNK_BLOCK_LENGTH - pad {
+				continue
+			}
+			terrain_water_separator_sample_cache_store(
+				key,
+				chunk_origin.x + x,
+				chunk_origin.z + z,
+				samples[x + z * CHUNK_BLOCK_LENGTH],
+			)
+		}
+	}
 }
 
 terrain_water_separator_noise_01 :: proc(
@@ -3693,21 +4224,70 @@ terrain_surface_water_separators_apply :: proc(
 	pad := i32(TERRAIN_WATER_SEPARATOR_PADDING_BLOCKS)
 	radius := i32(TERRAIN_WATER_SEPARATOR_RADIUS_BLOCKS)
 	grid_length := i32(TERRAIN_WATER_SEPARATOR_GRID_LENGTH)
-	if !terrain_water_separator_samples_need_apply(
-		key,
-		region,
-		chunk_origin,
-		column_samples,
-		radius,
-		pad,
-		grid_length,
-	) {
+	profile := terrain_generation_profile_context.profile
+	profile_active := profile != nil
+	profile_preflight_start: time.Tick
+	if profile_active {
+		profile_preflight_start = time.tick_now()
+	}
+
+	water_material_id: world_async.BlockMaterialID
+	water_material_found := false
+	needs_apply := false
+	for sample in column_samples {
+		if sample.conflict_active {
+			needs_apply = true
+		}
+		if !sample.flooded {
+			continue
+		}
+		if !water_material_found {
+			water_material_id = sample.water_material_id
+			water_material_found = true
+			continue
+		}
+		if sample.water_material_id != water_material_id {
+			needs_apply = true
+		}
+	}
+	if !water_material_found && !needs_apply {
+		if profile_active {
+			profile.water_separator_preflight += time.tick_since(profile_preflight_start)
+		}
 		return
 	}
 
 	padding_needs := terrain_water_separator_padding_needs_from_samples(column_samples, radius)
+	if !terrain_water_separator_padding_needs_any(padding_needs) {
+		if profile_active {
+			profile.water_separator_preflight += time.tick_since(profile_preflight_start)
+		}
+		return
+	}
+	if !needs_apply &&
+	   terrain_water_separator_region_materials_uniform(
+		   region,
+		   chunk_origin,
+		   pad,
+		   water_material_id,
+	   ) {
+		if profile_active {
+			profile.water_separator_preflight += time.tick_since(profile_preflight_start)
+		}
+		return
+	}
+	if profile_active {
+		profile.water_separator_preflight += time.tick_since(profile_preflight_start)
+	}
+	terrain_water_separator_edge_samples_cache_store(key, chunk_origin, column_samples, pad)
+
 	padded_samples: [TERRAIN_WATER_SEPARATOR_GRID_COUNT]TerrainWaterSeparatorSample
 	seeds: [TERRAIN_WATER_SEPARATOR_GRID_COUNT]TerrainWaterSeparatorSeed
+	seed_indices: [TERRAIN_WATER_SEPARATOR_GRID_COUNT]i32
+	seed_count := i32(0)
+	external_region: biomes.GenerationRegion
+	external_region_coord: biomes.GenerationRegionCoord
+	external_region_valid := false
 
 	for pz := i32(0); pz < grid_length; pz += 1 {
 		world_z := chunk_origin.z + pz - pad
@@ -3731,28 +4311,63 @@ terrain_surface_water_separators_apply :: proc(
 				if !padding_needed {
 					continue
 				}
-				column, hydrology_sample := terrain_water_separator_column_sample(
+				profile_padding_sample_start: time.Tick
+				if profile_active {
+					profile_padding_sample_start = time.tick_now()
+				}
+				sample_region := terrain_water_separator_sample_region_for_block(
 					key,
 					region,
 					world_x,
 					world_z,
+					&external_region,
+					&external_region_coord,
+					&external_region_valid,
+				)
+				sample, cache_hit := terrain_water_separator_sample_query_cached(
+					key,
+					sample_region,
+					world_x,
+					world_z,
 					&profile_row_cache,
 				)
-				padded_samples[grid_index] =
-					terrain_water_separator_sample_from_column_and_hydrology(
-						column,
-						hydrology_sample,
-					)
+				padded_samples[grid_index] = sample
+				if profile_active {
+					profile_padding_sample_elapsed := time.tick_since(profile_padding_sample_start)
+					profile.water_separator_padding_sample += profile_padding_sample_elapsed
+					if !cache_hit {
+						profile.water_separator_column_sample += profile_padding_sample_elapsed
+						profile.water_separator_padding_samples += 1
+					}
+				}
+				padded_sample := padded_samples[grid_index]
+				if padded_sample.conflict_active ||
+				   (water_material_found &&
+						   padded_sample.flooded &&
+						   padded_sample.water_material_id != water_material_id) {
+					needs_apply = true
+				}
 			}
 		}
 	}
+	if !needs_apply {
+		return
+	}
 
+	profile_seed_build_start: time.Tick
+	if profile_active {
+		profile_seed_build_start = time.tick_now()
+	}
 	for pz := i32(1); pz < grid_length - 1; pz += 1 {
 		for px := i32(1); px < grid_length - 1; px += 1 {
 			grid_index := px + pz * grid_length
 			sample := padded_samples[grid_index]
 			if sample.conflict_active {
 				seed := &seeds[grid_index]
+				if !seed.active {
+					seed_indices[seed_count] = grid_index
+					seed_count += 1
+				}
 				seed.active = true
 				seed.water_level_blocks = math.max(
 					seed.water_level_blocks,
@@ -3772,6 +4387,10 @@ terrain_surface_water_separators_apply :: proc(
 					continue
 				}
 				seed := &seeds[grid_index]
+				if !seed.active {
+					seed_indices[seed_count] = grid_index
+					seed_count += 1
+				}
 				seed.active = true
 				seed.water_level_blocks = math.max(
 					seed.water_level_blocks,
@@ -3779,6 +4398,13 @@ terrain_surface_water_separators_apply :: proc(
 				)
 			}
 		}
+	}
+	if profile_active {
+		profile.water_separator_seed_build += time.tick_since(profile_seed_build_start)
+		profile.water_separator_seed_count += u64(seed_count)
+	}
+	if seed_count == 0 {
+		return
 	}
 
 	for z := i32(0); z < CHUNK_BLOCK_LENGTH; z += 1 {
@@ -3793,37 +4419,49 @@ terrain_surface_water_separators_apply :: proc(
 			separator_water_level := f32(0)
 			found_separator := false
 
-			for dz := -radius; dz <= radius; dz += 1 {
-				for dx := -radius; dx <= radius; dx += 1 {
-					distance_sq := dx * dx + dz * dz
-					if distance_sq > radius * radius {
-						continue
-					}
-					seed_index := center_px + dx + (center_pz + dz) * grid_length
-					seed := seeds[seed_index]
-					if !seed.active {
-						continue
-					}
-					distance := math.sqrt_f32(f32(distance_sq))
-					if distance < nearest_distance {
-						nearest_distance = distance
-					}
-					separator_water_level = math.max(
-						separator_water_level,
-						seed.water_level_blocks,
-					)
-					found_separator = true
+			profile_column_scan_start: time.Tick
+			if profile_active {
+				profile_column_scan_start = time.tick_now()
+			}
+			for seed_cursor := i32(0); seed_cursor < seed_count; seed_cursor += 1 {
+				seed_index := seed_indices[seed_cursor]
+				seed_px := seed_index % grid_length
+				seed_pz := seed_index / grid_length
+				dx := seed_px - center_px
+				dz := seed_pz - center_pz
+				distance_sq := dx * dx + dz * dz
+				if distance_sq > radius * radius {
+					continue
 				}
+				seed := seeds[seed_index]
+				distance := math.sqrt_f32(f32(distance_sq))
+				if distance < nearest_distance {
+					nearest_distance = distance
+				}
+				separator_water_level = math.max(separator_water_level, seed.water_level_blocks)
+				found_separator = true
+			}
+			if profile_active {
+				profile.water_separator_column_scan += time.tick_since(profile_column_scan_start)
 			}
 
 			if !found_separator {
 				continue
+			}
+			profile_column_apply_start: time.Tick
+			if profile_active {
+				profile_column_apply_start = time.tick_now()
 			}
 			separator_eligible :=
 				terrain_water_column_is_flooded(column^) ||
 				column_samples[column_index].conflict_active ||
 				column.surface_height_blocks < separator_water_level
 			if !separator_eligible {
+				if profile_active {
+					profile.water_separator_column_apply += time.tick_since(
+						profile_column_apply_start,
+					)
+				}
 				continue
 			}
 
@@ -3836,11 +4474,21 @@ terrain_surface_water_separators_apply :: proc(
 			)
 			effective_radius := f32(radius - 2) + width_noise * 2.0
 			if nearest_distance > effective_radius {
+				if profile_active {
+					profile.water_separator_column_apply += time.tick_since(
+						profile_column_apply_start,
+					)
+				}
 				continue
 			}
 			edge_start := math.max(f32(1), effective_radius - 3.0)
 			strength := f32(1.0) - math.smoothstep(edge_start, effective_radius, nearest_distance)
 			if strength <= 0 {
+				if profile_active {
+					profile.water_separator_column_apply += time.tick_since(
+						profile_column_apply_start,
+					)
+				}
 				continue
 			}
 
@@ -3870,6 +4518,10 @@ terrain_surface_water_separators_apply :: proc(
 				column.hydrology_debug_material_active = false
 			}
 			terrain_water_separator_column_materials_apply(key, column, world_x, world_z)
+			if profile_active {
+				profile.water_separator_columns_applied += 1
+				profile.water_separator_column_apply += time.tick_since(profile_column_apply_start)
+			}
 		}
 	}
 }

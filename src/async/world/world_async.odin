@@ -133,10 +133,11 @@ ChunkMeshJob :: struct {
 }
 
 ChunkMeshJobResult :: struct {
-	coord:          ChunkCoord,
-	block_version:  u32,
-	scope_kind:     ChunkMeshScopeKind,
-	subchunk_index: u32,
-	worker_index:   u32,
-	output:         ChunkMeshOutput,
+	coord:            ChunkCoord,
+	block_version:    u32,
+	scope_kind:       ChunkMeshScopeKind,
+	subchunk_index:   u32,
+	worker_index:     u32,
+	mesh_duration_us: u64,
+	output:           ChunkMeshOutput,
 }

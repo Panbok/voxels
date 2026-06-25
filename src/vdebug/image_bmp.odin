@@ -117,7 +117,7 @@ bmp_write_u32_le :: proc(bytes: []byte, offset: int, value: u32) {
 }
 
 bmp_write_i32_le :: proc(bytes: []byte, offset: int, value: i32) {
-	bmp_write_u32_le(bytes, offset, transmute(u32)value)
+	bmp_write_u32_le(bytes, offset, u32(value))
 }
 
 bmp_read_u16_le :: proc(bytes: []byte, offset: int) -> u16 {
@@ -134,5 +134,5 @@ bmp_read_u32_le :: proc(bytes: []byte, offset: int) -> u32 {
 }
 
 bmp_read_i32_le :: proc(bytes: []byte, offset: int) -> i32 {
-	return transmute(i32)bmp_read_u32_le(bytes, offset)
+	return i32(bmp_read_u32_le(bytes, offset))
 }

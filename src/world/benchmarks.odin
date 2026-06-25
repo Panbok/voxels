@@ -653,6 +653,17 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 					subchunk_index = chunk_subchunk_index_from_coord(1, 1, 1),
 				},
 			)
+			world_mesh_benchmark_register_case(
+				registry,
+				"world.mesh.heightfield_surface_subchunk.build",
+				{
+					fixture_name = "heightfield_surface_subchunk",
+					phase = .Subchunk_Build,
+					view = heightfield,
+					mesher = .Greedy_Binary,
+					subchunk_index = chunk_subchunk_index_from_coord(1, 0, 1),
+				},
+			)
 		}
 
 	}
@@ -698,8 +709,19 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 			error:          string,
 		}
 
+		TerrainGenerationBenchmarkDiagnosticTimingContext :: struct {
+			text_artifact_write:   time.Duration,
+			text_artifact_bytes:   u64,
+			surface_center_select: time.Duration,
+			surface_peak_search:   time.Duration,
+			surface_emit:          time.Duration,
+		}
+
 		@(thread_local)
 		terrain_generation_benchmark_artifact_context: ^TerrainGenerationBenchmarkArtifactContext
+
+		@(thread_local)
+		terrain_generation_benchmark_diagnostic_timing_context: ^TerrainGenerationBenchmarkDiagnosticTimingContext
 
 		@(thread_local)
 		terrain_generation_benchmark_cave_slice_selected_target: int
@@ -749,7 +771,16 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 				label,
 				allocator = ctx.allocator,
 			)
+			timing_context := terrain_generation_benchmark_diagnostic_timing_context
+			write_start: time.Tick
+			if timing_context != nil {
+				timing_context.text_artifact_bytes += u64(len(content))
+				write_start = time.tick_now()
+			}
 			err := os.write_entire_file(path, content)
+			if timing_context != nil {
+				timing_context.text_artifact_write += time.tick_since(write_start)
+			}
 			if err != nil {
 				ctx.ok = false
 				ctx.error = fmt.aprintf(
@@ -1203,6 +1234,7 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 			terrain_generation_cave_overlay_cache_clear()
 			terrain_generation_chunk_cache_clear()
 			terrain_generation_column_cache_clear()
+			terrain_water_separator_sample_cache_clear()
 		}
 
 		terrain_generation_benchmark_floor_i32 :: proc(value: f32) -> i32 {
@@ -5083,12 +5115,549 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 				unit = "ns",
 			},
 			{
+				name = "profile_column_cache_lookup_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, column_cache_lookup),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_column_miss_profile_eval_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, column_miss_profile_eval),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_hydrology_surface_sample_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, hydrology_surface_sample),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_surface_feature_envelope_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, surface_feature_envelope),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_water_separator_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, water_separator),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_water_separator_column_sample_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, water_separator_column_sample),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_water_separator_preflight_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, water_separator_preflight),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_water_separator_padding_sample_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, water_separator_padding_sample),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_water_separator_seed_build_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, water_separator_seed_build),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_water_separator_column_scan_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, water_separator_column_scan),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_water_separator_column_apply_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, water_separator_column_apply),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_water_separator_padding_samples",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, water_separator_padding_samples),
+				reduce = .Last,
+			},
+			{
+				name = "profile_water_separator_seed_count",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, water_separator_seed_count),
+				reduce = .Last,
+			},
+			{
+				name = "profile_water_separator_columns_applied",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, water_separator_columns_applied),
+				reduce = .Last,
+			},
+			{
+				name = "profile_water_separator_sample_cache_hits",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, water_separator_sample_cache_hits),
+				reduce = .Last,
+			},
+			{
+				name = "profile_water_separator_sample_cache_misses",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, water_separator_sample_cache_misses),
+				reduce = .Last,
+			},
+			{
+				name = "profile_water_separator_sample_cache_stores",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, water_separator_sample_cache_stores),
+				reduce = .Last,
+			},
+			{
+				name = "profile_water_separator_sample_cache_evictions",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, water_separator_sample_cache_evictions),
+				reduce = .Last,
+			},
+			{
+				name = "profile_structure_pad_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, structure_pad),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_surface_feature_query_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, surface_feature_query),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_feature_plan_build_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, feature_plan_build),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_surface_shape_make_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, surface_shape_make),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_surface_density_sample_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, surface_density_sample),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_heightfield_span_write_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, heightfield_span_write),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_morphology_span_write_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, morphology_span_write),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_block_material_write_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, block_material_write),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_final_chunk_cache_hits",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, final_chunk_cache_hits),
+				reduce = .Last,
+			},
+			{
+				name = "profile_final_chunk_cache_misses",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, final_chunk_cache_misses),
+				reduce = .Last,
+			},
+			{
+				name = "profile_final_chunk_cache_stores",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, final_chunk_cache_stores),
+				reduce = .Last,
+			},
+			{
+				name = "profile_final_chunk_cache_evictions",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, final_chunk_cache_evictions),
+				reduce = .Last,
+			},
+			{
+				name = "profile_final_chunk_cache_clears",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, final_chunk_cache_clears),
+				reduce = .Last,
+			},
+			{
+				name = "profile_column_cache_hits",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, column_cache_hits),
+				reduce = .Last,
+			},
+			{
+				name = "profile_column_cache_misses",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, column_cache_misses),
+				reduce = .Last,
+			},
+			{
+				name = "profile_column_cache_stores",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, column_cache_stores),
+				reduce = .Last,
+			},
+			{
+				name = "profile_column_cache_evictions",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, column_cache_evictions),
+				reduce = .Last,
+			},
+			{
+				name = "profile_column_cache_clears",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, column_cache_clears),
+				reduce = .Last,
+			},
+			{
+				name = "profile_region_cache_hits",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, region_cache_hits),
+				reduce = .Last,
+			},
+			{
+				name = "profile_region_cache_misses",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, region_cache_misses),
+				reduce = .Last,
+			},
+			{
+				name = "profile_region_cache_stores",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, region_cache_stores),
+				reduce = .Last,
+			},
+			{
+				name = "profile_region_cache_evictions",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, region_cache_evictions),
+				reduce = .Last,
+			},
+			{
+				name = "profile_region_cache_clears",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, region_cache_clears),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_overlay_cache_hits",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_overlay_cache_hits),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_overlay_cache_misses",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_overlay_cache_misses),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_overlay_cache_stores",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_overlay_cache_stores),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_overlay_cache_evictions",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_overlay_cache_evictions),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_overlay_cache_clears",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_overlay_cache_clears),
+				reduce = .Last,
+			},
+			{
 				name = "profile_cave_field_ns",
 				kind = .I64,
 				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
 				offset_of(TerrainGenerationProfile, cave_field),
 				reduce = .Last,
 				unit = "ns",
+			},
+			{
+				name = "profile_cave_field_scan_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_scan),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_cave_field_network_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_network),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_cave_field_path_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_path),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_cave_field_pocket_throat_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_pocket_throat),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_cave_field_pocket_cluster_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_pocket_cluster),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_cave_field_chamber_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_chamber),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_cave_field_bridge_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_bridge),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_cave_field_sample_points",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_sample_points),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_field_depth_rejects",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_depth_rejects),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_field_candidate_rejects",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_candidate_rejects),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_field_candidates",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_candidates),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_field_network_rejects",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_network_rejects),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_field_capacity_rejects",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_capacity_rejects),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_field_path_candidates",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_path_candidates),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_field_route_pocket_candidates",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_route_pocket_candidates),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_field_chamber_candidates",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_chamber_candidates),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_field_stamps",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_stamps),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_field_path_stamps",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_path_stamps),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_field_route_pocket_stamps",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_route_pocket_stamps),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_field_chamber_stamps",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_chamber_stamps),
+				reduce = .Last,
+			},
+			{
+				name = "profile_cave_field_bridge_stamps",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, cave_field_bridge_stamps),
+				reduce = .Last,
+			},
+			{
+				name = "profile_route_pocket_cluster_rows_scanned",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, route_pocket_cluster_rows_scanned),
+				reduce = .Last,
+			},
+			{
+				name = "profile_route_pocket_cluster_rows_box",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, route_pocket_cluster_rows_box),
+				reduce = .Last,
+			},
+			{
+				name = "profile_route_pocket_cluster_voxel_candidates",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, route_pocket_cluster_voxel_candidates),
+				reduce = .Last,
+			},
+			{
+				name = "profile_route_pocket_cluster_carveable_candidates",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, route_pocket_cluster_carveable_candidates),
+				reduce = .Last,
+			},
+			{
+				name = "profile_route_pocket_cluster_shape_candidates",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, route_pocket_cluster_shape_candidates),
+				reduce = .Last,
+			},
+			{
+				name = "profile_route_pocket_cluster_worley_candidates",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, route_pocket_cluster_worley_candidates),
+				reduce = .Last,
 			},
 			{
 				name = "profile_cave_network_ns",
@@ -5163,6 +5732,22 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 				unit = "ns",
 			},
 			{
+				name = "profile_node_perimeter_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, node_perimeter),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_node_satellites_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, node_satellites),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
 				name = "profile_node_portals_ns",
 				kind = .I64,
 				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
@@ -5171,10 +5756,74 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 				unit = "ns",
 			},
 			{
+				name = "profile_node_satellite_direct_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, node_satellite_direct),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_node_satellite_apron_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, node_satellite_apron),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_node_satellite_cluster_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, node_satellite_cluster),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
 				name = "profile_edge_core_ns",
 				kind = .I64,
 				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
 				offset_of(TerrainGenerationProfile, edge_core),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_edge_approach_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, edge_approach),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_edge_braids_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, edge_braids),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_edge_bypasses_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, edge_bypasses),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_edge_alcoves_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, edge_alcoves),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "profile_edge_chamberlets_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, edge_chamberlets),
 				reduce = .Last,
 				unit = "ns",
 			},
@@ -5236,6 +5885,20 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 				reduce = .Last,
 			},
 			{
+				name = "profile_edge_core_rows_projected",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, edge_core_rows_projected),
+				reduce = .Last,
+			},
+			{
+				name = "profile_edge_core_rows_capsule",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, edge_core_rows_capsule),
+				reduce = .Last,
+			},
+			{
 				name = "profile_edge_core_voxel_candidates",
 				kind = .U64,
 				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
@@ -5247,6 +5910,27 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 				kind = .U64,
 				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
 				offset_of(TerrainGenerationProfile, edge_core_carveable_candidates),
+				reduce = .Last,
+			},
+			{
+				name = "profile_edge_core_shape_candidates",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, edge_core_shape_candidates),
+				reduce = .Last,
+			},
+			{
+				name = "profile_edge_core_noise_candidates",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, edge_core_noise_candidates),
+				reduce = .Last,
+			},
+			{
+				name = "profile_edge_core_threshold_candidates",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationRegisteredResult, profile) +
+				offset_of(TerrainGenerationProfile, edge_core_threshold_candidates),
 				reduce = .Last,
 			},
 			{
@@ -5394,6 +6078,7 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 			terrain_generation_cave_overlay_cache_clear()
 			terrain_generation_column_cache_clear()
 			terrain_generation_region_cache_clear()
+			terrain_water_separator_sample_cache_clear()
 
 			fixture.seed = 0
 			key := terrain_generation_key_make(fixture.seed)
@@ -5580,6 +6265,7 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 		TerrainComponentBenchmarkKind :: enum {
 			Water_Volume_Fill,
 			Surface_Morphology_Columns,
+			Surface_Morphology_Columns_Shared_Cache_Contention,
 			Meshing_Generated_Chunk_Build,
 			Density_Math_Core,
 			Decoration_Pass,
@@ -5600,6 +6286,9 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 			work_view:    world_async.ChunkVoxelView,
 			initialized:  bool,
 		}
+
+		@(thread_local)
+		terrain_component_benchmark_worker_view: world_async.ChunkVoxelView
 
 		TerrainComponentBenchmarkResult :: struct {
 			operation_count:                  u64,
@@ -5740,6 +6429,8 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 				return "water_volume_fill"
 			case .Surface_Morphology_Columns:
 				return "surface_morphology_columns"
+			case .Surface_Morphology_Columns_Shared_Cache_Contention:
+				return "surface_morphology_columns_shared_cache_contention"
 			case .Meshing_Generated_Chunk_Build:
 				return "meshing_generated_chunk_build"
 			case .Density_Math_Core:
@@ -5752,6 +6443,70 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 			return "unknown"
 		}
 
+		terrain_component_benchmark_uses_generation_caches :: proc(
+			kind: TerrainComponentBenchmarkKind,
+		) -> bool {
+			switch kind {
+			case .Density_Math_Core, .Cave_Materials_Wall_Neighbors:
+				return false
+			case .Water_Volume_Fill,
+			     .Surface_Morphology_Columns,
+			     .Surface_Morphology_Columns_Shared_Cache_Contention,
+			     .Meshing_Generated_Chunk_Build,
+			     .Decoration_Pass:
+				return true
+			}
+			return true
+		}
+
+		terrain_component_benchmark_cache_ownership_mode :: proc(
+			kind: TerrainComponentBenchmarkKind,
+		) -> string {
+			switch kind {
+			case .Water_Volume_Fill, .Meshing_Generated_Chunk_Build, .Decoration_Pass:
+				return "fixture_setup_serial"
+			case .Surface_Morphology_Columns:
+				return "global_serial"
+			case .Surface_Morphology_Columns_Shared_Cache_Contention:
+				return "global_shared_contention"
+			case .Density_Math_Core, .Cave_Materials_Wall_Neighbors:
+				return "none"
+			}
+			return "unknown"
+		}
+
+		terrain_component_benchmark_mutable_view_ownership_mode :: proc(
+			kind: TerrainComponentBenchmarkKind,
+		) -> string {
+			switch kind {
+			case .Water_Volume_Fill, .Decoration_Pass:
+				return "fixture_serial"
+			case .Cave_Materials_Wall_Neighbors:
+				return "worker_local"
+			case .Surface_Morphology_Columns,
+			     .Surface_Morphology_Columns_Shared_Cache_Contention,
+			     .Meshing_Generated_Chunk_Build,
+			     .Density_Math_Core:
+				return "none"
+			}
+			return "unknown"
+		}
+
+		terrain_component_benchmark_resets_view_each_iteration :: proc(
+			kind: TerrainComponentBenchmarkKind,
+		) -> bool {
+			switch kind {
+			case .Water_Volume_Fill, .Decoration_Pass, .Cave_Materials_Wall_Neighbors:
+				return true
+			case .Surface_Morphology_Columns,
+			     .Surface_Morphology_Columns_Shared_Cache_Contention,
+			     .Meshing_Generated_Chunk_Build,
+			     .Density_Math_Core:
+				return false
+			}
+			return false
+		}
+
 		terrain_component_benchmark_coords_for_kind :: proc(
 			kind: TerrainComponentBenchmarkKind,
 			key: biomes.FeatureGridKey,
@@ -5759,7 +6514,9 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 			switch kind {
 			case .Water_Volume_Fill:
 				return terrain_generation_benchmark_surface_water_coords_make(key)
-			case .Surface_Morphology_Columns, .Meshing_Generated_Chunk_Build:
+			case .Surface_Morphology_Columns,
+			     .Surface_Morphology_Columns_Shared_Cache_Contention,
+			     .Meshing_Generated_Chunk_Build:
 				selection := terrain_generation_benchmark_surface_morphology_feature_selection(key)
 				return terrain_generation_benchmark_surface_morphology_feature_coords_make(
 					selection,
@@ -5886,9 +6643,11 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 			fixture.coords = terrain_component_benchmark_coords_for_kind(fixture.kind, fixture.key)
 			fixture.coord = fixture.coords[0]
 
-			terrain_generation_chunk_cache_init(allocator)
-			terrain_generation_cave_overlay_cache_init(allocator)
-			terrain_generation_benchmark_cache_clear()
+			if terrain_component_benchmark_uses_generation_caches(fixture.kind) {
+				terrain_generation_chunk_cache_init(allocator)
+				terrain_generation_cave_overlay_cache_init(allocator)
+				terrain_generation_benchmark_cache_clear()
+			}
 
 			if fixture.kind != .Density_Math_Core &&
 			   fixture.kind != .Cave_Materials_Wall_Neighbors {
@@ -5899,7 +6658,9 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 				)
 			}
 
-			if fixture.kind != .Surface_Morphology_Columns && fixture.kind != .Density_Math_Core {
+			if fixture.kind != .Surface_Morphology_Columns &&
+			   fixture.kind != .Surface_Morphology_Columns_Shared_Cache_Contention &&
+			   fixture.kind != .Density_Math_Core {
 				chunk_voxel_view_alloc(&fixture.base_view, allocator)
 				chunk_voxel_view_alloc(&fixture.work_view, allocator)
 			}
@@ -5914,7 +6675,7 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 					}
 				}
 				chunk_voxel_view_fill_empty(&fixture.base_view)
-			case .Surface_Morphology_Columns:
+			case .Surface_Morphology_Columns, .Surface_Morphology_Columns_Shared_Cache_Contention:
 				for coord in fixture.coords {
 					origin := chunk_origin_from_coord(coord)
 					region_coord := biomes.generation_region_coord_from_block(
@@ -5955,6 +6716,44 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 		) -> bench.BenchmarkStatus {
 			fixture := (^TerrainComponentBenchmarkFixture)(data)
 			terrain_component_benchmark_fixture_init(fixture, ctx.allocator)
+			return bench.status_pass()
+		}
+
+		terrain_component_benchmark_setup_worker :: proc(
+			ctx: ^bench.BenchmarkContext,
+			data: rawptr,
+		) -> bench.BenchmarkStatus {
+			fixture := (^TerrainComponentBenchmarkFixture)(data)
+			if fixture.kind != .Cave_Materials_Wall_Neighbors {
+				return bench.status_pass()
+			}
+			if len(terrain_component_benchmark_worker_view.blocks) == CHUNK_BLOCK_COUNT {
+				return bench.status_pass()
+			}
+			terrain_component_benchmark_worker_view.blocks = make(
+				#soa[]world_async.ChunkVoxelViewElement,
+				CHUNK_BLOCK_COUNT,
+				ctx.allocator,
+			)
+			if len(terrain_component_benchmark_worker_view.blocks) != CHUNK_BLOCK_COUNT {
+				return bench.status_fail("terrain component worker view allocation failed")
+			}
+			return bench.status_pass()
+		}
+
+		terrain_component_benchmark_teardown_worker :: proc(
+			ctx: ^bench.BenchmarkContext,
+			data: rawptr,
+		) -> bench.BenchmarkStatus {
+			fixture := (^TerrainComponentBenchmarkFixture)(data)
+			if fixture.kind != .Cave_Materials_Wall_Neighbors {
+				return bench.status_pass()
+			}
+			if len(terrain_component_benchmark_worker_view.blocks) == 0 {
+				return bench.status_pass()
+			}
+			_ = delete(terrain_component_benchmark_worker_view.blocks, ctx.allocator)
+			terrain_component_benchmark_worker_view = {}
 			return bench.status_pass()
 		}
 
@@ -6135,10 +6934,11 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 
 		terrain_component_benchmark_cave_materials_run :: proc(
 			fixture: ^TerrainComponentBenchmarkFixture,
+			work_view: ^world_async.ChunkVoxelView,
 			out: ^TerrainComponentBenchmarkResult,
 			iteration_index: u64,
 		) {
-			chunk_voxel_view_copy(&fixture.work_view, &fixture.base_view)
+			chunk_voxel_view_copy(work_view, &fixture.base_view)
 			biome_ids := [?]biomes.BiomeID {
 				.Fungal_Vaults,
 				.Crystal_Geode_Network,
@@ -6151,7 +6951,7 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 				for y := i32(2); y < CHUNK_BLOCK_LENGTH - 2; y += 5 {
 					for x := i32(2); x < CHUNK_BLOCK_LENGTH - 2; x += 5 {
 						center_index := chunk_block_index(u32(x), u32(y), u32(z))
-						fixture.work_view.blocks.occupancy[center_index] = .Empty
+						work_view.blocks.occupancy[center_index] = .Empty
 						biome_index := int(
 							(iteration_index + wall_neighbor_calls) % u64(len(biome_ids)),
 						)
@@ -6162,13 +6962,16 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 						checksum = checksum * 1099511628211 ~ u64(floor_material_id)
 						checksum = checksum * 1099511628211 ~ u64(ceiling_material_id)
 						terrain_density_mark_cave_wall_neighbors(
-							&fixture.work_view,
+							work_view,
 							x,
 							y,
 							z,
 							biome_id,
 							true,
 						)
+						checksum =
+							checksum * 1099511628211 ~
+							u64(work_view.blocks.material_id[center_index + 1])
 						operation_count += 1
 						wall_neighbor_calls += 1
 					}
@@ -6190,6 +6993,7 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 				}
 			}
 			out.operation_count += operation_count
+			out.block_count = u64(CHUNK_BLOCK_COUNT) - wall_neighbor_calls
 			out.blocks_written += wall_neighbor_calls * 6
 			out.checksum += checksum
 		}
@@ -6209,7 +7013,7 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 				terrain_water_volume_fill(&fixture.work_view, fixture.origin, fixture.columns^[:])
 				out.operation_count += u64(CHUNK_BLOCK_LENGTH * CHUNK_BLOCK_LENGTH)
 				out.column_count += active_columns
-			case .Surface_Morphology_Columns:
+			case .Surface_Morphology_Columns, .Surface_Morphology_Columns_Shared_Cache_Contention:
 				stats := terrain_generation_benchmark_surface_morphology_stats_from_coords(
 					fixture.coords,
 					fixture.seed,
@@ -6275,7 +7079,41 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 					u64(stats.blocks_written) * 17 +
 					u64(ctx.iteration_index + 1)
 			case .Cave_Materials_Wall_Neighbors:
-				terrain_component_benchmark_cave_materials_run(fixture, out, ctx.iteration_index)
+				if len(terrain_component_benchmark_worker_view.blocks) == CHUNK_BLOCK_COUNT {
+					terrain_component_benchmark_cave_materials_run(
+						fixture,
+						&terrain_component_benchmark_worker_view,
+						out,
+						ctx.iteration_index,
+					)
+				} else {
+					if ctx.temp_arena == nil {
+						return bench.status_fail(
+							"terrain component cave materials requires a temp arena",
+						)
+					}
+					temp := mem.begin_arena_temp_memory(ctx.temp_arena)
+					defer mem.end_arena_temp_memory(temp)
+					allocator := mem.arena_allocator(ctx.temp_arena)
+					work_view := world_async.ChunkVoxelView {
+						blocks = make(
+							#soa[]world_async.ChunkVoxelViewElement,
+							CHUNK_BLOCK_COUNT,
+							allocator,
+						),
+					}
+					if len(work_view.blocks) != CHUNK_BLOCK_COUNT {
+						return bench.status_fail(
+							"terrain component cave materials temp view allocation failed",
+						)
+					}
+					terrain_component_benchmark_cave_materials_run(
+						fixture,
+						&work_view,
+						out,
+						ctx.iteration_index,
+					)
+				}
 			}
 
 			return bench.status_pass()
@@ -6289,7 +7127,7 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 			fixture := (^TerrainComponentBenchmarkFixture)(data)
 			out := (^TerrainComponentBenchmarkResult)(result)
 			switch fixture.kind {
-			case .Water_Volume_Fill, .Decoration_Pass, .Cave_Materials_Wall_Neighbors:
+			case .Water_Volume_Fill, .Decoration_Pass:
 				if len(fixture.work_view.blocks) == CHUNK_BLOCK_COUNT {
 					view_checksum, material_stats := terrain_generation_benchmark_checksum(
 						fixture.work_view,
@@ -6298,11 +7136,15 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 					#partial switch fixture.kind {
 					case .Water_Volume_Fill:
 						out.block_count = material_stats.water_count
-					case .Decoration_Pass, .Cave_Materials_Wall_Neighbors:
+					case .Decoration_Pass:
 						out.block_count = material_stats.solid_count
 					}
 				}
-			case .Meshing_Generated_Chunk_Build, .Surface_Morphology_Columns, .Density_Math_Core:
+			case .Meshing_Generated_Chunk_Build,
+			     .Surface_Morphology_Columns,
+			     .Surface_Morphology_Columns_Shared_Cache_Contention,
+			     .Density_Math_Core,
+			     .Cave_Materials_Wall_Neighbors:
 			}
 			_ = ctx
 			return bench.status_pass()
@@ -6339,8 +7181,21 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 				"columns",
 			)
 			bench.metadata_u64(writer, "chunk_blocks", u64(CHUNK_BLOCK_COUNT), "blocks")
-			bench.metadata_bool(writer, "reset_view_each_iteration", true)
-			bench.metadata_string(writer, "cache_ownership_mode", "global_serial")
+			bench.metadata_bool(
+				writer,
+				"reset_view_each_iteration",
+				terrain_component_benchmark_resets_view_each_iteration(fixture.kind),
+			)
+			bench.metadata_string(
+				writer,
+				"cache_ownership_mode",
+				terrain_component_benchmark_cache_ownership_mode(fixture.kind),
+			)
+			bench.metadata_string(
+				writer,
+				"mutable_view_ownership_mode",
+				terrain_component_benchmark_mutable_view_ownership_mode(fixture.kind),
+			)
 			_ = ctx
 			return bench.status_pass()
 		}
@@ -6351,10 +7206,16 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 			switch kind {
 			case .Surface_Morphology_Columns:
 				return {.Serial_Only, .Uses_Shared_Caches}
-			case .Water_Volume_Fill, .Meshing_Generated_Chunk_Build, .Decoration_Pass:
+			case .Surface_Morphology_Columns_Shared_Cache_Contention:
+				return {.Parallel_Safe, .Uses_Shared_Caches, .Measures_Cache_Contention}
+			case .Water_Volume_Fill, .Decoration_Pass:
 				return {.Serial_Only, .Uses_Shared_Caches}
-			case .Density_Math_Core, .Cave_Materials_Wall_Neighbors:
-				return {.Serial_Only}
+			case .Meshing_Generated_Chunk_Build:
+				return {.Parallel_Safe}
+			case .Density_Math_Core:
+				return {.Parallel_Safe}
+			case .Cave_Materials_Wall_Neighbors:
+				return {.Parallel_Safe}
 			}
 			return {.Serial_Only}
 		}
@@ -6388,6 +7249,8 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 					flags = terrain_component_benchmark_case_flags(kind),
 					warmup_mode = .Serial,
 					setup = terrain_component_benchmark_setup,
+					setup_worker = terrain_component_benchmark_setup_worker,
+					teardown_worker = terrain_component_benchmark_teardown_worker,
 					finalize = terrain_component_benchmark_finalize,
 					write_fixture = terrain_component_benchmark_fixture_write,
 					category = "world.terrain_component",
@@ -6409,6 +7272,13 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 				"world.terrain_component.surface_morphology.columns",
 				.Surface_Morphology_Columns,
 				1,
+				0,
+			)
+			terrain_component_benchmark_case_register(
+				registry,
+				"world.terrain_component.surface_morphology.columns.shared_cache_contention",
+				.Surface_Morphology_Columns_Shared_Cache_Contention,
+				4,
 				0,
 			)
 			terrain_component_benchmark_case_register(
@@ -6455,7 +7325,16 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 		}
 
 		TerrainGenerationDiagnosticResult :: struct {
-			artifact_count: u64,
+			artifact_count:           u64,
+			setup_clear:              time.Duration,
+			selection:                time.Duration,
+			capture:                  time.Duration,
+			text_artifact_write:      time.Duration,
+			text_artifact_bytes:      u64,
+			surface_center_selection: time.Duration,
+			surface_peak_search:      time.Duration,
+			surface_emit:             time.Duration,
+			cave_slice_capture:       time.Duration,
 		}
 
 		terrain_generation_diagnostic_metrics := [?]bench.BenchmarkMetricDescriptor {
@@ -6464,6 +7343,69 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 				kind = .U64,
 				offset = offset_of(TerrainGenerationDiagnosticResult, artifact_count),
 				reduce = .Last,
+			},
+			{
+				name = "setup_clear_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationDiagnosticResult, setup_clear),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "selection_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationDiagnosticResult, selection),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "capture_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationDiagnosticResult, capture),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "text_artifact_write_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationDiagnosticResult, text_artifact_write),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "text_artifact_bytes",
+				kind = .U64,
+				offset = offset_of(TerrainGenerationDiagnosticResult, text_artifact_bytes),
+				reduce = .Last,
+				unit = "bytes",
+			},
+			{
+				name = "surface_center_selection_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationDiagnosticResult, surface_center_selection),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "surface_peak_search_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationDiagnosticResult, surface_peak_search),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "surface_emit_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationDiagnosticResult, surface_emit),
+				reduce = .Last,
+				unit = "ns",
+			},
+			{
+				name = "cave_slice_capture_ns",
+				kind = .I64,
+				offset = offset_of(TerrainGenerationDiagnosticResult, cave_slice_capture),
+				reduce = .Last,
+				unit = "ns",
 			},
 		}
 
@@ -6491,12 +7433,15 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 			}
 			fixture := (^TerrainGenerationDiagnosticFixture)(data)
 			out := (^TerrainGenerationDiagnosticResult)(result)
+			setup_clear_start := time.tick_now()
 			terrain_generation_chunk_cache_init(ctx.allocator)
 			terrain_generation_chunk_cache_clear()
 			terrain_generation_cave_overlay_cache_init(ctx.allocator)
 			terrain_generation_cave_overlay_cache_clear()
 			terrain_generation_column_cache_clear()
 			terrain_generation_region_cache_clear()
+			terrain_water_separator_sample_cache_clear()
+			out.setup_clear += time.tick_since(setup_clear_start)
 
 			artifact_context := TerrainGenerationBenchmarkArtifactContext {
 				result       = ctx.case_result,
@@ -6504,15 +7449,19 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 				allocator    = ctx.allocator,
 				ok           = true,
 			}
+			timing_context := TerrainGenerationBenchmarkDiagnosticTimingContext{}
 			previous_artifact_context := terrain_generation_benchmark_artifact_context
+			previous_timing_context := terrain_generation_benchmark_diagnostic_timing_context
 			previous_cave_slice_target := terrain_generation_benchmark_cave_slice_selected_target
 			previous_surface_step_override :=
 				terrain_generation_benchmark_surface_capture_step_override
 			terrain_generation_benchmark_artifact_context = &artifact_context
+			terrain_generation_benchmark_diagnostic_timing_context = &timing_context
 			terrain_generation_benchmark_cave_slice_selected_target = fixture.cave_slice_target
 			terrain_generation_benchmark_surface_capture_step_override = fixture.step_override
 			defer {
 				terrain_generation_benchmark_artifact_context = previous_artifact_context
+				terrain_generation_benchmark_diagnostic_timing_context = previous_timing_context
 				terrain_generation_benchmark_cave_slice_selected_target =
 					previous_cave_slice_target
 				terrain_generation_benchmark_surface_capture_step_override =
@@ -6521,10 +7470,15 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 
 			seed := fixture.seed
 			key := terrain_generation_key_make(seed)
+			capture_start: time.Tick
 			switch fixture.kind {
 			case .Cave_Slice:
+				capture_start = time.tick_now()
 				terrain_generation_benchmark_cave_slice_capture_runs_run(key, seed, ctx.temp_arena)
+				out.capture += time.tick_since(capture_start)
+				out.cave_slice_capture += out.capture
 			case .Surface_Morphology_Capture, .Surface_Fortress_Capture:
+				selection_start := time.tick_now()
 				surface_water_coords := terrain_generation_benchmark_surface_water_coords_make(key)
 				surface_cave_anchors := terrain_generation_benchmark_surface_cave_anchors_pick(key)
 				surface_cave_coords := terrain_generation_benchmark_surface_cave_coords_make(
@@ -6532,6 +7486,8 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 				)
 				surface_fortress_selection :=
 					terrain_generation_benchmark_surface_fortress_selection(key)
+				out.selection += time.tick_since(selection_start)
+				capture_start = time.tick_now()
 				terrain_generation_benchmark_surface_capture_runs_run(
 					seed,
 					surface_water_coords,
@@ -6541,11 +7497,17 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 					ctx.temp_arena,
 					fixture.kind == .Surface_Fortress_Capture,
 				)
+				out.capture += time.tick_since(capture_start)
 			}
 
 			if !artifact_context.ok {
 				return bench.status_fail(artifact_context.error)
 			}
+			out.text_artifact_write += timing_context.text_artifact_write
+			out.text_artifact_bytes += timing_context.text_artifact_bytes
+			out.surface_center_selection += timing_context.surface_center_select
+			out.surface_peak_search += timing_context.surface_peak_search
+			out.surface_emit += timing_context.surface_emit
 			out.artifact_count = u64(artifact_context.artifact_count)
 			if out.artifact_count == 0 {
 				return bench.status_fail("terrain diagnostic capture emitted no artifacts")
@@ -7267,6 +8229,16 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 			seed: u32,
 			transient_arena: ^mem.Arena,
 		) {
+			timing_context := terrain_generation_benchmark_diagnostic_timing_context
+			emit_start: time.Tick
+			if timing_context != nil {
+				emit_start = time.tick_now()
+			}
+			defer {
+				if timing_context != nil {
+					timing_context.surface_emit += time.tick_since(emit_start)
+				}
+			}
 			temp := mem.begin_arena_temp_memory(transient_arena)
 			defer mem.end_arena_temp_memory(temp)
 			allocator := mem.arena_allocator(transient_arena)
@@ -7462,6 +8434,11 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 			transient_arena: ^mem.Arena,
 			fortress_only: bool = false,
 		) {
+			timing_context := terrain_generation_benchmark_diagnostic_timing_context
+			center_select_start: time.Tick
+			if timing_context != nil {
+				center_select_start = time.tick_now()
+			}
 			water_center := terrain_generation_benchmark_surface_capture_center_from_coords(
 				surface_water_coords,
 				seed,
@@ -7484,10 +8461,21 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 					transient_arena,
 				)
 			}
+			if timing_context != nil {
+				timing_context.surface_center_select += time.tick_since(center_select_start)
+			}
+			peak_search_start: time.Tick
+			if timing_context != nil {
+				peak_search_start = time.tick_now()
+			}
 			peak_center := terrain_generation_benchmark_surface_capture_peak_center_find(
 				seed,
 				transient_arena,
 			)
+			if timing_context != nil {
+				timing_context.surface_peak_search += time.tick_since(peak_search_start)
+				center_select_start = time.tick_now()
+			}
 			key := terrain_generation_key_make(seed)
 			feature_selection := terrain_generation_benchmark_surface_morphology_feature_selection(
 				key,
@@ -7507,6 +8495,9 @@ when ODIN_DEBUG || bench.BENCHMARKS_ENABLED {
 					seed,
 					transient_arena,
 				)
+			}
+			if timing_context != nil {
+				timing_context.surface_center_select += time.tick_since(center_select_start)
 			}
 
 			log.info("TERRAIN_GENERATION_SURFACE_MORPHOLOGY_CAPTURE_START")

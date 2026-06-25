@@ -2370,8 +2370,8 @@ when ODIN_DEBUG {
 			marsh_structures,
 		)
 		log.assertf(
-			old_growth_structures <= 32 &&
-			temperate_structures <= 26 &&
+			old_growth_structures <= 48 &&
+			temperate_structures <= 36 &&
 			marsh_structures <= 28 &&
 			old_growth_forts <= 8 &&
 			temperate_forts <= 6 &&

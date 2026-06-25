@@ -35,49 +35,59 @@ MESH_QUEUE_CAPACITY :: 128
 
 state := struct {
 	// Memory
-	allocator:                 mem.Allocator,
-	generation_execute:        GenerationExecuteProc,
-	mesh_execute:              MeshExecuteProc,
+	allocator:                   mem.Allocator,
+	generation_execute:          GenerationExecuteProc,
+	mesh_execute:                MeshExecuteProc,
 
 	// Sync
-	generation_mutex:          sync.Mutex,
-	mesh_mutex:                sync.Mutex,
+	generation_mutex:            sync.Mutex,
+	mesh_mutex:                  sync.Mutex,
 
 	// State
-	shutdown_requested:        bool,
-	started:                   bool,
+	shutdown_requested:          bool,
+	started:                     bool,
 
 	// Generation
-	generation_work_available: sync.Sema,
-	generation_worker_count:   u32,
-	generation_threads:        []^thread.Thread,
-	generation_contexts:       []GenerationWorkerContext,
-	generation_jobs:           [GENERATION_QUEUE_CAPACITY]world_async.ChunkGenerationJob,
-	generation_job_head:       u32,
-	generation_job_tail:       u32,
-	generation_job_count:      u32,
-	generation_results:        [GENERATION_RESULT_QUEUE_CAPACITY]world_async.ChunkGenerationJobResult,
-	generation_result_head:    u32,
-	generation_result_tail:    u32,
-	generation_result_count:   u32,
+	generation_work_available:   sync.Sema,
+	generation_worker_count:     u32,
+	generation_threads:          []^thread.Thread,
+	generation_contexts:         []GenerationWorkerContext,
+	generation_jobs:             [GENERATION_QUEUE_CAPACITY]world_async.ChunkGenerationJob,
+	generation_job_head:         u32,
+	generation_job_tail:         u32,
+	generation_job_count:        u32,
+	generation_results:          [GENERATION_RESULT_QUEUE_CAPACITY]world_async.ChunkGenerationJobResult,
+	generation_result_head:      u32,
+	generation_result_tail:      u32,
+	generation_result_count:     u32,
+	generation_enqueue_failures: u64,
+	generation_workers_busy:     u32,
+	generation_workers_busy_max: u32,
+	generation_jobs_completed:   u64,
+	generation_worker_busy_us:   u64,
 
 	// Meshing
-	mesh_work_available:       sync.Sema,
-	mesh_worker_count:         u32,
-	mesh_result_released:      []sync.Sema,
-	mesh_threads:              []^thread.Thread,
-	mesh_contexts:             []MeshWorkerContext,
-	mesh_worker_arena_pool:    MeshWorkerArenaPool,
-	mesh_worker_scratch_pool:  MeshWorkerArenaPool,
-	mesh_result_pending:       []bool,
-	mesh_jobs:                 [MESH_QUEUE_CAPACITY]world_async.ChunkMeshJob,
-	mesh_job_head:             u32,
-	mesh_job_tail:             u32,
-	mesh_job_count:            u32,
-	mesh_results:              []world_async.ChunkMeshJobResult,
-	mesh_result_head:          u32,
-	mesh_result_tail:          u32,
-	mesh_result_count:         u32,
+	mesh_work_available:         sync.Sema,
+	mesh_worker_count:           u32,
+	mesh_result_released:        []sync.Sema,
+	mesh_threads:                []^thread.Thread,
+	mesh_contexts:               []MeshWorkerContext,
+	mesh_worker_arena_pool:      MeshWorkerArenaPool,
+	mesh_worker_scratch_pool:    MeshWorkerArenaPool,
+	mesh_result_pending:         []bool,
+	mesh_jobs:                   [MESH_QUEUE_CAPACITY]world_async.ChunkMeshJob,
+	mesh_job_head:               u32,
+	mesh_job_tail:               u32,
+	mesh_job_count:              u32,
+	mesh_results:                []world_async.ChunkMeshJobResult,
+	mesh_result_head:            u32,
+	mesh_result_tail:            u32,
+	mesh_result_count:           u32,
+	mesh_enqueue_failures:       u64,
+	mesh_workers_busy:           u32,
+	mesh_workers_busy_max:       u32,
+	mesh_jobs_completed:         u64,
+	mesh_worker_busy_us:         u64,
 }{}
 
 GenerationExecuteProc :: #type proc(
@@ -95,6 +105,27 @@ InitConfig :: struct {
 	mesh_worker_count:       u32,
 	generation_execute:      GenerationExecuteProc,
 	mesh_execute:            MeshExecuteProc,
+}
+
+MetricsSnapshot :: struct {
+	generation_queue_depth:      u32,
+	generation_queue_capacity:   u32,
+	generation_result_depth:     u32,
+	generation_result_capacity:  u32,
+	generation_enqueue_failures: u64,
+	generation_workers_busy:     u32,
+	generation_workers_busy_max: u32,
+	generation_jobs_completed:   u64,
+	generation_worker_busy_us:   u64,
+	mesh_queue_depth:            u32,
+	mesh_queue_capacity:         u32,
+	mesh_result_depth:           u32,
+	mesh_result_capacity:        u32,
+	mesh_enqueue_failures:       u64,
+	mesh_workers_busy:           u32,
+	mesh_workers_busy_max:       u32,
+	mesh_jobs_completed:         u64,
+	mesh_worker_busy_us:         u64,
 }
 
 //////////////////////////////////////
@@ -324,6 +355,12 @@ generation_worker_proc :: proc(data: rawptr) {
 		sync.lock(&state.generation_mutex)
 		got_job := generation_job_pop_locked(&job)
 		execute := state.generation_execute
+		if got_job {
+			state.generation_workers_busy += 1
+			if state.generation_workers_busy > state.generation_workers_busy_max {
+				state.generation_workers_busy_max = state.generation_workers_busy
+			}
+		}
 		sync.unlock(&state.generation_mutex)
 
 		if !got_job {
@@ -337,6 +374,9 @@ generation_worker_proc :: proc(data: rawptr) {
 		)
 
 		sync.lock(&state.generation_mutex)
+		state.generation_workers_busy -= 1
+		state.generation_jobs_completed += 1
+		state.generation_worker_busy_us += result.generation_duration_us
 		generation_result_push_locked(result)
 		sync.unlock(&state.generation_mutex)
 	}
@@ -365,6 +405,12 @@ mesh_worker_proc :: proc(data: rawptr) {
 		job: world_async.ChunkMeshJob
 		got_job := mesh_job_pop_locked(&job)
 		execute := state.mesh_execute
+		if got_job {
+			state.mesh_workers_busy += 1
+			if state.mesh_workers_busy > state.mesh_workers_busy_max {
+				state.mesh_workers_busy_max = state.mesh_workers_busy
+			}
+		}
 		sync.unlock(&state.mesh_mutex)
 
 		if !got_job {
@@ -374,22 +420,28 @@ mesh_worker_proc :: proc(data: rawptr) {
 
 		mesh_worker_arena_pool_reset_element(&state.mesh_worker_arena_pool, worker_index)
 		mesh_worker_arena_pool_reset_element(&state.mesh_worker_scratch_pool, worker_index)
+		mesh_start := time.tick_now()
 		output := execute(
 			job,
 			state.mesh_worker_arena_pool.elements[worker_index].allocator,
 			&state.mesh_worker_scratch_pool.elements[worker_index].arena,
 		)
+		mesh_duration_us := u64(time.duration_microseconds(time.tick_since(mesh_start)))
 
 		result := world_async.ChunkMeshJobResult {
-			coord          = job.snapshot.coord,
-			block_version  = job.snapshot.block_version,
-			scope_kind     = job.scope_kind,
-			subchunk_index = job.subchunk_index,
-			worker_index   = worker_index,
-			output         = output,
+			coord            = job.snapshot.coord,
+			block_version    = job.snapshot.block_version,
+			scope_kind       = job.scope_kind,
+			subchunk_index   = job.subchunk_index,
+			worker_index     = worker_index,
+			mesh_duration_us = mesh_duration_us,
+			output           = output,
 		}
 
 		sync.lock(&state.mesh_mutex)
+		state.mesh_workers_busy -= 1
+		state.mesh_jobs_completed += 1
+		state.mesh_worker_busy_us += mesh_duration_us
 		state.mesh_result_pending[worker_index] = true
 		mesh_result_push_locked(result)
 		sync.unlock(&state.mesh_mutex)
@@ -532,6 +584,9 @@ generation_request :: proc(job: world_async.ChunkGenerationJob) -> bool {
 
 	sync.lock(&state.generation_mutex)
 	queued := generation_job_push_locked(job)
+	if !queued {
+		state.generation_enqueue_failures += 1
+	}
 	sync.unlock(&state.generation_mutex)
 
 	if queued {
@@ -566,6 +621,9 @@ mesh_request :: proc(job: world_async.ChunkMeshJob) -> bool {
 
 	sync.lock(&state.mesh_mutex)
 	queued := mesh_job_push_locked(job)
+	if !queued {
+		state.mesh_enqueue_failures += 1
+	}
 	sync.unlock(&state.mesh_mutex)
 
 	if queued {
@@ -605,4 +663,37 @@ mesh_result_release :: proc(result: world_async.ChunkMeshJobResult) {
 	sync.unlock(&state.mesh_mutex)
 
 	sync.post(&state.mesh_result_released[result.worker_index])
+}
+
+metrics_snapshot :: proc() -> MetricsSnapshot {
+	snapshot := MetricsSnapshot{}
+	if !lifecycle_started() {
+		return snapshot
+	}
+
+	sync.lock(&state.generation_mutex)
+	snapshot.generation_queue_depth = state.generation_job_count
+	snapshot.generation_queue_capacity = GENERATION_QUEUE_CAPACITY
+	snapshot.generation_result_depth = state.generation_result_count
+	snapshot.generation_result_capacity = GENERATION_RESULT_QUEUE_CAPACITY
+	snapshot.generation_enqueue_failures = state.generation_enqueue_failures
+	snapshot.generation_workers_busy = state.generation_workers_busy
+	snapshot.generation_workers_busy_max = state.generation_workers_busy_max
+	snapshot.generation_jobs_completed = state.generation_jobs_completed
+	snapshot.generation_worker_busy_us = state.generation_worker_busy_us
+	sync.unlock(&state.generation_mutex)
+
+	sync.lock(&state.mesh_mutex)
+	snapshot.mesh_queue_depth = state.mesh_job_count
+	snapshot.mesh_queue_capacity = MESH_QUEUE_CAPACITY
+	snapshot.mesh_result_depth = state.mesh_result_count
+	snapshot.mesh_result_capacity = mesh_result_queue_capacity()
+	snapshot.mesh_enqueue_failures = state.mesh_enqueue_failures
+	snapshot.mesh_workers_busy = state.mesh_workers_busy
+	snapshot.mesh_workers_busy_max = state.mesh_workers_busy_max
+	snapshot.mesh_jobs_completed = state.mesh_jobs_completed
+	snapshot.mesh_worker_busy_us = state.mesh_worker_busy_us
+	sync.unlock(&state.mesh_mutex)
+
+	return snapshot
 }

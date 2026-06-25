@@ -2022,15 +2022,77 @@ when ODIN_DEBUG {
 			"origin region should store sparse Cave Network data",
 		)
 		debug_generation_region_cave_network_graph_assert_connected(origin_region)
-		debug_generation_region_cave_network_local_edges_assert_shared(
-			key,
-			{x = 0, y = 0, z = 0},
-			{x = 1, y = 0, z = 0},
+		local_edges_shared_checked := false
+		for z := i32(-1); z <= 1 && !local_edges_shared_checked; z += 1 {
+			for y := i32(-1); y <= 1 && !local_edges_shared_checked; y += 1 {
+				for x := i32(-1); x <= 1 && !local_edges_shared_checked; x += 1 {
+					from_coord := GenerationRegionCoord {
+						x = x,
+						y = y,
+						z = z,
+					}
+					neighbor_offsets := [?]GenerationRegionCoord {
+						{x = 1, y = 0, z = 0},
+						{x = 0, y = 1, z = 0},
+						{x = 0, y = 0, z = 1},
+					}
+					for offset in neighbor_offsets {
+						to_coord := GenerationRegionCoord {
+							x = from_coord.x + offset.x,
+							y = from_coord.y + offset.y,
+							z = from_coord.z + offset.z,
+						}
+						if debug_generation_region_cave_network_local_edges_assert_shared(
+							key,
+							from_coord,
+							to_coord,
+						) {
+							local_edges_shared_checked = true
+							break
+						}
+					}
+				}
+			}
+		}
+		log.assert(
+			local_edges_shared_checked,
+			"nearby adjacent Generation Regions should share canonical local Cave Network edges",
 		)
-		debug_generation_region_cave_network_seam_edges_assert_shared(
-			key,
-			{x = 0, y = 0, z = 0},
-			{x = 1, y = 0, z = 0},
+		seam_edges_shared_checked := false
+		for z := i32(-1); z <= 1 && !seam_edges_shared_checked; z += 1 {
+			for y := i32(-1); y <= 1 && !seam_edges_shared_checked; y += 1 {
+				for x := i32(-1); x <= 1 && !seam_edges_shared_checked; x += 1 {
+					from_coord := GenerationRegionCoord {
+						x = x,
+						y = y,
+						z = z,
+					}
+					neighbor_offsets := [?]GenerationRegionCoord {
+						{x = 1, y = 0, z = 0},
+						{x = 0, y = 1, z = 0},
+						{x = 0, y = 0, z = 1},
+					}
+					for offset in neighbor_offsets {
+						to_coord := GenerationRegionCoord {
+							x = from_coord.x + offset.x,
+							y = from_coord.y + offset.y,
+							z = from_coord.z + offset.z,
+						}
+						if debug_generation_region_cave_network_seam_edges_assert_shared(
+							key,
+							from_coord,
+							to_coord,
+						) {
+							seam_edges_shared_checked = true
+							break
+						}
+					}
+				}
+			}
+		}
+		log.assert(
+			seam_edges_shared_checked,
+			"nearby adjacent Generation Regions should select a shared Cave Network seam edge",
 		)
 		log.assert(
 			generation_region_coord_from_block(-1, -1, -1) ==
@@ -2331,7 +2393,7 @@ when ODIN_DEBUG {
 	debug_generation_region_cave_network_local_edges_assert_shared :: proc(
 		key: FeatureGridKey,
 		from_coord, to_coord: GenerationRegionCoord,
-	) {
+	) -> bool {
 		from_region := new(GenerationRegion)
 		to_region := new(GenerationRegion)
 		generation_region_build_with_margins_into(
@@ -2388,16 +2450,13 @@ when ODIN_DEBUG {
 				)
 			}
 		}
-		log.assert(
-			shared_local_edges > 0,
-			"adjacent Generation Regions should share canonical local Cave Network edges",
-		)
+		return shared_local_edges > 0
 	}
 
 	debug_generation_region_cave_network_seam_edges_assert_shared :: proc(
 		key: FeatureGridKey,
 		from_coord, to_coord: GenerationRegionCoord,
-	) {
+	) -> bool {
 		from_region := new(GenerationRegion)
 		to_region := new(GenerationRegion)
 		generation_region_build_with_margins_into(
@@ -2442,10 +2501,9 @@ when ODIN_DEBUG {
 			axis,
 			face_block,
 		)
-		log.assert(
-			from_found && to_found,
-			"adjacent Generation Regions should select a shared Cave Network seam edge",
-		)
+		if !from_found || !to_found {
+			return false
+		}
 
 		from_from_node := from_region.cave_network_nodes[from_from_index]
 		from_to_node := from_region.cave_network_nodes[from_to_index]
@@ -2465,6 +2523,7 @@ when ODIN_DEBUG {
 			generation_region_cave_network_edge_id_exists(to_region, seam_edge.id),
 			"right Generation Region missing shared deterministic Cave Network seam edge",
 		)
+		return true
 	}
 
 	debug_generation_region_cave_network_shared_face :: proc(

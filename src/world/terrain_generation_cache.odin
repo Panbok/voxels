@@ -83,6 +83,21 @@ TerrainGenerationColumnCache :: struct {
 	clock: u64,
 }
 
+TerrainWaterSeparatorSampleCacheSlot :: struct {
+	valid:     bool,
+	key:       biomes.FeatureGridKey,
+	world_x:   i32,
+	world_z:   i32,
+	sample:    TerrainWaterSeparatorSample,
+	last_used: u64,
+}
+
+TerrainWaterSeparatorSampleCache :: struct {
+	mutex: sync.Mutex,
+	slots: [TERRAIN_WATER_SEPARATOR_SAMPLE_CACHE_CAPACITY]TerrainWaterSeparatorSampleCacheSlot,
+	clock: u64,
+}
+
 //////////////////////////////////////
 // Terrain Generation Cache Methods
 /////////////////////////////////////
@@ -226,6 +241,9 @@ terrain_generation_chunk_cache_clear :: proc() {
 			cache.slots[i].valid = false
 		}
 		cache.clock = 0
+		if profile := terrain_generation_profile_context.profile; profile != nil {
+			profile.final_chunk_cache_clears += 1
+		}
 	}
 }
 
@@ -237,6 +255,9 @@ terrain_generation_chunk_cache_try_read :: proc(
 	when TERRAIN_GENERATION_CHUNK_CACHE_ENABLED {
 		cache := &state.terrain_generation_chunk_cache
 		if !cache.initialized {
+			if profile := terrain_generation_profile_context.profile; profile != nil {
+				profile.final_chunk_cache_misses += 1
+			}
 			return false
 		}
 
@@ -249,9 +270,15 @@ terrain_generation_chunk_cache_try_read :: proc(
 				cache.clock += 1
 				slot.last_used = cache.clock
 				chunk_voxel_view_copy(view, &slot.view)
+				if profile := terrain_generation_profile_context.profile; profile != nil {
+					profile.final_chunk_cache_hits += 1
+				}
 				return true
 			}
 		}
+	}
+	if profile := terrain_generation_profile_context.profile; profile != nil {
+		profile.final_chunk_cache_misses += 1
 	}
 	return false
 }
@@ -313,6 +340,12 @@ terrain_generation_chunk_cache_store :: proc(
 
 		cache.clock += 1
 		slot := &cache.slots[slot_index]
+		if profile := terrain_generation_profile_context.profile; profile != nil {
+			profile.final_chunk_cache_stores += 1
+			if slot.valid && !(slot.key == key && slot.coord == coord) {
+				profile.final_chunk_cache_evictions += 1
+			}
+		}
 		chunk_voxel_view_copy(&slot.view, view)
 		slot.key = key
 		slot.coord = coord
@@ -371,6 +404,9 @@ terrain_generation_cave_overlay_cache_clear :: proc() {
 			cache.slots[i].valid = false
 		}
 		cache.clock = 0
+		if profile := terrain_generation_profile_context.profile; profile != nil {
+			profile.cave_overlay_cache_clears += 1
+		}
 	}
 }
 
@@ -392,6 +428,9 @@ terrain_generation_cave_overlay_cache_try_apply :: proc(
 	when TERRAIN_GENERATION_CAVE_OVERLAY_CACHE_ENABLED {
 		cache := &state.terrain_generation_cave_overlay_cache
 		if !cache.initialized {
+			if profile := terrain_generation_profile_context.profile; profile != nil {
+				profile.cave_overlay_cache_misses += 1
+			}
 			return false
 		}
 
@@ -404,9 +443,15 @@ terrain_generation_cave_overlay_cache_try_apply :: proc(
 				cache.clock += 1
 				slot.last_used = cache.clock
 				terrain_cave_chunk_overlay_apply(&slot.overlay, view)
+				if profile := terrain_generation_profile_context.profile; profile != nil {
+					profile.cave_overlay_cache_hits += 1
+				}
 				return true
 			}
 		}
+	}
+	if profile := terrain_generation_profile_context.profile; profile != nil {
+		profile.cave_overlay_cache_misses += 1
 	}
 	return false
 }
@@ -453,6 +498,12 @@ terrain_generation_cave_overlay_cache_store_from_base :: proc(
 
 		cache.clock += 1
 		slot := &cache.slots[slot_index]
+		if profile := terrain_generation_profile_context.profile; profile != nil {
+			profile.cave_overlay_cache_stores += 1
+			if slot.valid && !(slot.key == key && slot.coord == coord) {
+				profile.cave_overlay_cache_evictions += 1
+			}
+		}
 		slot.key = key
 		slot.coord = coord
 		slot.overlay = overlay^
@@ -471,6 +522,9 @@ terrain_generation_column_cache_clear :: proc() {
 			cache.slots[i].valid = false
 		}
 		cache.clock = 0
+		if profile := terrain_generation_profile_context.profile; profile != nil {
+			profile.column_cache_clears += 1
+		}
 	}
 }
 
@@ -504,9 +558,15 @@ terrain_generation_column_cache_try_read :: proc(
 					raw_data(slot.columns[:]),
 					int(len(columns) * size_of(TerrainBiomeColumn)),
 				)
+				if profile := terrain_generation_profile_context.profile; profile != nil {
+					profile.column_cache_hits += 1
+				}
 				return true
 			}
 		}
+	}
+	if profile := terrain_generation_profile_context.profile; profile != nil {
+		profile.column_cache_misses += 1
 	}
 	return false
 }
@@ -551,6 +611,13 @@ terrain_generation_column_cache_store :: proc(
 
 		cache.clock += 1
 		slot := &cache.slots[slot_index]
+		if profile := terrain_generation_profile_context.profile; profile != nil {
+			profile.column_cache_stores += 1
+			if slot.valid &&
+			   !(slot.key == key && slot.chunk_x == coord.x && slot.chunk_z == coord.z) {
+				profile.column_cache_evictions += 1
+			}
+		}
 		mem.copy(
 			raw_data(slot.columns[:]),
 			raw_data(columns),
@@ -562,6 +629,111 @@ terrain_generation_column_cache_store :: proc(
 		slot.last_used = cache.clock
 		slot.valid = true
 	}
+}
+
+terrain_water_separator_sample_cache_clear :: proc() {
+	cache := &state.terrain_water_separator_sample_cache
+	sync.lock(&cache.mutex)
+	defer sync.unlock(&cache.mutex)
+
+	for i := 0; i < TERRAIN_WATER_SEPARATOR_SAMPLE_CACHE_CAPACITY; i += 1 {
+		cache.slots[i].valid = false
+	}
+	cache.clock = 0
+}
+
+terrain_water_separator_sample_cache_hash :: proc(
+	key: biomes.FeatureGridKey,
+	world_x, world_z: i32,
+) -> u64 {
+	hash := biomes.feature_grid_key_hash(key)
+	hash = biomes.feature_grid_hash_combine(hash, biomes.feature_grid_hash_i32(world_x))
+	hash = biomes.feature_grid_hash_combine(hash, biomes.feature_grid_hash_i32(world_z))
+	return hash
+}
+
+terrain_water_separator_sample_cache_try_read :: proc(
+	sample: ^TerrainWaterSeparatorSample,
+	key: biomes.FeatureGridKey,
+	world_x, world_z: i32,
+) -> bool {
+	cache := &state.terrain_water_separator_sample_cache
+	hash := terrain_water_separator_sample_cache_hash(key, world_x, world_z)
+	home := int(hash % u64(TERRAIN_WATER_SEPARATOR_SAMPLE_CACHE_CAPACITY))
+
+	sync.lock(&cache.mutex)
+	defer sync.unlock(&cache.mutex)
+
+	for probe := 0; probe < TERRAIN_WATER_SEPARATOR_SAMPLE_CACHE_PROBE_COUNT; probe += 1 {
+		slot_index := (home + probe) % TERRAIN_WATER_SEPARATOR_SAMPLE_CACHE_CAPACITY
+		slot := &cache.slots[slot_index]
+		if !slot.valid {
+			if profile := terrain_generation_profile_context.profile; profile != nil {
+				profile.water_separator_sample_cache_misses += 1
+			}
+			return false
+		}
+		if slot.key == key && slot.world_x == world_x && slot.world_z == world_z {
+			cache.clock += 1
+			slot.last_used = cache.clock
+			sample^ = slot.sample
+			if profile := terrain_generation_profile_context.profile; profile != nil {
+				profile.water_separator_sample_cache_hits += 1
+			}
+			return true
+		}
+	}
+	if profile := terrain_generation_profile_context.profile; profile != nil {
+		profile.water_separator_sample_cache_misses += 1
+	}
+	return false
+}
+
+terrain_water_separator_sample_cache_store :: proc(
+	key: biomes.FeatureGridKey,
+	world_x, world_z: i32,
+	sample: TerrainWaterSeparatorSample,
+) {
+	cache := &state.terrain_water_separator_sample_cache
+	hash := terrain_water_separator_sample_cache_hash(key, world_x, world_z)
+	home := int(hash % u64(TERRAIN_WATER_SEPARATOR_SAMPLE_CACHE_CAPACITY))
+
+	sync.lock(&cache.mutex)
+	defer sync.unlock(&cache.mutex)
+
+	target_index := home
+	oldest_tick := max(u64)
+	for probe := 0; probe < TERRAIN_WATER_SEPARATOR_SAMPLE_CACHE_PROBE_COUNT; probe += 1 {
+		slot_index := (home + probe) % TERRAIN_WATER_SEPARATOR_SAMPLE_CACHE_CAPACITY
+		slot := &cache.slots[slot_index]
+		if slot.valid && slot.key == key && slot.world_x == world_x && slot.world_z == world_z {
+			target_index = slot_index
+			break
+		}
+		if !slot.valid {
+			target_index = slot_index
+			break
+		}
+		if slot.last_used < oldest_tick {
+			oldest_tick = slot.last_used
+			target_index = slot_index
+		}
+	}
+
+	cache.clock += 1
+	slot := &cache.slots[target_index]
+	if profile := terrain_generation_profile_context.profile; profile != nil {
+		profile.water_separator_sample_cache_stores += 1
+		if slot.valid && !(slot.key == key && slot.world_x == world_x && slot.world_z == world_z) {
+			profile.water_separator_sample_cache_evictions += 1
+		}
+	}
+	slot.key = key
+	slot.world_x = world_x
+	slot.world_z = world_z
+	slot.sample = sample
+	slot.last_used = cache.clock
+	slot.valid = true
 }
 
 //////////////////////////////////////
@@ -581,6 +753,9 @@ terrain_generation_region_cache_clear :: proc() {
 		cache.slots[i].valid = false
 	}
 	cache.clock = 0
+	if profile := terrain_generation_profile_context.profile; profile != nil {
+		profile.region_cache_clears += 1
+	}
 }
 
 terrain_generation_region_for_fill :: proc(
@@ -602,6 +777,9 @@ terrain_generation_region_for_fill :: proc(
 				slot.last_used = stamp
 				region := slot.region
 				sync.unlock(&cache.mutex)
+				if profile := terrain_generation_profile_context.profile; profile != nil {
+					profile.region_cache_hits += 1
+				}
 				return region
 			}
 			if slot.last_used < lru_stamp {
@@ -613,6 +791,9 @@ terrain_generation_region_for_fill :: proc(
 		}
 	}
 	sync.unlock(&cache.mutex)
+	if profile := terrain_generation_profile_context.profile; profile != nil {
+		profile.region_cache_misses += 1
+	}
 
 	region := biomes.generation_region_build_for_terrain_fill(key, coord)
 
@@ -621,6 +802,13 @@ terrain_generation_region_for_fill :: proc(
 	target_index := lru_index
 	if empty_index >= 0 {
 		target_index = u32(empty_index)
+	}
+	if profile := terrain_generation_profile_context.profile; profile != nil {
+		profile.region_cache_stores += 1
+		if cache.slots[target_index].valid &&
+		   !(cache.slots[target_index].key == key && cache.slots[target_index].coord == coord) {
+			profile.region_cache_evictions += 1
+		}
 	}
 	cache.slots[target_index] = {
 		valid     = true,

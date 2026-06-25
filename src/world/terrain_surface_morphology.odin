@@ -28,6 +28,8 @@ TerrainSurfaceMorphologyColumnFeatureBounds :: struct {
 	feature_hits: u32,
 }
 
+TERRAIN_SURFACE_MORPHOLOGY_SPIRE_CACHE_CAPACITY :: 4
+
 TerrainSurfaceMorphologyFeatureColumnBands :: struct {
 	active:                 bool,
 	influence:              f32,
@@ -35,6 +37,14 @@ TerrainSurfaceMorphologyFeatureColumnBands :: struct {
 	band_above:             f32,
 	band_below:             f32,
 	subtractive_band_below: f32,
+	spire_distance:         [TERRAIN_SURFACE_MORPHOLOGY_SPIRE_CACHE_CAPACITY]f32,
+	spire_radius:           [TERRAIN_SURFACE_MORPHOLOGY_SPIRE_CACHE_CAPACITY]f32,
+	spire_height:           [TERRAIN_SURFACE_MORPHOLOGY_SPIRE_CACHE_CAPACITY]f32,
+	arch_distance:          f32,
+	arch_t:                 f32,
+	branch_distance:        [biomes.SURFACE_MORPHOLOGY_DENSITY_TEMPLATE_BRANCH_CAPACITY]f32,
+	branch_t:               [biomes.SURFACE_MORPHOLOGY_DENSITY_TEMPLATE_BRANCH_CAPACITY]f32,
+	rib_signal:             f32,
 }
 
 TerrainSurfaceMorphologyColumnFeaturePlan :: struct {
@@ -438,7 +448,11 @@ terrain_surface_morphology_column_feature_plan_write :: proc(
 	world_x, world_z: i32,
 	plan: ^TerrainSurfaceMorphologyColumnFeaturePlan,
 ) {
-	plan^ = {}
+	plan.active = false
+	plan.count = 0
+	plan.band_above = 0
+	plan.band_below = 0
+	plan.subtractive_band_below = 0
 	if feature_count == 0 {
 		return
 	}
@@ -487,6 +501,9 @@ terrain_surface_morphology_feature_column_bands :: proc(
 	bands.band_above = 6
 	template := biomes.surface_morphology_density_template_for_variant(feature.template_variant)
 	for spire_index := u8(0); spire_index < feature.spire_count; spire_index += 1 {
+		if spire_index >= u8(len(bands.spire_distance)) {
+			break
+		}
 		center_x, center_z, spire_radius, spire_height := terrain_surface_morphology_spire_member(
 			feature,
 			template,
@@ -494,11 +511,14 @@ terrain_surface_morphology_feature_column_bands :: proc(
 		)
 		dx := sample_x - center_x
 		dz := sample_z - center_z
+		distance := math.sqrt_f32(dx * dx + dz * dz)
+		bands.spire_distance[spire_index] = distance
+		bands.spire_radius[spire_index] = spire_radius
+		bands.spire_height[spire_index] = spire_height
 		spire_outer_radius := spire_radius * 1.85 + 3
 		if math.abs(dx) > spire_outer_radius || math.abs(dz) > spire_outer_radius {
 			continue
 		}
-		distance := math.sqrt_f32(dx * dx + dz * dz)
 		if distance > spire_outer_radius {
 			continue
 		}
@@ -510,11 +530,13 @@ terrain_surface_morphology_feature_column_bands :: proc(
 		bands.band_below = math.max(bands.band_below, feature.cut_depth_blocks * lateral + 2)
 	}
 	if feature.arch_strength > 0.001 {
-		arch_distance := terrain_surface_morphology_feature_arch_plan_distance(
+		arch_distance, arch_t := terrain_surface_morphology_feature_arch_plan_sample(
 			feature,
 			sample_x,
 			sample_z,
 		)
+		bands.arch_distance = arch_distance
+		bands.arch_t = arch_t
 		arch_radius := math.max(f32(5), feature.radius_blocks * 0.15)
 		if arch_distance <= arch_radius {
 			arch_lateral := 1.0 - math.smoothstep(arch_radius * 0.55, arch_radius, arch_distance)
@@ -541,14 +563,19 @@ terrain_surface_morphology_feature_column_bands :: proc(
 		)
 	}
 	for branch_index := u8(0); branch_index < template.branch_count; branch_index += 1 {
+		if branch_index >= u8(len(bands.branch_distance)) {
+			break
+		}
 		branch := template.branches[branch_index]
 		width := math.max(f32(2), branch.width_blocks)
-		distance, _ := terrain_surface_morphology_feature_template_branch_distance(
+		distance, t := terrain_surface_morphology_feature_template_branch_distance(
 			feature,
 			branch,
 			sample_x,
 			sample_z,
 		)
+		bands.branch_distance[branch_index] = distance
+		bands.branch_t[branch_index] = t
 		if distance > width * 1.75 {
 			continue
 		}
@@ -559,6 +586,14 @@ terrain_surface_morphology_feature_column_bands :: proc(
 		)
 		bands.band_below = math.max(bands.band_below, f32(2) * lateral)
 	}
+	if bands.radial >= 0.34 && bands.radial <= 1.0 {
+		bands.rib_signal = terrain_surface_morphology_feature_rib_signal(
+			feature,
+			template,
+			sample_x,
+			sample_z,
+		)
+	}
 	return bands
 }
 
@@ -567,11 +602,10 @@ terrain_surface_morphology_feature_plan_density_delta :: proc(
 	plan: ^TerrainSurfaceMorphologyColumnFeaturePlan,
 	world_x, world_y, world_z: i32,
 ) -> f32 {
+	_ = world_x
+	_ = world_z
 	density_delta := f32(0)
-	sample_x := f32(world_x) + 0.5
-	sample_y := f32(world_y) + 0.5
-	sample_z := f32(world_z) + 0.5
-	relative_y := sample_y - column.surface_height_blocks
+	relative_y := f32(world_y) + 0.5 - column.surface_height_blocks
 	for i := u32(0); i < plan.count; i += 1 {
 		bands := plan.bands[i]
 		if relative_y < -bands.band_below - 1 || relative_y > bands.band_above + 1 {
@@ -581,11 +615,8 @@ terrain_surface_morphology_feature_plan_density_delta :: proc(
 		feature_delta := terrain_surface_morphology_basalt_spire_field_density(
 			plan.features[i],
 			column,
-			sample_x,
-			sample_y,
-			sample_z,
+			bands,
 			relative_y,
-			bands.radial,
 		)
 		density_delta += feature_delta * bands.influence
 	}
@@ -595,26 +626,23 @@ terrain_surface_morphology_feature_plan_density_delta :: proc(
 terrain_surface_morphology_basalt_spire_field_density :: proc(
 	feature: biomes.SurfaceMorphologyFeature,
 	column: TerrainBiomeColumn,
-	sample_x, sample_y, sample_z, relative_y, radial: f32,
+	bands: TerrainSurfaceMorphologyFeatureColumnBands,
+	relative_y: f32,
 ) -> f32 {
+	_ = column
 	density := f32(0)
 	template := biomes.surface_morphology_density_template_for_variant(feature.template_variant)
 	for spire_index := u8(0); spire_index < feature.spire_count; spire_index += 1 {
-		center_x, center_z, spire_radius, spire_height := terrain_surface_morphology_spire_member(
-			feature,
-			template,
-			spire_index,
-		)
-		dx := sample_x - center_x
-		dz := sample_z - center_z
+		if spire_index >= u8(len(bands.spire_distance)) {
+			break
+		}
+		spire_radius := bands.spire_radius[spire_index]
+		spire_height := bands.spire_height[spire_index]
+		distance := bands.spire_distance[spire_index]
 		height_unit := math.clamp(relative_y / math.max(f32(1), spire_height), f32(0), f32(1))
 		taper := biomes.regional_terrain_field_lerp(f32(1), f32(0.24), height_unit)
 		radius := math.max(f32(2), spire_radius * taper)
 		max_distance := radius * 2.22
-		if math.abs(dx) > max_distance || math.abs(dz) > max_distance {
-			continue
-		}
-		distance := math.sqrt_f32(dx * dx + dz * dz)
 		if distance > max_distance {
 			continue
 		}
@@ -637,45 +665,31 @@ terrain_surface_morphology_basalt_spire_field_density :: proc(
 		density += shelf * feature.shelf_strength * template.shelf_strength_scale * core * 5.5
 	}
 
-	if template.branch_count > 0 && radial <= 1.0 {
-		density += terrain_surface_morphology_feature_template_branch_density(
+	if template.branch_count > 0 && bands.radial <= 1.0 {
+		density += terrain_surface_morphology_feature_template_branch_density_from_bands(
 			feature,
 			template,
-			sample_x,
-			sample_z,
+			bands,
 			relative_y,
 		)
 	}
 
 	if feature.arch_strength > 0.001 {
-		arch_distance := terrain_surface_morphology_feature_arch_plan_distance(
-			feature,
-			sample_x,
-			sample_z,
-		)
 		arch_radius := math.max(f32(5), feature.radius_blocks * 0.15)
-		if arch_distance <= arch_radius {
-			density += terrain_surface_morphology_feature_arch_density(
+		if bands.arch_distance <= arch_radius {
+			density += terrain_surface_morphology_feature_arch_density_from_plan(
 				feature,
-				column,
-				sample_x,
-				sample_y,
-				sample_z,
+				bands.arch_distance,
+				bands.arch_t,
 				relative_y,
 			)
 		}
 	}
 
-	if radial >= 0.34 && radial <= 1.0 {
-		outer_rib := terrain_surface_morphology_feature_rib_signal(
-			feature,
-			template,
-			sample_x,
-			sample_z,
-		)
+	if bands.radial >= 0.34 && bands.radial <= 1.0 {
 		outer_band :=
-			math.smoothstep(f32(0.38), f32(0.78), radial) *
-			(1.0 - math.smoothstep(f32(0.82), f32(1.12), radial))
+			math.smoothstep(f32(0.38), f32(0.78), bands.radial) *
+			(1.0 - math.smoothstep(f32(0.82), f32(1.12), bands.radial))
 		vertical_fade :=
 			1.0 -
 			math.smoothstep(
@@ -684,7 +698,7 @@ terrain_surface_morphology_basalt_spire_field_density :: proc(
 				math.max(relative_y, f32(0)),
 			)
 		density +=
-			outer_rib *
+			bands.rib_signal *
 			outer_band *
 			vertical_fade *
 			feature.shelf_strength *
@@ -742,10 +756,13 @@ terrain_surface_morphology_spire_member :: proc(
 	return
 }
 
-terrain_surface_morphology_feature_arch_plan_distance :: proc(
+terrain_surface_morphology_feature_arch_plan_sample :: proc(
 	feature: biomes.SurfaceMorphologyFeature,
 	sample_x, sample_z: f32,
-) -> f32 {
+) -> (
+	distance: f32,
+	t: f32,
+) {
 	dir_x := math.cos(feature.rotation_radians)
 	dir_z := math.sin(feature.rotation_radians)
 	half_span := feature.radius_blocks * 0.38
@@ -756,7 +773,7 @@ terrain_surface_morphology_feature_arch_plan_distance :: proc(
 	seg_x := bx - ax
 	seg_z := bz - az
 	seg_len_sq := math.max(seg_x * seg_x + seg_z * seg_z, f32(0.001))
-	t := math.clamp(
+	t = math.clamp(
 		((sample_x - ax) * seg_x + (sample_z - az) * seg_z) / seg_len_sq,
 		f32(0),
 		f32(1),
@@ -765,35 +782,14 @@ terrain_surface_morphology_feature_arch_plan_distance :: proc(
 	nearest_z := az + seg_z * t
 	dx := sample_x - nearest_x
 	dz := sample_z - nearest_z
-	return math.sqrt_f32(dx * dx + dz * dz)
+	distance = math.sqrt_f32(dx * dx + dz * dz)
+	return
 }
 
-terrain_surface_morphology_feature_arch_density :: proc(
+terrain_surface_morphology_feature_arch_density_from_plan :: proc(
 	feature: biomes.SurfaceMorphologyFeature,
-	column: TerrainBiomeColumn,
-	sample_x, sample_y, sample_z, relative_y: f32,
+	span_distance, t, relative_y: f32,
 ) -> f32 {
-	_ = column
-	dir_x := math.cos(feature.rotation_radians)
-	dir_z := math.sin(feature.rotation_radians)
-	half_span := feature.radius_blocks * 0.38
-	ax := feature.x - dir_x * half_span
-	az := feature.z - dir_z * half_span
-	bx := feature.x + dir_x * half_span
-	bz := feature.z + dir_z * half_span
-	seg_x := bx - ax
-	seg_z := bz - az
-	seg_len_sq := math.max(seg_x * seg_x + seg_z * seg_z, f32(0.001))
-	t := math.clamp(
-		((sample_x - ax) * seg_x + (sample_z - az) * seg_z) / seg_len_sq,
-		f32(0),
-		f32(1),
-	)
-	nearest_x := ax + seg_x * t
-	nearest_z := az + seg_z * t
-	dx := sample_x - nearest_x
-	dz := sample_z - nearest_z
-	span_distance := math.sqrt_f32(dx * dx + dz * dz)
 	arch_center_y := feature.height_blocks * 0.30
 	arch_rise := math.sin(t * f32(3.14159265359)) * feature.height_blocks * 0.16
 	bridge_y := arch_center_y + arch_rise
@@ -856,25 +852,25 @@ terrain_surface_morphology_feature_template_branch_distance :: proc(
 	return
 }
 
-terrain_surface_morphology_feature_template_branch_density :: proc(
+terrain_surface_morphology_feature_template_branch_density_from_bands :: proc(
 	feature: biomes.SurfaceMorphologyFeature,
 	template: biomes.SurfaceMorphologyDensityTemplate,
-	sample_x, sample_z, relative_y: f32,
+	bands: TerrainSurfaceMorphologyFeatureColumnBands,
+	relative_y: f32,
 ) -> f32 {
 	density := f32(0)
 	for branch_index := u8(0); branch_index < template.branch_count; branch_index += 1 {
+		if branch_index >= u8(len(bands.branch_distance)) {
+			break
+		}
 		branch := template.branches[branch_index]
 		width := math.max(f32(2), branch.width_blocks)
-		distance, t := terrain_surface_morphology_feature_template_branch_distance(
-			feature,
-			branch,
-			sample_x,
-			sample_z,
-		)
+		distance := bands.branch_distance[branch_index]
 		if distance > width * 1.75 {
 			continue
 		}
 
+		t := bands.branch_t[branch_index]
 		lateral := 1.0 - math.smoothstep(width * 0.55, width * 1.75, distance)
 		height_band := math.max(f32(4), feature.height_blocks * branch.height_scale)
 		vertical :=

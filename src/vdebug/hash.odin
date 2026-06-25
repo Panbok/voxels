@@ -18,7 +18,3 @@ hash_bytes_hex :: proc(data: []byte, allocator := context.allocator) -> string {
 	}
 	return strings.clone(strings.to_string(builder), allocator)
 }
-
-hash_string_hex :: proc(data: string, allocator := context.allocator) -> string {
-	return hash_bytes_hex(transmute([]byte)data, allocator)
-}

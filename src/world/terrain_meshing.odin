@@ -10,6 +10,7 @@ import "core:mem"
 /////////////////////////////////////
 
 LOG_CHUNK_MESH_COMMITS :: #config(LOG_CHUNK_MESH_COMMITS, false)
+TERRAIN_BINARY_DYNAMIC_MESH_INITIAL_FACE_CAPACITY :: 4096
 
 //////////////////////////////////////
 // Chunk Mesh Job Types
@@ -22,6 +23,7 @@ ChunkMeshBatchStats :: struct {
 	chunks_empty:     u32,
 	chunks_stale:     u32,
 	total_faces:      u32,
+	mesh_duration_us: u64,
 }
 
 ChunkMeshSnapshotRefSet :: struct {
@@ -165,6 +167,108 @@ terrain_emit_quad :: proc(
 	indices[i + 5] = base + 3
 }
 
+terrain_emit_quad_dynamic :: proc(
+	vertices: ^[dynamic]world_async.TerrainPackedVertex,
+	indices: ^[dynamic]u32,
+	face_index: u32,
+	min_x, min_y, min_z, max_x, max_y, max_z: u32,
+	normal_id: u32,
+	material_id: u32,
+) {
+	vertex_index := face_index * 4
+	log.assertf(
+		u32(len(vertices^)) == vertex_index,
+		"terrain mesh dynamic vertex cursor mismatch: expected=%d got=%d",
+		vertex_index,
+		len(vertices^),
+	)
+	log.assertf(normal_id < 6, "terrain face normal_id out of range: %d", normal_id)
+	if cap(vertices^) == 0 {
+		vertex_reserve_err := reserve(
+			vertices,
+			int(TERRAIN_BINARY_DYNAMIC_MESH_INITIAL_FACE_CAPACITY) * 4,
+		)
+		index_reserve_err := reserve(
+			indices,
+			int(TERRAIN_BINARY_DYNAMIC_MESH_INITIAL_FACE_CAPACITY) * 6,
+		)
+		log.assertf(
+			vertex_reserve_err == nil && index_reserve_err == nil,
+			"terrain mesh dynamic reserve failed: vertices_err=%v indices_err=%v",
+			vertex_reserve_err,
+			index_reserve_err,
+		)
+	}
+
+	corners: [4]TerrainGridPoint
+	switch normal_id {
+	case 0:
+		corners = {
+			{max_x, min_y, min_z},
+			{max_x, max_y, min_z},
+			{max_x, max_y, max_z},
+			{max_x, min_y, max_z},
+		}
+	case 1:
+		corners = {
+			{min_x, min_y, min_z},
+			{min_x, min_y, max_z},
+			{min_x, max_y, max_z},
+			{min_x, max_y, min_z},
+		}
+	case 2:
+		corners = {
+			{min_x, max_y, min_z},
+			{min_x, max_y, max_z},
+			{max_x, max_y, max_z},
+			{max_x, max_y, min_z},
+		}
+	case 3:
+		corners = {
+			{min_x, min_y, min_z},
+			{max_x, min_y, min_z},
+			{max_x, min_y, max_z},
+			{min_x, min_y, max_z},
+		}
+	case 4:
+		corners = {
+			{min_x, min_y, max_z},
+			{max_x, min_y, max_z},
+			{max_x, max_y, max_z},
+			{min_x, max_y, max_z},
+		}
+	case 5:
+		corners = {
+			{min_x, min_y, min_z},
+			{min_x, max_y, min_z},
+			{max_x, max_y, min_z},
+			{max_x, min_y, min_z},
+		}
+	}
+
+	quad_vertices: [4]world_async.TerrainPackedVertex
+	for corner, corner_idx in corners {
+		quad_vertices[corner_idx] = terrain_pack_vertex(
+			corner.x,
+			corner.y,
+			corner.z,
+			normal_id,
+			material_id,
+		)
+	}
+	append(vertices, ..quad_vertices[:])
+
+	quad_indices := [?]u32 {
+		vertex_index + 0,
+		vertex_index + 1,
+		vertex_index + 2,
+		vertex_index + 0,
+		vertex_index + 2,
+		vertex_index + 3,
+	}
+	append(indices, ..quad_indices[:])
+}
+
 terrain_binary_greedy_emit_rect :: proc(
 	vertices: []world_async.TerrainPackedVertex,
 	indices: []u32,
@@ -181,6 +285,36 @@ terrain_binary_greedy_emit_rect :: proc(
 		v1,
 	)
 	terrain_emit_quad(
+		vertices,
+		indices,
+		face_index,
+		min_x,
+		min_y,
+		min_z,
+		max_x,
+		max_y,
+		max_z,
+		normal_id,
+		material_id,
+	)
+}
+
+terrain_binary_greedy_emit_rect_dynamic :: proc(
+	vertices: ^[dynamic]world_async.TerrainPackedVertex,
+	indices: ^[dynamic]u32,
+	face_index: u32,
+	normal_id, slice, u0, v0, u1, v1: u32,
+	material_id: u32,
+) {
+	min_x, min_y, min_z, max_x, max_y, max_z := terrain_binary_greedy_rect_bounds_from_axes(
+		normal_id,
+		slice,
+		u0,
+		v0,
+		u1,
+		v1,
+	)
+	terrain_emit_quad_dynamic(
 		vertices,
 		indices,
 		face_index,
@@ -1055,6 +1189,123 @@ terrain_binary_greedy_material_process :: proc(
 	}
 }
 
+terrain_binary_greedy_sparse_face_count :: proc(
+	rows: []u64,
+	v_min, v_max: u32,
+	u_mask: u64,
+) -> (
+	face_count: u32,
+	ok: bool,
+) {
+	previous_row: u64
+	for v := v_min; v < v_max; v += 1 {
+		row := rows[v] & u_mask
+		if row == 0 {
+			previous_row = 0
+			continue
+		}
+		if (row & (row << 1)) != 0 || (row & previous_row) != 0 {
+			return 0, false
+		}
+		face_count += u32(bits.count_ones(row))
+		previous_row = row
+	}
+	return face_count, true
+}
+
+terrain_binary_greedy_material_count :: proc(rows: []u64) -> u32 {
+	log.assertf(
+		len(rows) == CHUNK_BLOCK_LENGTH,
+		"binary greedy material rows must have %d rows, got %d",
+		CHUNK_BLOCK_LENGTH,
+		len(rows),
+	)
+	if face_count, ok := terrain_binary_greedy_sparse_face_count(
+		rows,
+		0,
+		CHUNK_BLOCK_LENGTH,
+		~u64(0),
+	); ok {
+		return face_count
+	}
+
+	face_count: u32
+	for v := u32(0); v < CHUNK_BLOCK_LENGTH; v += 1 {
+		for rows[v] != 0 {
+			row := rows[v]
+			u := u32(bits.trailing_zeros(row))
+			width := terrain_binary_row_run_width(row, u)
+			rect_mask := terrain_binary_rect_mask(u, width)
+
+			height := u32(1)
+			for v + height < CHUNK_BLOCK_LENGTH {
+				next_row := rows[v + height]
+				if (next_row & rect_mask) != rect_mask {
+					break
+				}
+				height += 1
+			}
+
+			face_count += 1
+			for clear_v := v; clear_v < v + height; clear_v += 1 {
+				rows[clear_v] &~= rect_mask
+			}
+		}
+	}
+	return face_count
+}
+
+terrain_binary_greedy_material_emit_dynamic :: proc(
+	rows: []u64,
+	normal_id, slice: u32,
+	material_id: u32,
+	vertices: ^[dynamic]world_async.TerrainPackedVertex,
+	indices: ^[dynamic]u32,
+	face_cursor: ^u32,
+) {
+	log.assertf(
+		len(rows) == CHUNK_BLOCK_LENGTH,
+		"binary greedy material rows must have %d rows, got %d",
+		CHUNK_BLOCK_LENGTH,
+		len(rows),
+	)
+	for v := u32(0); v < CHUNK_BLOCK_LENGTH; v += 1 {
+		for rows[v] != 0 {
+			row := rows[v]
+			u := u32(bits.trailing_zeros(row))
+			width := terrain_binary_row_run_width(row, u)
+			rect_mask := terrain_binary_rect_mask(u, width)
+
+			height := u32(1)
+			for v + height < CHUNK_BLOCK_LENGTH {
+				next_row := rows[v + height]
+				if (next_row & rect_mask) != rect_mask {
+					break
+				}
+				height += 1
+			}
+
+			terrain_binary_greedy_emit_rect_dynamic(
+				vertices,
+				indices,
+				face_cursor^,
+				normal_id,
+				slice,
+				u,
+				v,
+				u + width,
+				v + height,
+				material_id,
+			)
+			face_cursor^ += 1
+
+			for clear_v := v; clear_v < v + height; clear_v += 1 {
+				rows[clear_v] &~= rect_mask
+			}
+		}
+	}
+}
+
 terrain_binary_face_masks_process :: proc(
 	scratch: ^TerrainBinaryGreedyScratch,
 	normal_id: u32,
@@ -1072,7 +1323,45 @@ terrain_binary_face_masks_process :: proc(
 				material_bit := u32(bits.trailing_zeros(material_mask))
 				face_variant_idx := mask_word * 64 + material_bit
 				material_id := terrain_binary_face_variant_material_id(face_variant_idx)
-				terrain_binary_greedy_material_process(
+				if emit {
+					terrain_binary_greedy_material_process(
+						scratch.face_masks[slice][face_variant_idx][:],
+						normal_id,
+						slice,
+						material_id,
+						vertices,
+						indices,
+						face_cursor,
+						true,
+					)
+				} else {
+					face_cursor^ += terrain_binary_greedy_material_count(
+						scratch.face_masks[slice][face_variant_idx][:],
+					)
+				}
+				material_mask &~= u64(1) << material_bit
+			}
+		}
+	}
+}
+
+terrain_binary_face_masks_emit_dynamic :: proc(
+	scratch: ^TerrainBinaryGreedyScratch,
+	normal_id: u32,
+	vertices: ^[dynamic]world_async.TerrainPackedVertex,
+	indices: ^[dynamic]u32,
+	face_cursor: ^u32,
+) {
+	for slice := u32(0); slice < CHUNK_BLOCK_LENGTH; slice += 1 {
+		for mask_word := u32(0);
+		    mask_word < TERRAIN_MATERIAL_FACE_VARIANT_MASK_WORD_COUNT;
+		    mask_word += 1 {
+			material_mask := scratch.face_material_masks[slice][mask_word]
+			for material_mask != 0 {
+				material_bit := u32(bits.trailing_zeros(material_mask))
+				face_variant_idx := mask_word * 64 + material_bit
+				material_id := terrain_binary_face_variant_material_id(face_variant_idx)
+				terrain_binary_greedy_material_emit_dynamic(
 					scratch.face_masks[slice][face_variant_idx][:],
 					normal_id,
 					slice,
@@ -1080,7 +1369,6 @@ terrain_binary_face_masks_process :: proc(
 					vertices,
 					indices,
 					face_cursor,
-					emit,
 				)
 				material_mask &~= u64(1) << material_bit
 			}
@@ -1129,6 +1417,54 @@ terrain_binary_axis_bounds_from_chunk_bounds :: proc(
 
 	log.assertf(false, "unhandled binary greedy normal_id: %d", normal_id)
 	return
+}
+
+terrain_binary_greedy_material_count_bounds :: proc(
+	rows: []u64,
+	u_min, u_max, v_min, v_max: u32,
+) -> u32 {
+	log.assertf(
+		len(rows) == CHUNK_BLOCK_LENGTH,
+		"binary greedy material rows must have %d rows, got %d",
+		CHUNK_BLOCK_LENGTH,
+		len(rows),
+	)
+	log.assertf(u_min < u_max && u_max <= CHUNK_BLOCK_LENGTH, "binary greedy u bounds invalid")
+	log.assertf(v_min < v_max && v_max <= CHUNK_BLOCK_LENGTH, "binary greedy v bounds invalid")
+
+	u_mask := terrain_binary_rect_mask(u_min, u_max - u_min)
+	if face_count, ok := terrain_binary_greedy_sparse_face_count(rows, v_min, v_max, u_mask); ok {
+		return face_count
+	}
+
+	face_count: u32
+	for v := v_min; v < v_max; v += 1 {
+		for {
+			row := rows[v] & u_mask
+			if row == 0 {
+				break
+			}
+
+			u := u32(bits.trailing_zeros(row))
+			width := terrain_binary_row_run_width(row, u)
+			rect_mask := terrain_binary_rect_mask(u, width)
+
+			height := u32(1)
+			for v + height < v_max {
+				next_row := rows[v + height] & u_mask
+				if (next_row & rect_mask) != rect_mask {
+					break
+				}
+				height += 1
+			}
+
+			face_count += 1
+			for clear_v := v; clear_v < v + height; clear_v += 1 {
+				rows[clear_v] &~= rect_mask
+			}
+		}
+	}
+	return face_count
 }
 
 terrain_binary_greedy_material_process_bounds :: proc(
@@ -1214,20 +1550,30 @@ terrain_binary_face_masks_process_bounds :: proc(
 				material_bit := u32(bits.trailing_zeros(material_mask))
 				face_variant_idx := mask_word * 64 + material_bit
 				material_id := terrain_binary_face_variant_material_id(face_variant_idx)
-				terrain_binary_greedy_material_process_bounds(
-					scratch.face_masks[slice][face_variant_idx][:],
-					normal_id,
-					slice,
-					material_id,
-					u_min,
-					u_max,
-					v_min,
-					v_max,
-					vertices,
-					indices,
-					face_cursor,
-					emit,
-				)
+				if emit {
+					terrain_binary_greedy_material_process_bounds(
+						scratch.face_masks[slice][face_variant_idx][:],
+						normal_id,
+						slice,
+						material_id,
+						u_min,
+						u_max,
+						v_min,
+						v_max,
+						vertices,
+						indices,
+						face_cursor,
+						true,
+					)
+				} else {
+					face_cursor^ += terrain_binary_greedy_material_count_bounds(
+						scratch.face_masks[slice][face_variant_idx][:],
+						u_min,
+						u_max,
+						v_min,
+						v_max,
+					)
+				}
 				material_mask &~= u64(1) << material_bit
 			}
 		}
@@ -1274,9 +1620,9 @@ chunk_voxel_view_build_binary_greedy_mesh :: proc(
 	neighbor_snapshots: Maybe(world_async.ChunkMeshNeighborSnapshots) = nil,
 ) -> world_async.ChunkMeshOutput {
 	terrain_binary_axis_rows_build_all(scratch, view)
-	vertices: []world_async.TerrainPackedVertex
-	indices: []u32
-	face_count: u32
+	vertices := make([dynamic]world_async.TerrainPackedVertex, 0, 0, allocator)
+	indices := make([dynamic]u32, 0, 0, allocator)
+	face_cursor: u32
 	for normal_id := u32(0); normal_id < 6; normal_id += 1 {
 		terrain_binary_face_masks_build(
 			scratch,
@@ -1285,15 +1631,15 @@ chunk_voxel_view_build_binary_greedy_mesh :: proc(
 			boundary_policy,
 			neighbor_snapshots,
 		)
-		terrain_binary_face_masks_process(
+		terrain_binary_face_masks_emit_dynamic(
 			scratch,
 			normal_id,
-			vertices,
-			indices,
-			&face_count,
-			false,
+			&vertices,
+			&indices,
+			&face_cursor,
 		)
 	}
+	face_count := face_cursor
 	if face_count == 0 {
 		return {}
 	}
@@ -1312,65 +1658,39 @@ chunk_voxel_view_build_binary_greedy_mesh :: proc(
 	expected_vertex_count := int(face_count) * 4
 	expected_index_count := int(face_count) * 6
 	output := world_async.ChunkMeshOutput {
-			vertices   = make([]world_async.TerrainPackedVertex, expected_vertex_count, allocator),
-			indices    = make([]u32, expected_index_count, allocator),
-			face_count = face_count,
-		}
+		vertices   = vertices[:],
+		indices    = indices[:],
+		face_count = face_count,
+	}
 	log.assertf(
 		len(output.vertices) == expected_vertex_count,
-		"chunk binary greedy mesh vertex allocation failed: expected=%d got=%d faces=%d",
+		"chunk binary greedy mesh vertex count mismatch: expected=%d got=%d faces=%d",
 		expected_vertex_count,
 		len(output.vertices),
 		face_count,
 	)
 	log.assertf(
 		len(output.indices) == expected_index_count,
-		"chunk binary greedy mesh index allocation failed: expected=%d got=%d faces=%d",
+		"chunk binary greedy mesh index count mismatch: expected=%d got=%d faces=%d",
 		expected_index_count,
 		len(output.indices),
 		face_count,
 	)
-
-	face_cursor: u32
-	for normal_id := u32(0); normal_id < 6; normal_id += 1 {
-		terrain_binary_face_masks_build(
-			scratch,
-			view,
-			normal_id,
-			boundary_policy,
-			neighbor_snapshots,
-		)
-		terrain_binary_face_masks_process(
-			scratch,
-			normal_id,
-			output.vertices,
-			output.indices,
-			&face_cursor,
-			true,
-		)
-	}
-	log.assertf(
-		face_cursor == face_count,
-		"binary greedy face count mismatch: count=%d emit=%d",
-		face_count,
-		face_cursor,
-	)
-
 	return output
 }
 
-chunk_voxel_view_count_binary_greedy_faces_in_bounds :: proc(
+chunk_voxel_view_build_binary_greedy_mesh_in_bounds :: proc(
 	view: world_async.ChunkVoxelView,
 	min_bound, max_bound: world_async.BlockCoord,
 	boundary_policy: world_async.ChunkMeshBoundaryPolicy,
+	allocator: mem.Allocator,
 	scratch: ^TerrainBinaryGreedyScratch,
 	neighbor_snapshots: Maybe(world_async.ChunkMeshNeighborSnapshots) = nil,
-) -> u32 {
+) -> world_async.ChunkMeshOutput {
 	terrain_binary_axis_rows_build_all(scratch, view)
 	vertices: []world_async.TerrainPackedVertex
 	indices: []u32
 	face_count: u32
-
 	for normal_id := u32(0); normal_id < 6; normal_id += 1 {
 		terrain_binary_face_masks_build(
 			scratch,
@@ -1390,26 +1710,6 @@ chunk_voxel_view_count_binary_greedy_faces_in_bounds :: proc(
 			false,
 		)
 	}
-
-	return face_count
-}
-
-chunk_voxel_view_build_binary_greedy_mesh_in_bounds :: proc(
-	view: world_async.ChunkVoxelView,
-	min_bound, max_bound: world_async.BlockCoord,
-	boundary_policy: world_async.ChunkMeshBoundaryPolicy,
-	allocator: mem.Allocator,
-	scratch: ^TerrainBinaryGreedyScratch,
-	neighbor_snapshots: Maybe(world_async.ChunkMeshNeighborSnapshots) = nil,
-) -> world_async.ChunkMeshOutput {
-	face_count := chunk_voxel_view_count_binary_greedy_faces_in_bounds(
-		view,
-		min_bound,
-		max_bound,
-		boundary_policy,
-		scratch,
-		neighbor_snapshots,
-	)
 	if face_count == 0 {
 		return {}
 	}
@@ -1447,7 +1747,6 @@ chunk_voxel_view_build_binary_greedy_mesh_in_bounds :: proc(
 		face_count,
 	)
 
-	terrain_binary_axis_rows_build_all(scratch, view)
 	face_cursor: u32
 	for normal_id := u32(0); normal_id < 6; normal_id += 1 {
 		terrain_binary_face_masks_build(

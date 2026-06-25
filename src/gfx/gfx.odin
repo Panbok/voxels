@@ -15,6 +15,7 @@ import mem_tlsf "core:mem/tlsf"
 import "core:os"
 import "core:slice"
 import "core:strings"
+import "core:time"
 
 //////////////////////////////////////
 // Constants
@@ -81,6 +82,11 @@ RenderStats :: struct {
 	deferred_geometry_count:             u32,
 	deferred_release_enqueued_total:     u64,
 	deferred_release_completed_total:    u64,
+	mesh_upload_count:                   u32,
+	mesh_upload_us:                      u64,
+	mesh_upload_vertex_bytes:            u64,
+	mesh_upload_index_bytes:             u64,
+	mesh_upload_bytes:                   u64,
 }
 
 GraphicsState :: struct {
@@ -114,6 +120,10 @@ state := struct {
 
 	// Metrics
 	render_stats:                       RenderStats,
+	mesh_upload_count:                  u32,
+	mesh_upload_us:                     u64,
+	mesh_upload_vertex_bytes:           u64,
+	mesh_upload_index_bytes:            u64,
 
 	// State
 	initialized:                        bool,
@@ -125,6 +135,30 @@ state := struct {
 	use_cave_debug_visualization:       bool,
 	use_decoration_debug_visualization: bool,
 }{}
+
+//////////////////////////////////////
+// Metadata Methods
+/////////////////////////////////////
+
+renderer_default_driver_name :: proc() -> string {
+	when ODIN_OS == .Windows {
+		return "direct3d12"
+	} else when ODIN_OS == .Darwin {
+		return "metal"
+	} else {
+		return "default"
+	}
+}
+
+renderer_shader_format_name :: proc() -> string {
+	when ODIN_OS == .Windows {
+		return "dxil"
+	} else when ODIN_OS == .Darwin {
+		return "msl"
+	} else {
+		return "dxil"
+	}
+}
 
 //////////////////////////////////////
 // Lifecycle Methods
@@ -383,7 +417,17 @@ chunk_mesh_upload :: proc(
 	old_id: world.ChunkGeometryID,
 	output: world_async.ChunkMeshOutput,
 ) -> world.ChunkGeometryID {
+	upload_start := time.tick_now()
+	vertex_bytes := u64(len(output.vertices)) * u64(size_of(world_async.TerrainPackedVertex))
+	index_bytes := u64(len(output.indices)) * u64(size_of(u32))
 	new_id := geometry_replace(&state.geometry_pool, GeometryID(old_id), output)
+	upload_us := u64(time.duration_microseconds(time.tick_since(upload_start)))
+	if output.face_count > 0 {
+		state.mesh_upload_count += 1
+		state.mesh_upload_us += upload_us
+		state.mesh_upload_vertex_bytes += vertex_bytes
+		state.mesh_upload_index_bytes += index_bytes
+	}
 	return world.ChunkGeometryID(new_id)
 }
 
@@ -1536,6 +1580,16 @@ terrain_draw_visible :: proc(
 
 render :: proc() -> RenderStats {
 	state.render_stats = {}
+	state.render_stats.mesh_upload_count = state.mesh_upload_count
+	state.render_stats.mesh_upload_us = state.mesh_upload_us
+	state.render_stats.mesh_upload_vertex_bytes = state.mesh_upload_vertex_bytes
+	state.render_stats.mesh_upload_index_bytes = state.mesh_upload_index_bytes
+	state.render_stats.mesh_upload_bytes =
+		state.mesh_upload_vertex_bytes + state.mesh_upload_index_bytes
+	state.mesh_upload_count = 0
+	state.mesh_upload_us = 0
+	state.mesh_upload_vertex_bytes = 0
+	state.mesh_upload_index_bytes = 0
 	cmdbuf := sdl.AcquireGPUCommandBuffer(state.device)
 	log.assertf(cmdbuf != nil, "AcquireGPUCommandBuffer failed: %s", sdl.GetError())
 

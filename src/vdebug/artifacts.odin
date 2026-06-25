@@ -32,25 +32,6 @@ artifact_path_make :: proc(
 	return path_join2(dir, filename, ctx.allocator), true
 }
 
-artifact_write_text :: proc(
-	ctx: ^VisualDebugContext,
-	label: string,
-	kind: string,
-	content: string,
-) -> (
-	VisualDebugArtifactRecord,
-	bool,
-) {
-	return artifact_write_bytes(
-		ctx,
-		label,
-		kind,
-		"text/plain; charset=utf-8",
-		transmute([]byte)content,
-		"txt",
-	)
-}
-
 artifact_write_json_text :: proc(
 	ctx: ^VisualDebugContext,
 	label: string,

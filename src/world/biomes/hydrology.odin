@@ -1619,16 +1619,46 @@ when ODIN_DEBUG {
 			"subterranean water owner returned a non-subterranean Water Feature",
 		)
 
-		segment, segment_exists := water_feature_surface_segment_from_owners(
-			key,
-			owner,
-			{x = owner.x + 1, z = owner.z},
-		)
-		_ = segment_exists
-		log.assert(
-			segment.from_node_id == node.id,
-			"surface Water Feature Graph segment must retain its source node",
-		)
+		segment_checked := false
+		surface_sample_block_x: i32
+		surface_sample_block_z: i32
+		for test_z := i32(-32); test_z <= 32 && !segment_checked; test_z += 1 {
+			for test_x := i32(-32); test_x <= 32 && !segment_checked; test_x += 1 {
+				test_owner := FeatureGridCoord2 {
+					x = test_x,
+					z = test_z,
+				}
+				for neighbor_axis := 0; neighbor_axis < 2 && !segment_checked; neighbor_axis += 1 {
+					test_neighbor := FeatureGridCoord2 {
+						x = test_x,
+						z = test_z,
+					}
+					if neighbor_axis == 0 {
+						test_neighbor.x += 1
+					} else {
+						test_neighbor.z += 1
+					}
+					from_node := water_feature_surface_node_from_owner(key, test_owner)
+					to_node := water_feature_surface_node_from_owner(key, test_neighbor)
+					segment, segment_exists := water_feature_surface_segment_from_owners(
+						key,
+						test_owner,
+						test_neighbor,
+					)
+					if !segment_exists {
+						continue
+					}
+					log.assert(
+						segment.from_node_id == from_node.id && segment.to_node_id == to_node.id,
+						"surface Water Feature Graph segment must retain its endpoint nodes",
+					)
+					surface_sample_block_x = i32(math.floor_f32(from_node.x))
+					surface_sample_block_z = i32(math.floor_f32(from_node.z))
+					segment_checked = true
+				}
+			}
+		}
+		log.assert(segment_checked, "surface Water Feature Graph should emit a test segment")
 		incompatible_segment_checked := false
 		for test_z := i32(-3); test_z <= 3 && !incompatible_segment_checked; test_z += 1 {
 			for test_x := i32(-3); test_x <= 3 && !incompatible_segment_checked; test_x += 1 {
@@ -1668,8 +1698,8 @@ when ODIN_DEBUG {
 
 		surface_sample := hydrology_layer_surface_sample(
 			key,
-			i32(math.floor_f32(node.x)),
-			i32(math.floor_f32(node.z)),
+			surface_sample_block_x,
+			surface_sample_block_z,
 		)
 		log.assert(
 			surface_sample.feature_count > 0 && surface_sample.floor_depression_blocks > 0,

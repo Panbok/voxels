@@ -329,10 +329,6 @@ status_fail :: proc(message: string) -> VisualDebugStatus {
 	return {kind = .Fail, message = message}
 }
 
-status_skip :: proc(message: string) -> VisualDebugStatus {
-	return {kind = .Skip, message = message}
-}
-
 registry_init :: proc(registry: ^VisualDebugRegistry, allocator: mem.Allocator) {
 	registry^ = {
 		allocator = allocator,
@@ -470,15 +466,6 @@ metadata_i64 :: proc(
 	unit: string = "",
 ) {
 	metadata_add(writer, {name = name, kind = .I64, i64_value = value, unit = unit})
-}
-
-metadata_f64 :: proc(
-	writer: ^VisualDebugMetadataWriter,
-	name: string,
-	value: f64,
-	unit: string = "",
-) {
-	metadata_add(writer, {name = name, kind = .F64, f64_value = value, unit = unit})
 }
 
 metadata_bool :: proc(writer: ^VisualDebugMetadataWriter, name: string, value: bool) {

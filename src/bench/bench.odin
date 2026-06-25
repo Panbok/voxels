@@ -13,7 +13,7 @@ BENCHMARKS_ENABLED :: #config(BENCHMARKS_ENABLED, true)
 BENCHMARK_MAX_CASES :: 128
 BENCHMARK_MAX_SELECTIONS :: 64
 BENCHMARK_MAX_GRAPH_INPUTS :: 64
-BENCHMARK_MAX_METRICS :: 64
+BENCHMARK_MAX_METRICS :: 128
 BENCHMARK_MAX_METADATA :: 96
 BENCHMARK_MAX_ARTIFACTS :: 32
 BENCHMARK_WORKER_TEMP_BYTES :: #config(BENCHMARK_WORKER_TEMP_BYTES, 16 * mem.Megabyte)
@@ -294,10 +294,6 @@ status_fail :: proc(message: string) -> BenchmarkStatus {
 	return {kind = .Fail, message = message}
 }
 
-status_skip :: proc(message: string) -> BenchmarkStatus {
-	return {kind = .Skip, message = message}
-}
-
 registry_init :: proc(registry: ^BenchmarkRegistry, allocator: mem.Allocator) {
 	registry^ = {
 		allocator = allocator,
@@ -368,7 +364,8 @@ register :: proc(
 	}
 	if !case_options.default_in_all &&
 	   !case_has_flag(case_options.flags, .Runtime_Owns_Main_Loop) &&
-	   !case_has_flag(case_options.flags, .Emits_Artifacts) {
+	   !case_has_flag(case_options.flags, .Emits_Artifacts) &&
+	   !case_has_flag(case_options.flags, .Measures_Cache_Contention) {
 		case_options.default_in_all = true
 	}
 	if case_options.data_size < 0 || case_options.result_size < 0 {

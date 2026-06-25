@@ -311,6 +311,7 @@ world_visual_generate_view :: proc(
 		terrain_generation_chunk_cache_clear()
 		terrain_generation_cave_overlay_cache_clear()
 		terrain_generation_column_cache_clear()
+		terrain_water_separator_sample_cache_clear()
 		terrain_heightfield_voxel_view_fill_quality(
 			view,
 			fixture.coord,

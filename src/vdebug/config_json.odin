@@ -686,7 +686,8 @@ snapshot_options_parse :: proc(
 	if options.compare_specified {
 		compare = options.compare
 	}
-	if request_compare, ok := json_bool_get(request, "compare"); ok {
+	if request_compare, request_compare_ok := json_bool_get(request, "compare");
+	   request_compare_ok {
 		compare = request_compare
 	}
 	required := json_bool_default(snapshot_obj, "required", mode_required)
@@ -995,11 +996,4 @@ json_f64_get :: proc(obj: json.Object, key: string) -> (f64, bool) {
 		return json_value_f64(value)
 	}
 	return 0, false
-}
-
-json_f64_default :: proc(obj: json.Object, key: string, default: f64) -> f64 {
-	if value, ok := json_f64_get(obj, key); ok {
-		return value
-	}
-	return default
 }

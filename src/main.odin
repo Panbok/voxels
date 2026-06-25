@@ -21,9 +21,19 @@ import "core:os"
 DEFAULT_ACCELERATION :: f32(1.5)
 MAX_ACCELERATION :: f32(20.0)
 MOUSE_SENSITIVITY :: f32(0.0025)
-RUNTIME_AUTO_MOVE_BENCH_VERSION :: "1"
+RUNTIME_AUTO_MOVE_BENCH_VERSION :: "3"
 RUNTIME_AUTO_MOVE_BENCH_DURATION_MS :: u32(5_000)
 RUNTIME_AUTO_MOVE_BENCH_WINDOW_MS :: u32(1_000)
+RUNTIME_DYNAMIC_GEN_QUEUE_MEDIUM_THRESHOLD :: u32(8)
+RUNTIME_DYNAMIC_GEN_QUEUE_HIGH_THRESHOLD :: u32(16)
+RUNTIME_DYNAMIC_GEN_RESULT_MEDIUM_THRESHOLD :: u32(8)
+RUNTIME_DYNAMIC_GEN_RESULT_HIGH_THRESHOLD :: u32(16)
+RUNTIME_DYNAMIC_MESH_QUEUE_MEDIUM_THRESHOLD :: u32(40)
+RUNTIME_DYNAMIC_MESH_QUEUE_HIGH_THRESHOLD :: u32(64)
+RUNTIME_DYNAMIC_MESH_RESULT_MEDIUM_THRESHOLD :: u32(3)
+RUNTIME_DYNAMIC_MESH_RESULT_HIGH_THRESHOLD :: u32(4)
+RUNTIME_DYNAMIC_DIRTY_MEDIUM_THRESHOLD :: u32(44)
+RUNTIME_DYNAMIC_DIRTY_HIGH_THRESHOLD :: u32(56)
 PERSISTENT_SLAB_BYTES :: #config(PERSISTENT_SLAB_BYTES, 768 * mem.Megabyte)
 TRANSIENT_SLAB_BYTES :: #config(TRANSIENT_SLAB_BYTES, 64 * mem.Megabyte)
 RESOURCE_GENERATION_WORKER_MAX :: #config(RESOURCE_GENERATION_WORKER_MAX, 6)
@@ -48,94 +58,141 @@ Memory :: struct {
 
 Metrics :: struct {
 	// General frame stats
-	frame_count:                              u64,
-	current_frame_ms:                         f32,
-	current_fps:                              f32,
-	auto_test_elapsed_ms:                     f32,
-	frame_metrics_accum_ms:                   f32,
-	frame_metrics_elapsed_ms:                 f32,
-	frame_metrics_min_ms:                     f32,
-	frame_metrics_max_ms:                     f32,
-	frame_metrics_sample_count:               u32,
-	frame_metrics_chunks_generated:           u32,
-	frame_metrics_chunks_generated_full:      u32,
-	frame_metrics_chunks_generated_proxy:     u32,
-	frame_metrics_chunks_refined_full:        u32,
-	frame_metrics_chunks_prewarmed:           u32,
-	frame_metrics_generation_full_us:         u64,
-	frame_metrics_generation_proxy_us:        u64,
-	frame_metrics_generation_refined_full_us: u64,
-	frame_metrics_generation_prewarm_us:      u64,
-	frame_metrics_chunks_evicted:             u32,
-	frame_metrics_mesh_submitted:             u32,
-	frame_metrics_mesh_committed:             u32,
-	frame_metrics_mesh_uploaded:              u32,
-	frame_metrics_dirty_remaining_max:        u32,
-	frame_metrics_draw_units_tested:          u32,
-	frame_metrics_frustum_culled:             u32,
-	frame_metrics_occlusion_culled:           u32,
-	frame_metrics_draw_units_drawn:           u32,
-	frame_metrics_triangles_drawn:            u32,
+	frame_count:                                u64,
+	current_frame_ms:                           f32,
+	current_fps:                                f32,
+	auto_test_elapsed_ms:                       f32,
+	frame_metrics_accum_ms:                     f32,
+	frame_metrics_elapsed_ms:                   f32,
+	frame_metrics_min_ms:                       f32,
+	frame_metrics_max_ms:                       f32,
+	frame_metrics_sample_count:                 u32,
+	frame_metrics_frame_time_histogram:         [bench.RUNTIME_FRAME_TIME_HISTOGRAM_BIN_COUNT]u32,
+	frame_metrics_chunks_generated:             u32,
+	frame_metrics_chunks_generated_full:        u32,
+	frame_metrics_chunks_generated_proxy:       u32,
+	frame_metrics_chunks_refined_full:          u32,
+	frame_metrics_chunks_prewarmed:             u32,
+	frame_metrics_generation_full_us:           u64,
+	frame_metrics_generation_proxy_us:          u64,
+	frame_metrics_generation_refined_full_us:   u64,
+	frame_metrics_generation_prewarm_us:        u64,
+	frame_metrics_generation_queue_depth_max:   u32,
+	frame_metrics_generation_result_depth_max:  u32,
+	frame_metrics_generation_enqueue_failures:  u64,
+	frame_metrics_generation_workers_busy_max:  u32,
+	frame_metrics_generation_worker_jobs:       u64,
+	frame_metrics_generation_worker_busy_us:    u64,
+	frame_metrics_mesh_queue_depth_max:         u32,
+	frame_metrics_mesh_result_depth_max:        u32,
+	frame_metrics_mesh_enqueue_failures:        u64,
+	frame_metrics_mesh_workers_busy_max:        u32,
+	frame_metrics_mesh_worker_jobs:             u64,
+	frame_metrics_mesh_worker_busy_us:          u64,
+	frame_metrics_mesh_result_worker_us:        u64,
+	frame_metrics_chunks_evicted:               u32,
+	frame_metrics_mesh_submitted:               u32,
+	frame_metrics_mesh_committed:               u32,
+	frame_metrics_mesh_uploaded:                u32,
+	frame_metrics_mesh_empty:                   u32,
+	frame_metrics_mesh_upload_count:            u32,
+	frame_metrics_mesh_upload_us:               u64,
+	frame_metrics_mesh_upload_vertex_bytes:     u64,
+	frame_metrics_mesh_upload_index_bytes:      u64,
+	frame_metrics_mesh_upload_bytes:            u64,
+	frame_metrics_dirty_remaining_max:          u32,
+	frame_metrics_dirty_meshable_max:           u32,
+	frame_metrics_dirty_dependency_blocked_max: u32,
+	frame_metrics_dirty_outside_window_max:     u32,
+	frame_metrics_draw_units_tested:            u32,
+	frame_metrics_frustum_culled:               u32,
+	frame_metrics_occlusion_culled:             u32,
+	frame_metrics_draw_units_drawn:             u32,
+	frame_metrics_triangles_drawn:              u32,
 
 	// Current frame stats
-	chunks_total:                             u32,
-	chunks_without_geometry:                  u32,
-	chunks_frustum_culled:                    u32,
-	chunks_drawn:                             u32,
-	terrain_draw_units_tested:                u32,
-	terrain_draw_units_frustum_culled:        u32,
-	terrain_draw_units_occlusion_culled:      u32,
-	terrain_draw_units_drawn:                 u32,
-	terrain_faces_drawn:                      u32,
-	terrain_triangles_drawn:                  u32,
-	terrain_indices_drawn:                    u32,
-	chunks_generated:                         u32,
-	chunks_generated_full:                    u32,
-	chunks_generated_proxy:                   u32,
-	chunks_refined_full:                      u32,
-	chunks_prewarmed:                         u32,
-	generation_full_us:                       u64,
-	generation_proxy_us:                      u64,
-	generation_refined_full_us:               u64,
-	generation_prewarm_us:                    u64,
-	chunk_mesh_jobs_submitted:                u32,
-	chunk_mesh_results_committed:             u32,
-	chunk_mesh_results_uploaded:              u32,
-	chunks_dirty_remaining:                   u32,
-	chunks_evicted:                           u32,
-	deferred_geometry_count:                  u32,
-	deferred_release_enqueued_total:          u64,
-	deferred_release_completed_total:         u64,
+	chunks_total:                               u32,
+	chunks_without_geometry:                    u32,
+	chunks_frustum_culled:                      u32,
+	chunks_drawn:                               u32,
+	terrain_draw_units_tested:                  u32,
+	terrain_draw_units_frustum_culled:          u32,
+	terrain_draw_units_occlusion_culled:        u32,
+	terrain_draw_units_drawn:                   u32,
+	terrain_faces_drawn:                        u32,
+	terrain_triangles_drawn:                    u32,
+	terrain_indices_drawn:                      u32,
+	chunks_generated:                           u32,
+	chunks_generated_full:                      u32,
+	chunks_generated_proxy:                     u32,
+	chunks_refined_full:                        u32,
+	chunks_prewarmed:                           u32,
+	generation_full_us:                         u64,
+	generation_proxy_us:                        u64,
+	generation_refined_full_us:                 u64,
+	generation_prewarm_us:                      u64,
+	chunk_mesh_jobs_submitted:                  u32,
+	chunk_mesh_results_committed:               u32,
+	chunk_mesh_results_uploaded:                u32,
+	chunk_mesh_results_empty:                   u32,
+	mesh_result_worker_us:                      u64,
+	mesh_upload_count:                          u32,
+	mesh_upload_us:                             u64,
+	mesh_upload_vertex_bytes:                   u64,
+	mesh_upload_index_bytes:                    u64,
+	mesh_upload_bytes:                          u64,
+	chunks_dirty_remaining:                     u32,
+	chunks_dirty_meshable:                      u32,
+	chunks_dirty_dependency_blocked:            u32,
+	chunks_dirty_outside_window:                u32,
+	chunks_evicted:                             u32,
+	deferred_geometry_count:                    u32,
+	deferred_release_enqueued_total:            u64,
+	deferred_release_completed_total:           u64,
 
 	// Previous frame stats
-	prev_chunks_total:                        u32,
-	prev_chunks_without_geometry:             u32,
-	prev_chunks_frustum_culled:               u32,
-	prev_chunks_drawn:                        u32,
-	prev_terrain_draw_units_tested:           u32,
-	prev_terrain_draw_units_frustum_culled:   u32,
-	prev_terrain_draw_units_occlusion_culled: u32,
-	prev_terrain_draw_units_drawn:            u32,
-	prev_terrain_faces_drawn:                 u32,
-	prev_terrain_triangles_drawn:             u32,
-	prev_terrain_indices_drawn:               u32,
-	prev_chunks_generated:                    u32,
-	prev_chunks_generated_full:               u32,
-	prev_chunks_generated_proxy:              u32,
-	prev_chunks_refined_full:                 u32,
-	prev_chunks_prewarmed:                    u32,
-	prev_generation_full_us:                  u64,
-	prev_generation_proxy_us:                 u64,
-	prev_generation_refined_full_us:          u64,
-	prev_generation_prewarm_us:               u64,
-	prev_chunk_mesh_jobs_submitted:           u32,
-	prev_chunk_mesh_results_committed:        u32,
-	prev_chunk_mesh_results_uploaded:         u32,
-	prev_chunks_dirty_remaining:              u32,
-	prev_chunks_evicted:                      u32,
-	prev_deferred_geometry_count:             u32,
-	prev_deferred_release_enqueued_total:     u64,
-	prev_deferred_release_completed_total:    u64,
+	prev_chunks_total:                          u32,
+	prev_chunks_without_geometry:               u32,
+	prev_chunks_frustum_culled:                 u32,
+	prev_chunks_drawn:                          u32,
+	prev_terrain_draw_units_tested:             u32,
+	prev_terrain_draw_units_frustum_culled:     u32,
+	prev_terrain_draw_units_occlusion_culled:   u32,
+	prev_terrain_draw_units_drawn:              u32,
+	prev_terrain_faces_drawn:                   u32,
+	prev_terrain_triangles_drawn:               u32,
+	prev_terrain_indices_drawn:                 u32,
+	prev_chunks_generated:                      u32,
+	prev_chunks_generated_full:                 u32,
+	prev_chunks_generated_proxy:                u32,
+	prev_chunks_refined_full:                   u32,
+	prev_chunks_prewarmed:                      u32,
+	prev_generation_full_us:                    u64,
+	prev_generation_proxy_us:                   u64,
+	prev_generation_refined_full_us:            u64,
+	prev_generation_prewarm_us:                 u64,
+	prev_chunk_mesh_jobs_submitted:             u32,
+	prev_chunk_mesh_results_committed:          u32,
+	prev_chunk_mesh_results_uploaded:           u32,
+	prev_chunk_mesh_results_empty:              u32,
+	prev_mesh_result_worker_us:                 u64,
+	prev_mesh_upload_count:                     u32,
+	prev_mesh_upload_us:                        u64,
+	prev_mesh_upload_vertex_bytes:              u64,
+	prev_mesh_upload_index_bytes:               u64,
+	prev_mesh_upload_bytes:                     u64,
+	prev_chunks_dirty_remaining:                u32,
+	prev_chunks_dirty_meshable:                 u32,
+	prev_chunks_dirty_dependency_blocked:       u32,
+	prev_chunks_dirty_outside_window:           u32,
+	prev_chunks_evicted:                        u32,
+	prev_deferred_geometry_count:               u32,
+	prev_deferred_release_enqueued_total:       u64,
+	prev_deferred_release_completed_total:      u64,
+	prev_async_generation_jobs_completed:       u64,
+	prev_async_generation_worker_busy_us:       u64,
+	prev_async_mesh_jobs_completed:             u64,
+	prev_async_mesh_worker_busy_us:             u64,
 }
 
 RuntimeResourceConfig :: struct {
@@ -143,6 +200,18 @@ RuntimeResourceConfig :: struct {
 	generation_worker_count: u32,
 	mesh_worker_count:       u32,
 	chunk_work_budget:       world.ChunkWorkBudget,
+}
+
+RuntimeResourcePolicy :: enum {
+	Default,
+	Default_Dynamic_Generation_Budget,
+	Default_Generation_Budget_Boosted,
+	Default_Missing_First_Generation,
+	Default_Mesh_Unblock_Generation,
+	Default_Mesh_Unblock_Target_Order_Generation,
+	Generation_Biased,
+	Generation_Biased_Budget_Preserved,
+	Generation_Moderate_Budget_Preserved,
 }
 
 //////////////////////////////////////
@@ -254,6 +323,7 @@ RuntimeAutoMoveBenchmarkData :: struct {
 	disable_vsync:            bool,
 	auto_move:                bool,
 	sprint:                   bool,
+	resource_policy:          RuntimeResourcePolicy,
 	start_position:           [3]f32,
 	yaw_degrees:              f32,
 	pitch_degrees:            f32,
@@ -286,6 +356,27 @@ runtime_auto_move_benchmark_metrics := [?]bench.BenchmarkMetricDescriptor {
 		offset = offset_of(bench.RuntimeAutoMoveResult, weighted_fps),
 		reduce = .Last,
 		unit = "fps",
+	},
+	{
+		name = "worst_window_avg_frame_ms",
+		kind = .F64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, worst_window_avg_frame_ms),
+		reduce = .Last,
+		unit = "ms",
+	},
+	{
+		name = "p95_frame_ms",
+		kind = .F64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, p95_frame_ms),
+		reduce = .Last,
+		unit = "ms",
+	},
+	{
+		name = "p99_frame_ms",
+		kind = .F64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, p99_frame_ms),
+		reduce = .Last,
+		unit = "ms",
 	},
 	{
 		name = "max_frame_ms",
@@ -325,6 +416,115 @@ runtime_auto_move_benchmark_metrics := [?]bench.BenchmarkMetricDescriptor {
 		reduce = .Last,
 	},
 	{
+		name = "generation_full_us",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, generation_full_us),
+		reduce = .Last,
+		unit = "us",
+	},
+	{
+		name = "generation_proxy_us",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, generation_proxy_us),
+		reduce = .Last,
+		unit = "us",
+	},
+	{
+		name = "generation_refined_full_us",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, generation_refined_full_us),
+		reduce = .Last,
+		unit = "us",
+	},
+	{
+		name = "generation_prewarm_us",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, generation_prewarm_us),
+		reduce = .Last,
+		unit = "us",
+	},
+	{
+		name = "generation_queue_depth_max",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, generation_queue_depth_max),
+		reduce = .Last,
+	},
+	{
+		name = "generation_result_depth_max",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, generation_result_depth_max),
+		reduce = .Last,
+	},
+	{
+		name = "generation_enqueue_failures",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, generation_enqueue_failures),
+		reduce = .Last,
+	},
+	{
+		name = "generation_workers_busy_max",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, generation_workers_busy_max),
+		reduce = .Last,
+	},
+	{
+		name = "generation_worker_jobs",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, generation_worker_jobs),
+		reduce = .Last,
+	},
+	{
+		name = "generation_worker_busy_us",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, generation_worker_busy_us),
+		reduce = .Last,
+		unit = "us",
+	},
+	{
+		name = "mesh_queue_depth_max",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_queue_depth_max),
+		reduce = .Last,
+	},
+	{
+		name = "mesh_result_depth_max",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_result_depth_max),
+		reduce = .Last,
+	},
+	{
+		name = "mesh_enqueue_failures",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_enqueue_failures),
+		reduce = .Last,
+	},
+	{
+		name = "mesh_workers_busy_max",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_workers_busy_max),
+		reduce = .Last,
+	},
+	{
+		name = "mesh_worker_jobs",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_worker_jobs),
+		reduce = .Last,
+	},
+	{
+		name = "mesh_worker_busy_us",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_worker_busy_us),
+		reduce = .Last,
+		unit = "us",
+	},
+	{
+		name = "mesh_result_worker_us",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_result_worker_us),
+		reduce = .Last,
+		unit = "us",
+	},
+	{
 		name = "chunks_evicted",
 		kind = .U64,
 		offset = offset_of(bench.RuntimeAutoMoveResult, chunks_evicted),
@@ -349,9 +549,79 @@ runtime_auto_move_benchmark_metrics := [?]bench.BenchmarkMetricDescriptor {
 		reduce = .Last,
 	},
 	{
+		name = "mesh_empty",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_empty),
+		reduce = .Last,
+	},
+	{
+		name = "mesh_committed_upload_gap",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_committed_upload_gap),
+		reduce = .Last,
+	},
+	{
+		name = "mesh_nonempty_upload_gap",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_nonempty_upload_gap),
+		reduce = .Last,
+	},
+	{
+		name = "mesh_upload_count",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_upload_count),
+		reduce = .Last,
+	},
+	{
+		name = "mesh_upload_us",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_upload_us),
+		reduce = .Last,
+		unit = "us",
+	},
+	{
+		name = "mesh_upload_vertex_bytes",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_upload_vertex_bytes),
+		reduce = .Last,
+		unit = "bytes",
+	},
+	{
+		name = "mesh_upload_index_bytes",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_upload_index_bytes),
+		reduce = .Last,
+		unit = "bytes",
+	},
+	{
+		name = "mesh_upload_bytes",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, mesh_upload_bytes),
+		reduce = .Last,
+		unit = "bytes",
+	},
+	{
 		name = "dirty_remaining_max",
 		kind = .U64,
 		offset = offset_of(bench.RuntimeAutoMoveResult, dirty_remaining_max),
+		reduce = .Last,
+	},
+	{
+		name = "dirty_meshable_max",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, dirty_meshable_max),
+		reduce = .Last,
+	},
+	{
+		name = "dirty_dependency_blocked_max",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, dirty_dependency_blocked_max),
+		reduce = .Last,
+	},
+	{
+		name = "dirty_outside_window_max",
+		kind = .U64,
+		offset = offset_of(bench.RuntimeAutoMoveResult, dirty_outside_window_max),
 		reduce = .Last,
 	},
 	{
@@ -410,24 +680,167 @@ runtime_auto_move_benchmark_fixture_write :: proc(
 	writer: ^bench.BenchmarkMetadataWriter,
 ) -> bench.BenchmarkStatus {
 	fixture := (^RuntimeAutoMoveBenchmarkData)(data)
-	resource_config := runtime_resource_config_make()
+	resource_config := runtime_resource_config_make_for_policy(fixture.resource_policy)
 	bench.metadata_u64(writer, "duration_ms", u64(fixture.duration_ms), "ms")
 	bench.metadata_u64(writer, "frame_window_ms", u64(fixture.window_ms), "ms")
 	bench.metadata_bool(writer, "disable_vsync", fixture.disable_vsync)
 	bench.metadata_bool(writer, "auto_move", fixture.auto_move)
 	bench.metadata_bool(writer, "sprint", fixture.sprint)
+	bench.metadata_string(
+		writer,
+		"runtime_resource_policy",
+		runtime_resource_policy_name(fixture.resource_policy),
+	)
+	bench.metadata_bool(
+		writer,
+		"runtime_dynamic_generation_budget",
+		runtime_resource_policy_uses_dynamic_generation_budget(fixture.resource_policy),
+	)
+	bench.metadata_bool(
+		writer,
+		"runtime_missing_first_generation_priority",
+		runtime_resource_policy_uses_missing_first_generation_priority(fixture.resource_policy),
+	)
+	bench.metadata_bool(
+		writer,
+		"runtime_mesh_unblock_generation_priority",
+		runtime_resource_policy_uses_mesh_unblock_generation_priority(fixture.resource_policy),
+	)
+	bench.metadata_bool(
+		writer,
+		"runtime_mesh_unblock_target_order_generation_priority",
+		runtime_resource_policy_uses_mesh_unblock_target_order_generation_priority(
+			fixture.resource_policy,
+		),
+	)
+	bench.metadata_u64(
+		writer,
+		"runtime_dynamic_gen_queue_medium_threshold",
+		u64(RUNTIME_DYNAMIC_GEN_QUEUE_MEDIUM_THRESHOLD),
+	)
+	bench.metadata_u64(
+		writer,
+		"runtime_dynamic_gen_queue_high_threshold",
+		u64(RUNTIME_DYNAMIC_GEN_QUEUE_HIGH_THRESHOLD),
+	)
+	bench.metadata_u64(
+		writer,
+		"runtime_dynamic_gen_result_medium_threshold",
+		u64(RUNTIME_DYNAMIC_GEN_RESULT_MEDIUM_THRESHOLD),
+	)
+	bench.metadata_u64(
+		writer,
+		"runtime_dynamic_gen_result_high_threshold",
+		u64(RUNTIME_DYNAMIC_GEN_RESULT_HIGH_THRESHOLD),
+	)
+	bench.metadata_u64(
+		writer,
+		"runtime_dynamic_mesh_queue_medium_threshold",
+		u64(RUNTIME_DYNAMIC_MESH_QUEUE_MEDIUM_THRESHOLD),
+	)
+	bench.metadata_u64(
+		writer,
+		"runtime_dynamic_mesh_queue_high_threshold",
+		u64(RUNTIME_DYNAMIC_MESH_QUEUE_HIGH_THRESHOLD),
+	)
+	bench.metadata_u64(
+		writer,
+		"runtime_dynamic_mesh_result_medium_threshold",
+		u64(RUNTIME_DYNAMIC_MESH_RESULT_MEDIUM_THRESHOLD),
+	)
+	bench.metadata_u64(
+		writer,
+		"runtime_dynamic_mesh_result_high_threshold",
+		u64(RUNTIME_DYNAMIC_MESH_RESULT_HIGH_THRESHOLD),
+	)
+	bench.metadata_u64(
+		writer,
+		"runtime_dynamic_dirty_medium_threshold",
+		u64(RUNTIME_DYNAMIC_DIRTY_MEDIUM_THRESHOLD),
+	)
+	bench.metadata_u64(
+		writer,
+		"runtime_dynamic_dirty_high_threshold",
+		u64(RUNTIME_DYNAMIC_DIRTY_HIGH_THRESHOLD),
+	)
+	bench.metadata_u64(
+		writer,
+		"frame_time_histogram_bin_count",
+		u64(bench.RUNTIME_FRAME_TIME_HISTOGRAM_BIN_COUNT),
+	)
+	bench.metadata_f64(
+		writer,
+		"frame_time_histogram_bin_ms",
+		bench.RUNTIME_FRAME_TIME_HISTOGRAM_BIN_MS,
+		"ms",
+	)
+	bench.metadata_f64(
+		writer,
+		"frame_time_histogram_max_ms",
+		bench.RUNTIME_FRAME_TIME_HISTOGRAM_MAX_MS,
+		"ms",
+	)
 	bench.metadata_f64(writer, "start_x", f64(fixture.start_position[0]))
 	bench.metadata_f64(writer, "start_y", f64(fixture.start_position[1]))
 	bench.metadata_f64(writer, "start_z", f64(fixture.start_position[2]))
 	bench.metadata_f64(writer, "yaw_degrees", f64(fixture.yaw_degrees))
 	bench.metadata_f64(writer, "pitch_degrees", f64(fixture.pitch_degrees))
 	bench.metadata_bool(writer, "cave_debug_visualization", fixture.cave_debug_visualization)
+	bench.metadata_string(writer, "graphics_backend_requested", gfx.renderer_default_driver_name())
+	bench.metadata_string(writer, "graphics_shader_format", gfx.renderer_shader_format_name())
+	bench.metadata_bool(writer, "graphics_debug_mode_requested", state.debug_mode)
+	bench.metadata_bool(writer, "graphics_validation_requested", state.debug_mode)
+	bench.metadata_string(writer, "graphics_validation_source", "SDL_CreateGPUDevice.debug_mode")
+	bench.metadata_bool(writer, "graphics_live_validation_state_known", false)
+	bench.metadata_u64(
+		writer,
+		"runtime_logical_threads",
+		u64(resource_config.logical_thread_count),
+	)
 	bench.metadata_u64(
 		writer,
 		"runtime_generation_workers",
 		u64(resource_config.generation_worker_count),
 	)
 	bench.metadata_u64(writer, "runtime_mesh_workers", u64(resource_config.mesh_worker_count))
+	bench.metadata_u64(
+		writer,
+		"runtime_generation_requests_per_frame",
+		u64(resource_config.chunk_work_budget.generation_requests_per_frame),
+	)
+	bench.metadata_u64(
+		writer,
+		"runtime_generation_results_per_frame",
+		u64(resource_config.chunk_work_budget.generation_results_per_frame),
+	)
+	bench.metadata_u64(
+		writer,
+		"runtime_mesh_requests_per_frame",
+		u64(resource_config.chunk_work_budget.mesh_requests_per_frame),
+	)
+	bench.metadata_u64(
+		writer,
+		"runtime_mesh_results_per_frame",
+		u64(resource_config.chunk_work_budget.mesh_results_per_frame),
+	)
+	bench.metadata_u64(writer, "generation_queue_capacity", u64(async.GENERATION_QUEUE_CAPACITY))
+	bench.metadata_u64(
+		writer,
+		"generation_result_queue_capacity",
+		u64(async.GENERATION_RESULT_QUEUE_CAPACITY),
+	)
+	bench.metadata_u64(writer, "mesh_queue_capacity", u64(async.MESH_QUEUE_CAPACITY))
+	bench.metadata_u64(
+		writer,
+		"geometry_max_vertex_upload_bytes",
+		u64(gfx.GEOMETRY_MAX_VERTEX_UPLOAD_BYTES),
+		"bytes",
+	)
+	bench.metadata_u64(
+		writer,
+		"geometry_max_upload_index_elements",
+		u64(gfx.GEOMETRY_MAX_UPLOAD_INDEX_ELEMENTS),
+	)
 	bench.metadata_u64(writer, "chunk_streaming_radius_xz", u64(world.CHUNK_STREAMING_RADIUS_XZ))
 	bench.metadata_u64(
 		writer,
@@ -485,15 +898,33 @@ runtime_auto_move_benchmark_run :: proc(
 	state.enable_vsync = !fixture.disable_vsync
 	state.is_window_open = true
 	state.capture_frame_windows = true
+	state.resource_policy = fixture.resource_policy
 	defer state.capture_frame_windows = false
+	defer state.resource_policy = .Default
 	metrics_frame_window_reset()
 
-	init()
+	resource_config := runtime_resource_config_make_for_policy(fixture.resource_policy)
+	init_with_resource_config(resource_config)
 	defer shutdown()
+	if runtime_resource_policy_sets_missing_first_generation_priority(fixture.resource_policy) {
+		world.generation_request_priority_set(.Missing_First)
+		defer world.generation_request_priority_set(.Missing_First)
+	}
+	if runtime_resource_policy_sets_mesh_unblock_generation_priority(fixture.resource_policy) {
+		world.generation_request_priority_set(.Mesh_Unblock_First)
+		defer world.generation_request_priority_set(.Missing_First)
+	}
+	if runtime_resource_policy_sets_mesh_unblock_target_order_generation_priority(
+		fixture.resource_policy,
+	) {
+		world.generation_request_priority_set(.Mesh_Unblock_Target_Order_First)
+		defer world.generation_request_priority_set(.Missing_First)
+	}
 	setup_resources()
 	defer destroy_resources()
 	runtime_auto_move_camera_apply(fixture)
 	world.streaming_update_for_observer(gfx.camera_get().position)
+	metrics_async_baseline_reset()
 
 	performance_frequency := f64(sdl.GetPerformanceFrequency())
 	current_time := sdl.GetPerformanceCounter()
@@ -524,23 +955,34 @@ runtime_auto_move_benchmark_run :: proc(
 	return bench.status_pass()
 }
 
-runtime_benchmarks_register :: proc(registry: ^bench.BenchmarkRegistry) {
-	fixture := RuntimeAutoMoveBenchmarkData {
-		duration_ms              = RUNTIME_AUTO_MOVE_BENCH_DURATION_MS,
-		window_ms                = RUNTIME_AUTO_MOVE_BENCH_WINDOW_MS,
-		disable_vsync            = true,
-		auto_move                = true,
-		sprint                   = true,
-		start_position           = {0.0, 0.0, -5.0},
-		yaw_degrees              = 0.0,
-		pitch_degrees            = 0.0,
+runtime_auto_move_benchmark_fixture_make :: proc(
+	resource_policy: RuntimeResourcePolicy,
+) -> RuntimeAutoMoveBenchmarkData {
+	return {
+		duration_ms = RUNTIME_AUTO_MOVE_BENCH_DURATION_MS,
+		window_ms = RUNTIME_AUTO_MOVE_BENCH_WINDOW_MS,
+		disable_vsync = true,
+		auto_move = true,
+		sprint = true,
+		resource_policy = resource_policy,
+		start_position = {0.0, 0.0, -5.0},
+		yaw_degrees = 0.0,
+		pitch_degrees = 0.0,
 		cave_debug_visualization = false,
 	}
+}
+
+runtime_auto_move_benchmark_register_case :: proc(
+	registry: ^bench.BenchmarkRegistry,
+	name: string,
+	fixture: RuntimeAutoMoveBenchmarkData,
+) {
+	fixture_storage := fixture
 	bench.register(
 		registry,
-		"runtime.auto_move.streaming",
+		name,
 		runtime_auto_move_benchmark_run,
-		rawptr(&fixture),
+		rawptr(&fixture_storage),
 		nil,
 		{
 			iterations = 1,
@@ -557,6 +999,54 @@ runtime_benchmarks_register :: proc(registry: ^bench.BenchmarkRegistry) {
 			version = RUNTIME_AUTO_MOVE_BENCH_VERSION,
 			default_in_all = false,
 		},
+	)
+}
+
+runtime_benchmarks_register :: proc(registry: ^bench.BenchmarkRegistry) {
+	runtime_auto_move_benchmark_register_case(
+		registry,
+		"runtime.auto_move.streaming",
+		runtime_auto_move_benchmark_fixture_make(.Default),
+	)
+	runtime_auto_move_benchmark_register_case(
+		registry,
+		"runtime.auto_move.streaming.default.dynamic_generation_budget",
+		runtime_auto_move_benchmark_fixture_make(.Default_Dynamic_Generation_Budget),
+	)
+	runtime_auto_move_benchmark_register_case(
+		registry,
+		"runtime.auto_move.streaming.default.generation_budget_boosted",
+		runtime_auto_move_benchmark_fixture_make(.Default_Generation_Budget_Boosted),
+	)
+	runtime_auto_move_benchmark_register_case(
+		registry,
+		"runtime.auto_move.streaming.default.missing_first_generation",
+		runtime_auto_move_benchmark_fixture_make(.Default_Missing_First_Generation),
+	)
+	runtime_auto_move_benchmark_register_case(
+		registry,
+		"runtime.auto_move.streaming.default.mesh_unblock_generation",
+		runtime_auto_move_benchmark_fixture_make(.Default_Mesh_Unblock_Generation),
+	)
+	runtime_auto_move_benchmark_register_case(
+		registry,
+		"runtime.auto_move.streaming.default.mesh_unblock_target_order_generation",
+		runtime_auto_move_benchmark_fixture_make(.Default_Mesh_Unblock_Target_Order_Generation),
+	)
+	runtime_auto_move_benchmark_register_case(
+		registry,
+		"runtime.auto_move.streaming.generation_biased",
+		runtime_auto_move_benchmark_fixture_make(.Generation_Biased),
+	)
+	runtime_auto_move_benchmark_register_case(
+		registry,
+		"runtime.auto_move.streaming.generation_biased.budget_preserved",
+		runtime_auto_move_benchmark_fixture_make(.Generation_Biased_Budget_Preserved),
+	)
+	runtime_auto_move_benchmark_register_case(
+		registry,
+		"runtime.auto_move.streaming.generation_moderate.budget_preserved",
+		runtime_auto_move_benchmark_fixture_make(.Generation_Moderate_Budget_Preserved),
 	)
 }
 
@@ -621,6 +1111,7 @@ state := struct {
 	enable_vsync:          bool,
 	is_window_open:        bool,
 	capture_frame_windows: bool,
+	resource_policy:       RuntimeResourcePolicy,
 	resource_config:       RuntimeResourceConfig,
 } {
 	auto_move_on          = false,
@@ -629,6 +1120,7 @@ state := struct {
 	enable_vsync          = true,
 	is_window_open        = true,
 	capture_frame_windows = false,
+	resource_policy       = .Default,
 }
 
 //////////////////////////////////////
@@ -681,8 +1173,164 @@ resource_logical_thread_count_query :: proc() -> u32 {
 	return u32(logical_thread_count)
 }
 
-runtime_resource_config_make :: proc() -> RuntimeResourceConfig {
-	logical_thread_count := resource_logical_thread_count_query()
+runtime_resource_policy_name :: proc(policy: RuntimeResourcePolicy) -> string {
+	switch policy {
+	case .Default:
+		return "default"
+	case .Default_Dynamic_Generation_Budget:
+		return "default_dynamic_generation_budget"
+	case .Default_Generation_Budget_Boosted:
+		return "default_generation_budget_boosted"
+	case .Default_Missing_First_Generation:
+		return "default_missing_first_generation"
+	case .Default_Mesh_Unblock_Generation:
+		return "default_mesh_unblock_generation"
+	case .Default_Mesh_Unblock_Target_Order_Generation:
+		return "default_mesh_unblock_target_order_generation"
+	case .Generation_Biased:
+		return "generation_biased"
+	case .Generation_Biased_Budget_Preserved:
+		return "generation_biased_budget_preserved"
+	case .Generation_Moderate_Budget_Preserved:
+		return "generation_moderate_budget_preserved"
+	}
+	return "unknown"
+}
+
+runtime_resource_policy_uses_dynamic_generation_budget :: proc(
+	policy: RuntimeResourcePolicy,
+) -> bool {
+	switch policy {
+	case .Default_Dynamic_Generation_Budget:
+		return true
+	case .Default,
+	     .Default_Missing_First_Generation,
+	     .Default_Mesh_Unblock_Generation,
+	     .Default_Mesh_Unblock_Target_Order_Generation,
+	     .Default_Generation_Budget_Boosted,
+	     .Generation_Biased,
+	     .Generation_Biased_Budget_Preserved,
+	     .Generation_Moderate_Budget_Preserved:
+		return false
+	}
+	return false
+}
+
+runtime_resource_policy_uses_missing_first_generation_priority :: proc(
+	policy: RuntimeResourcePolicy,
+) -> bool {
+	switch policy {
+	case .Default,
+	     .Default_Dynamic_Generation_Budget,
+	     .Default_Generation_Budget_Boosted,
+	     .Default_Missing_First_Generation,
+	     .Default_Mesh_Unblock_Generation,
+	     .Default_Mesh_Unblock_Target_Order_Generation,
+	     .Generation_Biased,
+	     .Generation_Biased_Budget_Preserved,
+	     .Generation_Moderate_Budget_Preserved:
+		return true
+	}
+	return true
+}
+
+runtime_resource_policy_sets_missing_first_generation_priority :: proc(
+	policy: RuntimeResourcePolicy,
+) -> bool {
+	switch policy {
+	case .Default_Missing_First_Generation:
+		return true
+	case .Default,
+	     .Default_Dynamic_Generation_Budget,
+	     .Default_Generation_Budget_Boosted,
+	     .Default_Mesh_Unblock_Generation,
+	     .Default_Mesh_Unblock_Target_Order_Generation,
+	     .Generation_Biased,
+	     .Generation_Biased_Budget_Preserved,
+	     .Generation_Moderate_Budget_Preserved:
+		return false
+	}
+	return false
+}
+
+runtime_resource_policy_uses_mesh_unblock_generation_priority :: proc(
+	policy: RuntimeResourcePolicy,
+) -> bool {
+	switch policy {
+	case .Default_Mesh_Unblock_Generation:
+		return true
+	case .Default_Mesh_Unblock_Target_Order_Generation:
+		return true
+	case .Default,
+	     .Default_Dynamic_Generation_Budget,
+	     .Default_Generation_Budget_Boosted,
+	     .Default_Missing_First_Generation,
+	     .Generation_Biased,
+	     .Generation_Biased_Budget_Preserved,
+	     .Generation_Moderate_Budget_Preserved:
+		return false
+	}
+	return false
+}
+
+runtime_resource_policy_uses_mesh_unblock_target_order_generation_priority :: proc(
+	policy: RuntimeResourcePolicy,
+) -> bool {
+	switch policy {
+	case .Default_Mesh_Unblock_Target_Order_Generation:
+		return true
+	case .Default,
+	     .Default_Dynamic_Generation_Budget,
+	     .Default_Generation_Budget_Boosted,
+	     .Default_Missing_First_Generation,
+	     .Default_Mesh_Unblock_Generation,
+	     .Generation_Biased,
+	     .Generation_Biased_Budget_Preserved,
+	     .Generation_Moderate_Budget_Preserved:
+		return false
+	}
+	return false
+}
+
+runtime_resource_policy_sets_mesh_unblock_generation_priority :: proc(
+	policy: RuntimeResourcePolicy,
+) -> bool {
+	switch policy {
+	case .Default_Mesh_Unblock_Generation:
+		return true
+	case .Default,
+	     .Default_Dynamic_Generation_Budget,
+	     .Default_Generation_Budget_Boosted,
+	     .Default_Missing_First_Generation,
+	     .Default_Mesh_Unblock_Target_Order_Generation,
+	     .Generation_Biased,
+	     .Generation_Biased_Budget_Preserved,
+	     .Generation_Moderate_Budget_Preserved:
+		return false
+	}
+	return false
+}
+
+runtime_resource_policy_sets_mesh_unblock_target_order_generation_priority :: proc(
+	policy: RuntimeResourcePolicy,
+) -> bool {
+	switch policy {
+	case .Default_Mesh_Unblock_Target_Order_Generation:
+		return true
+	case .Default,
+	     .Default_Dynamic_Generation_Budget,
+	     .Default_Generation_Budget_Boosted,
+	     .Default_Missing_First_Generation,
+	     .Default_Mesh_Unblock_Generation,
+	     .Generation_Biased,
+	     .Generation_Biased_Budget_Preserved,
+	     .Generation_Moderate_Budget_Preserved:
+		return false
+	}
+	return false
+}
+
+runtime_background_thread_budget_make :: proc(logical_thread_count: u32) -> u32 {
 	reserved_thread_count := u32(1)
 	if logical_thread_count >= 6 {
 		reserved_thread_count = 2
@@ -693,29 +1341,182 @@ runtime_resource_config_make :: proc() -> RuntimeResourceConfig {
 		background_thread_budget = logical_thread_count - reserved_thread_count
 	}
 	background_thread_budget = resource_u32_max(background_thread_budget, 2)
+	return background_thread_budget
+}
 
+runtime_resource_config_make_with_worker_counts :: proc(
+	logical_thread_count: u32,
+	generation_worker_count: u32,
+	mesh_worker_count: u32,
+) -> RuntimeResourceConfig {
+	generation_count := resource_u32_clamp(
+		generation_worker_count,
+		1,
+		u32(RESOURCE_GENERATION_WORKER_MAX),
+	)
+	mesh_count := resource_u32_clamp(mesh_worker_count, 1, u32(RESOURCE_MESH_WORKER_MAX))
+
+	return {
+		logical_thread_count = logical_thread_count,
+		generation_worker_count = generation_count,
+		mesh_worker_count = mesh_count,
+		chunk_work_budget = {
+			generation_requests_per_frame = generation_count,
+			generation_results_per_frame = generation_count,
+			mesh_requests_per_frame = mesh_count * u32(RESOURCE_MESH_REQUESTS_PER_WORKER),
+			mesh_results_per_frame = mesh_count,
+		},
+	}
+}
+
+runtime_resource_config_preserve_default_mesh_budget :: proc(
+	config: RuntimeResourceConfig,
+) -> RuntimeResourceConfig {
+	resolved := config
+	default_config := runtime_resource_config_make()
+	resolved.chunk_work_budget.mesh_requests_per_frame =
+		default_config.chunk_work_budget.mesh_requests_per_frame
+	resolved.chunk_work_budget.mesh_results_per_frame =
+		default_config.chunk_work_budget.mesh_results_per_frame
+	return resolved
+}
+
+runtime_resource_config_boost_generation_budget :: proc(
+	config: RuntimeResourceConfig,
+) -> RuntimeResourceConfig {
+	resolved := config
+	resolved.chunk_work_budget.generation_requests_per_frame = resource_u32_clamp(
+		resolved.chunk_work_budget.generation_requests_per_frame * 2,
+		1,
+		u32(async.GENERATION_QUEUE_CAPACITY),
+	)
+	resolved.chunk_work_budget.generation_results_per_frame = resource_u32_clamp(
+		resolved.chunk_work_budget.generation_results_per_frame * 2,
+		1,
+		u32(async.GENERATION_RESULT_QUEUE_CAPACITY),
+	)
+	return resolved
+}
+
+runtime_resource_config_make :: proc() -> RuntimeResourceConfig {
+	logical_thread_count := resource_logical_thread_count_query()
+	background_thread_budget := runtime_background_thread_budget_make(logical_thread_count)
 	generation_worker_count := resource_u32_clamp(
 		background_thread_budget / 3,
 		1,
 		u32(RESOURCE_GENERATION_WORKER_MAX),
 	)
+	mesh_worker_count := background_thread_budget - generation_worker_count
+	return runtime_resource_config_make_with_worker_counts(
+		logical_thread_count,
+		generation_worker_count,
+		mesh_worker_count,
+	)
+}
+
+runtime_resource_config_make_generation_biased :: proc() -> RuntimeResourceConfig {
+	logical_thread_count := resource_logical_thread_count_query()
+	background_thread_budget := runtime_background_thread_budget_make(logical_thread_count)
 	mesh_worker_count := resource_u32_clamp(
-		background_thread_budget - generation_worker_count,
+		background_thread_budget / 3,
 		1,
 		u32(RESOURCE_MESH_WORKER_MAX),
 	)
+	generation_worker_count := background_thread_budget - mesh_worker_count
+	return runtime_resource_config_make_with_worker_counts(
+		logical_thread_count,
+		generation_worker_count,
+		mesh_worker_count,
+	)
+}
 
-	return {
-		logical_thread_count = logical_thread_count,
-		generation_worker_count = generation_worker_count,
-		mesh_worker_count = mesh_worker_count,
-		chunk_work_budget = {
-			generation_requests_per_frame = generation_worker_count,
-			generation_results_per_frame = generation_worker_count,
-			mesh_requests_per_frame = mesh_worker_count * u32(RESOURCE_MESH_REQUESTS_PER_WORKER),
-			mesh_results_per_frame = mesh_worker_count,
-		},
+runtime_resource_config_make_generation_moderate :: proc() -> RuntimeResourceConfig {
+	logical_thread_count := resource_logical_thread_count_query()
+	background_thread_budget := runtime_background_thread_budget_make(logical_thread_count)
+	generation_worker_count := resource_u32_clamp(
+		(background_thread_budget + 1) / 2,
+		1,
+		u32(RESOURCE_GENERATION_WORKER_MAX),
+	)
+	mesh_worker_count := background_thread_budget - generation_worker_count
+	if mesh_worker_count < 1 {
+		mesh_worker_count = 1
 	}
+	return runtime_resource_config_make_with_worker_counts(
+		logical_thread_count,
+		generation_worker_count,
+		mesh_worker_count,
+	)
+}
+
+runtime_resource_config_make_for_policy :: proc(
+	policy: RuntimeResourcePolicy,
+) -> RuntimeResourceConfig {
+	switch policy {
+	case .Default_Dynamic_Generation_Budget:
+		return runtime_resource_config_boost_generation_budget(runtime_resource_config_make())
+	case .Default_Generation_Budget_Boosted:
+		return runtime_resource_config_boost_generation_budget(runtime_resource_config_make())
+	case .Default_Missing_First_Generation:
+		return runtime_resource_config_make()
+	case .Default_Mesh_Unblock_Generation:
+		return runtime_resource_config_make()
+	case .Default_Mesh_Unblock_Target_Order_Generation:
+		return runtime_resource_config_make()
+	case .Generation_Moderate_Budget_Preserved:
+		return runtime_resource_config_preserve_default_mesh_budget(
+			runtime_resource_config_make_generation_moderate(),
+		)
+	case .Generation_Biased_Budget_Preserved:
+		return runtime_resource_config_preserve_default_mesh_budget(
+			runtime_resource_config_make_generation_biased(),
+		)
+	case .Generation_Biased:
+		return runtime_resource_config_make_generation_biased()
+	case .Default:
+		return runtime_resource_config_make()
+	}
+	return runtime_resource_config_make()
+}
+
+runtime_dynamic_generation_budget_make :: proc() -> world.ChunkWorkBudget {
+	base_budget := runtime_resource_config_make().chunk_work_budget
+	boosted_budget :=
+		runtime_resource_config_boost_generation_budget(runtime_resource_config_make()).chunk_work_budget
+	async_metrics := async.metrics_snapshot()
+
+	high_pressure :=
+		async_metrics.generation_queue_depth >= RUNTIME_DYNAMIC_GEN_QUEUE_HIGH_THRESHOLD ||
+		async_metrics.generation_result_depth >= RUNTIME_DYNAMIC_GEN_RESULT_HIGH_THRESHOLD ||
+		async_metrics.mesh_queue_depth >= RUNTIME_DYNAMIC_MESH_QUEUE_HIGH_THRESHOLD ||
+		async_metrics.mesh_result_depth >= RUNTIME_DYNAMIC_MESH_RESULT_HIGH_THRESHOLD ||
+		state.chunks_dirty_remaining >= RUNTIME_DYNAMIC_DIRTY_HIGH_THRESHOLD
+	if high_pressure {
+		budget := boosted_budget
+		budget.generation_requests_per_frame = 1
+		return budget
+	}
+
+	medium_pressure :=
+		async_metrics.generation_queue_depth >= RUNTIME_DYNAMIC_GEN_QUEUE_MEDIUM_THRESHOLD ||
+		async_metrics.generation_result_depth >= RUNTIME_DYNAMIC_GEN_RESULT_MEDIUM_THRESHOLD ||
+		async_metrics.mesh_queue_depth >= RUNTIME_DYNAMIC_MESH_QUEUE_MEDIUM_THRESHOLD ||
+		async_metrics.mesh_result_depth >= RUNTIME_DYNAMIC_MESH_RESULT_MEDIUM_THRESHOLD ||
+		state.chunks_dirty_remaining >= RUNTIME_DYNAMIC_DIRTY_MEDIUM_THRESHOLD
+	if medium_pressure {
+		budget := boosted_budget
+		budget.generation_requests_per_frame = base_budget.generation_requests_per_frame
+		return budget
+	}
+
+	return boosted_budget
+}
+
+runtime_dynamic_budget_apply :: proc() {
+	if !runtime_resource_policy_uses_dynamic_generation_budget(state.resource_policy) {
+		return
+	}
+	world.chunk_work_budget_set(runtime_dynamic_generation_budget_make())
 }
 
 //////////////////////////////////////
@@ -737,6 +1538,11 @@ metrics_render_stats_apply :: proc(render_stats: gfx.RenderStats) {
 	state.deferred_geometry_count = render_stats.deferred_geometry_count
 	state.deferred_release_enqueued_total = render_stats.deferred_release_enqueued_total
 	state.deferred_release_completed_total = render_stats.deferred_release_completed_total
+	state.mesh_upload_count = render_stats.mesh_upload_count
+	state.mesh_upload_us = render_stats.mesh_upload_us
+	state.mesh_upload_vertex_bytes = render_stats.mesh_upload_vertex_bytes
+	state.mesh_upload_index_bytes = render_stats.mesh_upload_index_bytes
+	state.mesh_upload_bytes = render_stats.mesh_upload_bytes
 }
 
 metrics_frame_window_sample_make :: proc() -> bench.RuntimeFrameWindowSample {
@@ -750,16 +1556,43 @@ metrics_frame_window_sample_make :: proc() -> bench.RuntimeFrameWindowSample {
 		avg_ms = avg_ms,
 		min_ms = f64(state.frame_metrics_min_ms),
 		max_ms = f64(state.frame_metrics_max_ms),
+		frame_time_histogram = state.frame_metrics_frame_time_histogram,
 		chunks_generated = state.frame_metrics_chunks_generated,
 		chunks_generated_full = state.frame_metrics_chunks_generated_full,
 		chunks_generated_proxy = state.frame_metrics_chunks_generated_proxy,
 		chunks_refined_full = state.frame_metrics_chunks_refined_full,
 		chunks_prewarmed = state.frame_metrics_chunks_prewarmed,
+		generation_full_us = state.frame_metrics_generation_full_us,
+		generation_proxy_us = state.frame_metrics_generation_proxy_us,
+		generation_refined_full_us = state.frame_metrics_generation_refined_full_us,
+		generation_prewarm_us = state.frame_metrics_generation_prewarm_us,
+		generation_queue_depth_max = state.frame_metrics_generation_queue_depth_max,
+		generation_result_depth_max = state.frame_metrics_generation_result_depth_max,
+		generation_enqueue_failures = state.frame_metrics_generation_enqueue_failures,
+		generation_workers_busy_max = state.frame_metrics_generation_workers_busy_max,
+		generation_worker_jobs = state.frame_metrics_generation_worker_jobs,
+		generation_worker_busy_us = state.frame_metrics_generation_worker_busy_us,
+		mesh_queue_depth_max = state.frame_metrics_mesh_queue_depth_max,
+		mesh_result_depth_max = state.frame_metrics_mesh_result_depth_max,
+		mesh_enqueue_failures = state.frame_metrics_mesh_enqueue_failures,
+		mesh_workers_busy_max = state.frame_metrics_mesh_workers_busy_max,
+		mesh_worker_jobs = state.frame_metrics_mesh_worker_jobs,
+		mesh_worker_busy_us = state.frame_metrics_mesh_worker_busy_us,
+		mesh_result_worker_us = state.frame_metrics_mesh_result_worker_us,
 		chunks_evicted = state.frame_metrics_chunks_evicted,
 		mesh_submitted = state.frame_metrics_mesh_submitted,
 		mesh_committed = state.frame_metrics_mesh_committed,
 		mesh_uploaded = state.frame_metrics_mesh_uploaded,
+		mesh_empty = state.frame_metrics_mesh_empty,
+		mesh_upload_count = state.frame_metrics_mesh_upload_count,
+		mesh_upload_us = state.frame_metrics_mesh_upload_us,
+		mesh_upload_vertex_bytes = state.frame_metrics_mesh_upload_vertex_bytes,
+		mesh_upload_index_bytes = state.frame_metrics_mesh_upload_index_bytes,
+		mesh_upload_bytes = state.frame_metrics_mesh_upload_bytes,
 		dirty_remaining_max = state.frame_metrics_dirty_remaining_max,
+		dirty_meshable_max = state.frame_metrics_dirty_meshable_max,
+		dirty_dependency_blocked_max = state.frame_metrics_dirty_dependency_blocked_max,
+		dirty_outside_window_max = state.frame_metrics_dirty_outside_window_max,
 		draw_units_tested = state.frame_metrics_draw_units_tested,
 		draw_units_frustum_culled = state.frame_metrics_frustum_culled,
 		draw_units_occlusion_culled = state.frame_metrics_occlusion_culled,
@@ -777,6 +1610,7 @@ metrics_frame_window_reset :: proc() {
 	state.frame_metrics_sample_count = 0
 	state.frame_metrics_min_ms = 0
 	state.frame_metrics_max_ms = 0
+	state.frame_metrics_frame_time_histogram = {}
 	state.frame_metrics_chunks_generated = 0
 	state.frame_metrics_chunks_generated_full = 0
 	state.frame_metrics_chunks_generated_proxy = 0
@@ -786,16 +1620,46 @@ metrics_frame_window_reset :: proc() {
 	state.frame_metrics_generation_proxy_us = 0
 	state.frame_metrics_generation_refined_full_us = 0
 	state.frame_metrics_generation_prewarm_us = 0
+	state.frame_metrics_generation_queue_depth_max = 0
+	state.frame_metrics_generation_result_depth_max = 0
+	state.frame_metrics_generation_enqueue_failures = 0
+	state.frame_metrics_generation_workers_busy_max = 0
+	state.frame_metrics_generation_worker_jobs = 0
+	state.frame_metrics_generation_worker_busy_us = 0
+	state.frame_metrics_mesh_queue_depth_max = 0
+	state.frame_metrics_mesh_result_depth_max = 0
+	state.frame_metrics_mesh_enqueue_failures = 0
+	state.frame_metrics_mesh_workers_busy_max = 0
+	state.frame_metrics_mesh_worker_jobs = 0
+	state.frame_metrics_mesh_worker_busy_us = 0
+	state.frame_metrics_mesh_result_worker_us = 0
 	state.frame_metrics_chunks_evicted = 0
 	state.frame_metrics_mesh_submitted = 0
 	state.frame_metrics_mesh_committed = 0
 	state.frame_metrics_mesh_uploaded = 0
+	state.frame_metrics_mesh_empty = 0
+	state.frame_metrics_mesh_upload_count = 0
+	state.frame_metrics_mesh_upload_us = 0
+	state.frame_metrics_mesh_upload_vertex_bytes = 0
+	state.frame_metrics_mesh_upload_index_bytes = 0
+	state.frame_metrics_mesh_upload_bytes = 0
 	state.frame_metrics_dirty_remaining_max = 0
+	state.frame_metrics_dirty_meshable_max = 0
+	state.frame_metrics_dirty_dependency_blocked_max = 0
+	state.frame_metrics_dirty_outside_window_max = 0
 	state.frame_metrics_draw_units_tested = 0
 	state.frame_metrics_frustum_culled = 0
 	state.frame_metrics_occlusion_culled = 0
 	state.frame_metrics_draw_units_drawn = 0
 	state.frame_metrics_triangles_drawn = 0
+}
+
+metrics_async_baseline_reset :: proc() {
+	async_metrics := async.metrics_snapshot()
+	state.prev_async_generation_jobs_completed = async_metrics.generation_jobs_completed
+	state.prev_async_generation_worker_busy_us = async_metrics.generation_worker_busy_us
+	state.prev_async_mesh_jobs_completed = async_metrics.mesh_jobs_completed
+	state.prev_async_mesh_worker_busy_us = async_metrics.mesh_worker_busy_us
 }
 
 metrics_record_frame :: proc(dt: f32) {
@@ -826,7 +1690,17 @@ metrics_record_frame :: proc(dt: f32) {
 	state.prev_chunk_mesh_jobs_submitted = state.chunk_mesh_jobs_submitted
 	state.prev_chunk_mesh_results_committed = state.chunk_mesh_results_committed
 	state.prev_chunk_mesh_results_uploaded = state.chunk_mesh_results_uploaded
+	state.prev_chunk_mesh_results_empty = state.chunk_mesh_results_empty
+	state.prev_mesh_result_worker_us = state.mesh_result_worker_us
+	state.prev_mesh_upload_count = state.mesh_upload_count
+	state.prev_mesh_upload_us = state.mesh_upload_us
+	state.prev_mesh_upload_vertex_bytes = state.mesh_upload_vertex_bytes
+	state.prev_mesh_upload_index_bytes = state.mesh_upload_index_bytes
+	state.prev_mesh_upload_bytes = state.mesh_upload_bytes
 	state.prev_chunks_dirty_remaining = state.chunks_dirty_remaining
+	state.prev_chunks_dirty_meshable = state.chunks_dirty_meshable
+	state.prev_chunks_dirty_dependency_blocked = state.chunks_dirty_dependency_blocked
+	state.prev_chunks_dirty_outside_window = state.chunks_dirty_outside_window
 	state.prev_chunks_evicted = state.chunks_evicted
 	state.prev_deferred_geometry_count = state.deferred_geometry_count
 	state.prev_deferred_release_enqueued_total = state.deferred_release_enqueued_total
@@ -850,6 +1724,16 @@ metrics_record_frame :: proc(dt: f32) {
 		state.frame_metrics_accum_ms += state.current_frame_ms
 		state.frame_metrics_elapsed_ms += state.current_frame_ms
 		state.frame_metrics_sample_count += 1
+		frame_time_bin := int(
+			state.current_frame_ms / f32(bench.RUNTIME_FRAME_TIME_HISTOGRAM_BIN_MS),
+		)
+		if frame_time_bin < 0 {
+			frame_time_bin = 0
+		}
+		if frame_time_bin >= bench.RUNTIME_FRAME_TIME_HISTOGRAM_BIN_COUNT {
+			frame_time_bin = bench.RUNTIME_FRAME_TIME_HISTOGRAM_BIN_COUNT - 1
+		}
+		state.frame_metrics_frame_time_histogram[frame_time_bin] += 1
 		state.frame_metrics_chunks_generated += state.prev_chunks_generated
 		state.frame_metrics_chunks_generated_full += state.prev_chunks_generated_full
 		state.frame_metrics_chunks_generated_proxy += state.prev_chunks_generated_proxy
@@ -859,10 +1743,66 @@ metrics_record_frame :: proc(dt: f32) {
 		state.frame_metrics_generation_proxy_us += state.prev_generation_proxy_us
 		state.frame_metrics_generation_refined_full_us += state.prev_generation_refined_full_us
 		state.frame_metrics_generation_prewarm_us += state.prev_generation_prewarm_us
+		async_metrics := async.metrics_snapshot()
+		state.frame_metrics_generation_queue_depth_max = math.max(
+			state.frame_metrics_generation_queue_depth_max,
+			async_metrics.generation_queue_depth,
+		)
+		state.frame_metrics_generation_result_depth_max = math.max(
+			state.frame_metrics_generation_result_depth_max,
+			async_metrics.generation_result_depth,
+		)
+		state.frame_metrics_generation_enqueue_failures = async_metrics.generation_enqueue_failures
+		state.frame_metrics_generation_workers_busy_max = math.max(
+			state.frame_metrics_generation_workers_busy_max,
+			async_metrics.generation_workers_busy_max,
+		)
+		if async_metrics.generation_jobs_completed >= state.prev_async_generation_jobs_completed {
+			state.frame_metrics_generation_worker_jobs +=
+				async_metrics.generation_jobs_completed -
+				state.prev_async_generation_jobs_completed
+		}
+		if async_metrics.generation_worker_busy_us >= state.prev_async_generation_worker_busy_us {
+			state.frame_metrics_generation_worker_busy_us +=
+				async_metrics.generation_worker_busy_us -
+				state.prev_async_generation_worker_busy_us
+		}
+		state.prev_async_generation_jobs_completed = async_metrics.generation_jobs_completed
+		state.prev_async_generation_worker_busy_us = async_metrics.generation_worker_busy_us
+		state.frame_metrics_mesh_queue_depth_max = math.max(
+			state.frame_metrics_mesh_queue_depth_max,
+			async_metrics.mesh_queue_depth,
+		)
+		state.frame_metrics_mesh_result_depth_max = math.max(
+			state.frame_metrics_mesh_result_depth_max,
+			async_metrics.mesh_result_depth,
+		)
+		state.frame_metrics_mesh_enqueue_failures = async_metrics.mesh_enqueue_failures
+		state.frame_metrics_mesh_workers_busy_max = math.max(
+			state.frame_metrics_mesh_workers_busy_max,
+			async_metrics.mesh_workers_busy_max,
+		)
+		if async_metrics.mesh_jobs_completed >= state.prev_async_mesh_jobs_completed {
+			state.frame_metrics_mesh_worker_jobs +=
+				async_metrics.mesh_jobs_completed - state.prev_async_mesh_jobs_completed
+		}
+		if async_metrics.mesh_worker_busy_us >= state.prev_async_mesh_worker_busy_us {
+			state.frame_metrics_mesh_worker_busy_us +=
+				async_metrics.mesh_worker_busy_us - state.prev_async_mesh_worker_busy_us
+		}
+		state.prev_async_mesh_jobs_completed = async_metrics.mesh_jobs_completed
+		state.prev_async_mesh_worker_busy_us = async_metrics.mesh_worker_busy_us
 		state.frame_metrics_chunks_evicted += state.prev_chunks_evicted
 		state.frame_metrics_mesh_submitted += state.prev_chunk_mesh_jobs_submitted
 		state.frame_metrics_mesh_committed += state.prev_chunk_mesh_results_committed
 		state.frame_metrics_mesh_uploaded += state.prev_chunk_mesh_results_uploaded
+		state.frame_metrics_mesh_empty += state.prev_chunk_mesh_results_empty
+		state.frame_metrics_mesh_result_worker_us += state.prev_mesh_result_worker_us
+		state.frame_metrics_mesh_upload_count += state.prev_mesh_upload_count
+		state.frame_metrics_mesh_upload_us += state.prev_mesh_upload_us
+		state.frame_metrics_mesh_upload_vertex_bytes += state.prev_mesh_upload_vertex_bytes
+		state.frame_metrics_mesh_upload_index_bytes += state.prev_mesh_upload_index_bytes
+		state.frame_metrics_mesh_upload_bytes += state.prev_mesh_upload_bytes
 		state.frame_metrics_draw_units_tested += state.prev_terrain_draw_units_tested
 		state.frame_metrics_frustum_culled += state.prev_terrain_draw_units_frustum_culled
 		state.frame_metrics_occlusion_culled += state.prev_terrain_draw_units_occlusion_culled
@@ -871,6 +1811,18 @@ metrics_record_frame :: proc(dt: f32) {
 		state.frame_metrics_dirty_remaining_max = math.max(
 			state.frame_metrics_dirty_remaining_max,
 			state.prev_chunks_dirty_remaining,
+		)
+		state.frame_metrics_dirty_meshable_max = math.max(
+			state.frame_metrics_dirty_meshable_max,
+			state.prev_chunks_dirty_meshable,
+		)
+		state.frame_metrics_dirty_dependency_blocked_max = math.max(
+			state.frame_metrics_dirty_dependency_blocked_max,
+			state.prev_chunks_dirty_dependency_blocked,
+		)
+		state.frame_metrics_dirty_outside_window_max = math.max(
+			state.frame_metrics_dirty_outside_window_max,
+			state.prev_chunks_dirty_outside_window,
 		)
 	}
 
@@ -897,7 +1849,17 @@ metrics_record_frame :: proc(dt: f32) {
 	state.chunk_mesh_jobs_submitted = 0
 	state.chunk_mesh_results_committed = 0
 	state.chunk_mesh_results_uploaded = 0
+	state.chunk_mesh_results_empty = 0
+	state.mesh_result_worker_us = 0
+	state.mesh_upload_count = 0
+	state.mesh_upload_us = 0
+	state.mesh_upload_vertex_bytes = 0
+	state.mesh_upload_index_bytes = 0
+	state.mesh_upload_bytes = 0
 	state.chunks_dirty_remaining = 0
+	state.chunks_dirty_meshable = 0
+	state.chunks_dirty_dependency_blocked = 0
+	state.chunks_dirty_outside_window = 0
 	state.chunks_evicted = 0
 	state.deferred_geometry_count = 0
 	state.deferred_release_enqueued_total = 0
@@ -909,8 +1871,12 @@ metrics_record_frame :: proc(dt: f32) {
 /////////////////////////////////////
 
 init :: proc() {
+	init_with_resource_config(runtime_resource_config_make())
+}
+
+init_with_resource_config :: proc(resource_config: RuntimeResourceConfig) {
 	log.debug("Init application")
-	state.resource_config = runtime_resource_config_make()
+	state.resource_config = resource_config
 	log.debugf(
 		"Runtime resource config: logical_threads=%d generation_workers=%d mesh_workers=%d generation_request_budget=%d mesh_request_budget=%d",
 		state.resource_config.logical_thread_count,
@@ -1079,6 +2045,7 @@ update_camera_vectors :: proc() {
 
 update :: proc() {
 	cam := gfx.camera_get()
+	runtime_dynamic_budget_apply()
 	streaming_stats := world.streaming_update_budgeted(cam.position)
 	state.chunks_evicted = streaming_stats.chunks_evicted
 	state.chunks_generated = streaming_stats.chunks_generated
@@ -1093,7 +2060,12 @@ update :: proc() {
 	state.chunk_mesh_jobs_submitted = streaming_stats.chunk_mesh_jobs_submitted
 	state.chunk_mesh_results_committed = streaming_stats.chunk_mesh_results_committed
 	state.chunk_mesh_results_uploaded = streaming_stats.chunk_mesh_results_uploaded
+	state.chunk_mesh_results_empty = streaming_stats.chunk_mesh_results_empty
+	state.mesh_result_worker_us = streaming_stats.mesh_worker_us
 	state.chunks_dirty_remaining = streaming_stats.chunks_dirty_remaining
+	state.chunks_dirty_meshable = streaming_stats.chunks_dirty_meshable
+	state.chunks_dirty_dependency_blocked = streaming_stats.chunks_dirty_dependency_blocked
+	state.chunks_dirty_outside_window = streaming_stats.chunks_dirty_outside_window
 	camera.terrain_intersection_resolve(cam)
 	gfx.view_projection_update()
 }

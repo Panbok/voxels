@@ -697,6 +697,7 @@ chunk_store_commit_mesh_results :: proc(
 	stats := ChunkMeshBatchStats{}
 	for result in results {
 		stats.chunks_attempted += 1
+		stats.mesh_duration_us += result.mesh_duration_us
 
 		index, ok := chunk_store_find_index_by_coord(result.coord).?
 		if !ok {
@@ -1210,16 +1211,6 @@ chunk_store_mark_generated_neighbors_boundary_dirty :: proc(coord: world_async.C
 //////////////////////////////////////
 // Chunk Store Query Methods
 /////////////////////////////////////
-
-chunk_store_count_dirty_generated :: proc() -> u32 {
-	count: u32
-	for chunk in state.chunk_store.chunks[:state.chunk_store.chunk_count] {
-		if chunk.generation_state == .Generated && chunk.mesh_state == .Dirty {
-			count += 1
-		}
-	}
-	return count
-}
 
 chunk_solid_block_at_world_block :: proc(
 	chunk: ^Chunk,
